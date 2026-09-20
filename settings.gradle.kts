@@ -21,6 +21,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "RendererPlugin V2"
+rootProject.name = "Vulkan Fix"
 include(":app")
 includeBuild("dsl")

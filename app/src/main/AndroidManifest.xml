@@ -21,8 +21,8 @@
             android:resource="@string/config" />
 
         <meta-data
-            android:name="title_backend_type"
-            android:resource="@string/title_backend_type" />
+            android:name="title_enable_debug"
+            android:resource="@string/title_enable_debug" />
 
         <!--    兼容旧版渲染器插件架构    -->
         <meta-data

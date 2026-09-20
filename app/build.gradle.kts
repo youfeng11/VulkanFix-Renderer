@@ -16,13 +16,32 @@ plugins {
 android {
     namespace = "com.launchers_plugin.renderer"
     compileSdk = 34
+    ndkVersion = "30.0.14904198"
 
     defaultConfig {
-        applicationId = "com.launchers_plugin.renderer"
+        applicationId = "com.youfeng.plugin.vulkanfix"
         minSdk = 26
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        ndk {
+            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86"))
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags("-std=c++17")
+                arguments("-DANDROID_STL=c++_static")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "4.3.0"
+        }
     }
 
     buildFeatures {
@@ -41,73 +60,47 @@ android {
             isShrinkResources = true
         }
         configureEach {
-            //应用名
-            //app name
-            resValue("string","app_name","XXX Renderer")
-            //包名后缀
-            //package name Suffix
-            applicationIdSuffix = ".xxx"
-
-            //新架构的渲染器配置
+            // 新架构渲染器配置 (Vulkan Fix)
             resValue("string", "config", buildJsonValue {
                 renderer(
-                    displayName = "MobileGL Espryt",
+                    displayName = "Vulkan Fix",
                     rendererId = "opengles3",
-                    rendererGLPath = "libMobileGL.so",
-                    rendererEGLPath = nativePath("libMobileGL.so"),
-                    dlopenLibPaths = emptyList(), // 如需 dlopen，请尽量使用 nativePath 拼接库的绝对路径
+                    rendererGLPath = nativePath("libvulkan_fix.so"),
+                    rendererEGLPath = nativePath("libvulkan_fix.so"),
+                    dlopenLibPaths = emptyList(),
                     env = buildEnvs {
+                        normal("POJAV_VULKAN_WRAPPER", "1")
                         normal("LIBGL_ES", "3")
-
-                        // 可配置的环境变量
-                        // 根据预设值自由选择值的环境变量
-                        selectable(
-                            key = "MOBILEGL_BACKEND_TYPE",
-                            // 可选：该环境变量配置项的标题
-                            // 在 AndroidManifest.xml 中增加 meta-data，指向本插件的本地化资源
-                            title = RendererConfig.MetaString("title_backend_type"),
-                            items = RendererConfig.EnvItems(
-                                defaultValue = "DirectGLES", // 默认选择的环境变量（启动器默认将其视作可选项之一，不必添加到values）
-                                // 所有可选的环境变量配置项
-                                values = buildList {
-                                    add("DirectVulkan")
-                                }
-                            )
+                        toggleable(
+                            key = "VK_FIX_DEBUG",
+                            value = "1",
+                            toggle = false,
+                            title = RendererConfig.MetaString("title_enable_debug")
                         )
                     },
-                    minMCVer = null, // Minecraft 版本号，如 "1.17"
+                    minMCVer = null,
                     maxMCVer = null,
                 )
             })
 
-
             // 兼容旧版渲染器插件架构
             manifestPlaceholders.putAll(legacyManifest {
-                // 渲染器在启动器内显示的名称
-                displayName     = "MobileGL Espryt"
-                // 渲染器的具体定义
-                // 旧版格式为        名称:渲染器库名:EGL库名
-                // 此处方便配置拆解为  rendererName:rendererLib:eglLib
-                rendererName    = "MobileGL Espryt"
-                rendererLib     = "libMobileGL.so"
-                eglLib          = "/libMobileGL.so"
-                // 最小支持的MC版本
+                displayName     = "Vulkan Fix"
+                rendererName    = "Vulkan Fix"
+                rendererLib     = "libvulkan_fix.so"
+                eglLib          = "libvulkan_fix.so"
                 minMCVer        = ""
-                // 最大支持的MC版本
                 maxMCVer        = ""
 
-                // 特殊Env
-                // DLOPEN=libxxx.so 用于加载额外库文件
-                // 如果有多个库,可以使用","隔开,例如  DLOPEN=libxxx.so,libyyy.so
                 boatEnv {
-                    put("LIBGL_ES", "3")
                     put("POJAV_RENDERER", "opengles3")
-                    put("MOBILEGL_BACKEND_TYPE", "DirectGLES")
+                    put("POJAV_VULKAN_WRAPPER", "1")
+                    put("LIBGL_ES", "3")
                 }
                 pojavEnv {
-                    put("LIBGL_ES", "3")
                     put("POJAV_RENDERER", "opengles3")
-                    put("MOBILEGL_BACKEND_TYPE", "DirectGLES")
+                    put("POJAV_VULKAN_WRAPPER", "1")
+                    put("LIBGL_ES", "3")
                 }
             })
         }
