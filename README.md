@@ -1,163 +1,27 @@
-# RendererPlugin V2
+# Vulkan Fix
 
-安卓端 Minecraft Java 版启动器的**渲染器插件**模板  
-本模板提供了一套 Kotlin DSL，用于在构建阶段将渲染器配置序列化为 JSON 并写入应用字符串资源  
-启动器通过读取 `AndroidManifest.xml` 中的 `meta-data` 来识别插件并加载渲染器库  
+适用于 FCL/ZL2 等 Android 端 Minecraft 启动器的 Vulkan 增强与兼容层渲染插件。
 
-## 使用模板
+本插件作为轻量级、高性能的 Vulkan Layer 拦截分发层，旨在解决移动硬件底层驱动对桌面级 Vulkan 扩展与特定图形特性的缺失问题，确保基于 Vulkan 渲染器的新版 Minecraft 及其渲染模组在移动设备上稳定、流畅运行。
 
-在 [AndroidManifest.xml](./app/src/main/AndroidManifest.xml) 中添加插件标记
+## 使用说明
 
-```xml
-<!-- 引用新架构渲染器配置 -->
-<meta-data
-    android:name="fclPlugin_V2"
-    android:resource="@string/config" />
+**请确保使用该渲染器的版本的 图像API 已设置为Vulkan！！！**
 
-<!-- 可选：兼容旧版插件架构 -->
-<!-- 如插件支持新架构，启动器不会同时加载旧版本配置 -->
-<meta-data
-    android:name="fclPlugin"
-    android:value="true" />
+## License
+
 ```
+Copyright 2026 由风
 
-启用 `resValues`，否则配置字符串无法正常写入
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-```kotlin
-android {
-    buildFeatures {
-        resValues = true
-    }
-}
-```
+    http://www.apache.org/licenses/LICENSE-2.0
 
-放置渲染器库  
-将编译好的 `.so` 文件放入 `app/src/main/jniLibs/` 对应的 ABI 目录：
-
-``` txt
-app/src/main/jniLibs/
-├── arm64-v8a/
-│   └── libxxx.so
-├── armeabi-v7a/
-│   └── libxxx.so
-├── x86/
-│   └── libxxx.so
-└── x86_64/
-    └── libxxx.so
-```
-
-## DSL API 参考
-
-### `renderer(...)`
-
-
-| 参数                | 类型             | 说明                                   |
-|-------------------|----------------|--------------------------------------|
-| `displayName`     | `String`       | 在启动器中显示的渲染器名称                        |
-| `rendererId`      | `String`       | 渲染器 ID，启动器将其配置到环境变量 `POJAV_RENDERER` |
-| `rendererGLPath`  | `String`       | 渲染器库路径，使用 `nativePath()` 构建          |
-| `rendererEGLPath` | `String`       | 渲染器 EGL 库路径，使用 `nativePath()` 构建     |
-| `dlopenLibPaths`  | `List<String>` | 需要额外 dlopen 的库路径列表                   |
-| `env`             | `List<Env>`    | 环境变量列表，使用 `buildEnvs()` 构建           |
-| `minMCVer`        | `String?`      | 最低支持的 MC 版本号（如 `"1.17"`），`null` 不限制  |
-| `maxMCVer`        | `String?`      | 最高支持的 MC 版本号，`null` 不限制              |
-
-### `nativePath(string)`
-
-```kotlin
-nativePath("libXXX.so") // 返回 "**|libXXX.so"
-```
-
-将 `**|` 前缀拼接到库文件名前，启动器识别到此前缀后，会替换为插件实际的 `nativeLibraryDir` 路径
-
-### `buildEnvs {}`
-
-#### `normal(key, value)` 
-
-固定环境变量，不可配置
-
-```kotlin
-normal("LIB_MESA_NAME", nativePath("libMesa.so"))
-```
-
-#### `selectable(key, items, check?, title?)`
-
-可根据预设值自由选择值的环境变量，启动器会根据插件提供的选项，提供配置入口  
-**该环境变量的值不支持拼接 nativeLibraryDir 路径**
-
-```kotlin
-selectable(
-    key = "GL_VERSION",
-    title = RendererConfig.MetaString("title_gl_version"), // 可选：标题资源索引
-    check = true, // 可选：给是否启用该环境变量的按钮提供一个默认值（true：默认启用，false：默认禁用，null：不显示按钮，始终启用）
-    items = RendererConfig.EnvItems(
-        defaultValue = "4.6",       // 默认值，且会被视为列表的其中一项，不必重复添加到 values 中
-        values = buildList {        // 所有可选项
-            add("4.5")
-            add("3.3")
-        }
-    )
-)
-```
-
-`title` 用于在 [AndroidManifest.xml](./app/src/main/AndroidManifest.xml) 中关联插件本地化字符串资源，需要额外声明 meta-data：
-
-```xml
-<meta-data
-    android:name="title_gl_version"
-    android:resource="@string/title_gl_version" />
-```
-
-#### `customizable(key, defaultValue?, title?)`
-
-可由用户自行编辑值的环境变量，启动器将提供一个输入框，自定义该环境变量的值  
-该值为 null 或留空时，启动器不使用该环境变量  
-**该环境变量的值不支持拼接 nativeLibraryDir 路径**
-
-```kotlin
-customizable(
-    key = "GL_VERSION",
-    title = RendererConfig.MetaString("title_gl_version"), // 可选，见上
-    defaultValue = "4.6"
-)
-```
-
-### `toggleable(key, value, toggle, title?)`
-
-可开关的环境变量，启动器将提供一个开关，决定是否使用该环境变量
-
-```kotlin
-toggleable(
-    key = "CUSTOM_ENV",
-    value = "VALUE",
-    toggle = false, // 默认为 true
-    title = RendererConfig.MetaString("title_custom_env") // 可选，见上
-)
-```
-
-## DSL 插件
-
-如果已有自己的项目，只需引用 DSL 插件即可使用相同的配置 DSL
-
-### settings.gradle.kts
-```kotlin
-pluginManagement {
-    repositories {
-        maven("https://jitpack.io")
-        // ...
-    }
-}
-```
-
-### build.gradle.kts
-```kotlin
-buildscript {
-    dependencies {
-        classpath("com.github.ZalithLauncher.RendererPlugin-v2:dsl:1.0.1")
-    }
-}
-
-plugins {
-    // ...
-}
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 ```
