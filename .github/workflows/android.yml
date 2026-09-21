@@ -25,7 +25,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses || true
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Build with Gradle
         run: ./gradlew assembleDebug --build-cache --warning-mode all
