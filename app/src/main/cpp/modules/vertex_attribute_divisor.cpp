@@ -1,4 +1,8 @@
 #include "vertex_attribute_divisor.h"
+#include "layer_manager.h"
+#include "vk_pnext.h"
+
+REGISTER_LAYER_MODULE(VertexAttributeDivisorModule);
 
 VertexAttributeDivisorModule::VertexAttributeDivisorModule() {
     LOGI("Initialized Vulkan Vertex Attribute Divisor emulation module");

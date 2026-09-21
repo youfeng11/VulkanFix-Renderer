@@ -6,6 +6,38 @@ LayerManager& LayerManager::get() {
     return s_instance;
 }
 
+static std::vector<LayerManager::ModuleFactory>& get_registered_factories() {
+    static std::vector<LayerManager::ModuleFactory> s_factories;
+    return s_factories;
+}
+
+void LayerManager::register_module_factory(ModuleFactory factory) {
+    get_registered_factories().push_back(std::move(factory));
+}
+
+void LayerManager::init_registered_modules() {
+    for (const auto& factory : get_registered_factories()) {
+        register_module(factory());
+    }
+}
+
+void LayerManager::register_custom_proc(const char* name, PFN_vkVoidFunction proc) {
+    if (!name || !proc) return;
+    std::lock_guard<std::mutex> lock(m_proc_mutex);
+    m_custom_procs[name] = proc;
+    LOGI("LayerManager: registered custom proc '%s' -> %p", name, (void*)proc);
+}
+
+PFN_vkVoidFunction LayerManager::get_custom_proc(const char* name) {
+    if (!name) return NULL;
+    std::lock_guard<std::mutex> lock(m_proc_mutex);
+    auto it = m_custom_procs.find(name);
+    if (it != m_custom_procs.end()) {
+        return it->second;
+    }
+    return NULL;
+}
+
 void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
     std::lock_guard<std::mutex> lock(m_modules_mutex);
     LOGI("Registering Vulkan layer module: %s", module->get_name());

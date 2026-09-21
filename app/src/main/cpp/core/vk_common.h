@@ -32,4 +32,7 @@ static inline bool is_debug_logging() {
 #define VK_EXPORT __attribute__((visibility("default")))
 #define VK_LAYER_EXPORT __attribute__((visibility("default")))
 
+// Helper to safely format 32-bit (uint64_t) and 64-bit non-dispatchable Vulkan handles with %p
+#define VK_HANDLE(h) ((void*)(uintptr_t)(h))
+
 #endif // VK_COMMON_H

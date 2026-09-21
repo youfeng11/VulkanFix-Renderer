@@ -5,13 +5,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
+# Automatically discover all core and module sources
+file(GLOB_RECURSE CORE_SOURCES core/*.cpp)
+file(GLOB_RECURSE MODULE_SOURCES modules/*.cpp)
+
 add_library(vulkan_fix SHARED
-    core/driver_loader.cpp
-    core/layer_manager.cpp
-    modules/vertex_attribute_divisor.cpp
-    modules/fill_mode_non_solid.cpp
-    modules/push_descriptor.cpp
-    modules/dynamic_rendering.cpp
+    ${CORE_SOURCES}
+    ${MODULE_SOURCES}
     vulkan_entry.cpp
     egl_stubs.c
 )

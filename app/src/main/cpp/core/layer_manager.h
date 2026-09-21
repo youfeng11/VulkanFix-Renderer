@@ -162,6 +162,15 @@ public:
     void dispatch_cmd_end_rendering(
         VkCommandBuffer commandBuffer);
 
+    // Module auto-registration
+    using ModuleFactory = std::function<std::unique_ptr<IVulkanLayerModule>()>;
+    static void register_module_factory(ModuleFactory factory);
+    void init_registered_modules();
+
+    // Custom procedure address registry (allows modules to dynamically export Vulkan entry points)
+    void register_custom_proc(const char* name, PFN_vkVoidFunction proc);
+    PFN_vkVoidFunction get_custom_proc(const char* name);
+
 private:
     LayerManager() = default;
     ~LayerManager() = default;
@@ -171,9 +180,28 @@ private:
     std::vector<std::unique_ptr<IVulkanLayerModule>> m_modules;
     std::mutex m_modules_mutex;
 
+    std::mutex m_proc_mutex;
+    std::unordered_map<std::string, PFN_vkVoidFunction> m_custom_procs;
+
     std::mutex m_state_mutex;
     std::unordered_set<uint64_t> m_emulated_devices;
     std::atomic<VkDevice> m_primary_emulated_device{VK_NULL_HANDLE};
 };
+
+/**
+ * Macro to automatically register a layer module at startup.
+ * Usage in any module source file:
+ *   REGISTER_LAYER_MODULE(MyCustomModule);
+ */
+#define REGISTER_LAYER_MODULE(ModuleClass) \
+    namespace { \
+        struct AutoRegister_##ModuleClass { \
+            AutoRegister_##ModuleClass() { \
+                LayerManager::register_module_factory([]() -> std::unique_ptr<IVulkanLayerModule> { \
+                    return std::make_unique<ModuleClass>(); \
+                }); \
+            } \
+        } s_auto_register_##ModuleClass; \
+    }
 
 #endif // LAYER_MANAGER_H

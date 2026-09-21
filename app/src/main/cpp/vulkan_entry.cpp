@@ -1,10 +1,6 @@
 #include "vk_common.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
-#include "modules/vertex_attribute_divisor.h"
-#include "modules/fill_mode_non_solid.h"
-#include "modules/push_descriptor.h"
-#include "modules/dynamic_rendering.h"
 #include <string.h>
 #include <string>
 #include <dirent.h>
@@ -105,10 +101,7 @@ static void init_vulkan_layer() {
     init_real_vulkan();
 
     auto& manager = LayerManager::get();
-    manager.register_module(std::make_unique<VertexAttributeDivisorModule>());
-    manager.register_module(std::make_unique<FillModeNonSolidModule>());
-    manager.register_module(std::make_unique<PushDescriptorModule>());
-    manager.register_module(std::make_unique<DynamicRenderingModule>());
+    manager.init_registered_modules();
 
     register_vulkan_ptr();
     check_and_repair_options();
@@ -434,6 +427,9 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
 ) {
     if (!pName) return NULL;
 
+    PFN_vkVoidFunction custom_proc = LayerManager::get().get_custom_proc(pName);
+    if (custom_proc) return custom_proc;
+
     #define MATCH_FUNC(name) if (strcmp(pName, #name) == 0) return (PFN_vkVoidFunction) name
 
     MATCH_FUNC(vkGetInstanceProcAddr);
@@ -487,6 +483,9 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     const char* pName
 ) {
     if (!pName) return NULL;
+
+    PFN_vkVoidFunction custom_proc = LayerManager::get().get_custom_proc(pName);
+    if (custom_proc) return custom_proc;
 
     #define MATCH_FUNC(name) if (strcmp(pName, #name) == 0) return (PFN_vkVoidFunction) name
 

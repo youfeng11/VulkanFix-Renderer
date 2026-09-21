@@ -1,8 +1,11 @@
 #include "dynamic_rendering.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
+#include "vk_pnext.h"
 #include <string.h>
 #include <algorithm>
+
+REGISTER_LAYER_MODULE(DynamicRenderingModule);
 
 static inline void hash_combine(size_t& seed, size_t v) {
     seed ^= v + 0x9e3779b9 + (seed << 6) + (seed >> 2);
@@ -183,10 +186,8 @@ void DynamicRenderingModule::on_enumerate_device_extensions(
 ) {
     if (is_phys_device_native(physicalDevice)) return;
 
-    for (const auto& ext : extensions) {
-        if (strcmp(ext.extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) == 0) {
-            return;
-        }
+    if (vku::has_extension(extensions, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
+        return;
     }
 
     VkExtensionProperties prop{};
@@ -204,16 +205,9 @@ void DynamicRenderingModule::on_pre_get_features2(
     pUserData = nullptr;
     if (is_phys_device_native(physicalDevice) || !pFeatures) return;
 
-    void** curr = &pFeatures->pNext;
-    while (*curr != NULL) {
-        VkBaseOutStructure* header = (VkBaseOutStructure*) *curr;
-        if (header->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR) {
-            pUserData = header;
-            *curr = header->pNext;
-            LOG_OPT_DEBUG("DynamicRendering: unlinked VkPhysicalDeviceDynamicRenderingFeaturesKHR from pFeatures2->pNext");
-            break;
-        }
-        curr = (void**) &header->pNext;
+    pUserData = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR);
+    if (pUserData) {
+        LOG_OPT_DEBUG("DynamicRendering: unlinked VkPhysicalDeviceDynamicRenderingFeaturesKHR from pFeatures2->pNext");
     }
 }
 
@@ -226,23 +220,17 @@ void DynamicRenderingModule::on_post_get_features2(
     if (is_phys_device_native(physicalDevice)) return;
 
     if (pUserData) {
-        VkPhysicalDeviceDynamicRenderingFeaturesKHR* dynFeatures =
-            (VkPhysicalDeviceDynamicRenderingFeaturesKHR*) pUserData;
-        dynFeatures->pNext = pFeatures->pNext;
-        pFeatures->pNext = dynFeatures;
+        auto* dynFeatures = vku::relink_pnext<VkPhysicalDeviceDynamicRenderingFeaturesKHR>(
+            pFeatures->pNext, pUserData);
         dynFeatures->dynamicRendering = VK_TRUE;
         LOG_OPT_DEBUG("DynamicRendering: supplied dynamicRendering = VK_TRUE in VkPhysicalDeviceDynamicRenderingFeaturesKHR");
     }
 
-    void* curr = pFeatures->pNext;
-    while (curr != NULL) {
-        VkBaseOutStructure* h = (VkBaseOutStructure*) curr;
-        if (h->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES) {
-            VkPhysicalDeviceVulkan13Features* v13 = (VkPhysicalDeviceVulkan13Features*) h;
-            v13->dynamicRendering = VK_TRUE;
-            LOG_OPT_DEBUG("DynamicRendering: supplied dynamicRendering = VK_TRUE in VkPhysicalDeviceVulkan13Features");
-        }
-        curr = h->pNext;
+    auto* v13 = vku::find_pnext<VkPhysicalDeviceVulkan13Features>(
+        pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
+    if (v13) {
+        v13->dynamicRendering = VK_TRUE;
+        LOG_OPT_DEBUG("DynamicRendering: supplied dynamicRendering = VK_TRUE in VkPhysicalDeviceVulkan13Features");
     }
 }
 
@@ -257,38 +245,22 @@ void DynamicRenderingModule::on_pre_create_device(
     if (is_phys_device_native(physicalDevice) || !pCreateInfo) return;
 
     // 1. Strip extension from enabledExtensions
-    for (auto it = enabledExtensions.begin(); it != enabledExtensions.end(); ) {
-        if (strcmp(*it, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) == 0) {
-            it = enabledExtensions.erase(it);
-            LOGI("vkCreateDevice: stripped %s from enabledExtensions", VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-        } else {
-            ++it;
-        }
+    if (vku::strip_extension(enabledExtensions, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
+        LOGI("vkCreateDevice: stripped %s from enabledExtensions", VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
     }
 
     // 2. Unlink VkPhysicalDeviceDynamicRenderingFeaturesKHR from pCreateInfo->pNext
-    void** curr = (void**) &pCreateInfo->pNext;
-    while (*curr != NULL) {
-        VkBaseOutStructure* h = (VkBaseOutStructure*) *curr;
-        if (h->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR) {
-            pUserData = h;
-            *curr = h->pNext;
-            LOGI("vkCreateDevice: unlinked VkPhysicalDeviceDynamicRenderingFeaturesKHR from pNext");
-            break;
-        }
-        curr = (void**) &h->pNext;
+    pUserData = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR);
+    if (pUserData) {
+        LOGI("vkCreateDevice: unlinked VkPhysicalDeviceDynamicRenderingFeaturesKHR from pNext");
     }
 
     // 3. Disable dynamicRendering in VkPhysicalDeviceVulkan13Features if chained
-    void* c = (void*) pCreateInfo->pNext;
-    while (c != NULL) {
-        VkBaseOutStructure* h = (VkBaseOutStructure*) c;
-        if (h->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES) {
-            VkPhysicalDeviceVulkan13Features* v13 = (VkPhysicalDeviceVulkan13Features*) h;
-            v13->dynamicRendering = VK_FALSE;
-            LOGI("vkCreateDevice: disabled dynamicRendering in VkPhysicalDeviceVulkan13Features");
-        }
-        c = h->pNext;
+    auto* v13 = vku::find_pnext_mut<VkPhysicalDeviceVulkan13Features>(
+        pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
+    if (v13) {
+        v13->dynamicRendering = VK_FALSE;
+        LOGI("vkCreateDevice: disabled dynamicRendering in VkPhysicalDeviceVulkan13Features");
     }
 }
 
@@ -344,13 +316,8 @@ bool DynamicRenderingModule::needs_pipeline_interception(
 
     for (uint32_t i = 0; i < createInfoCount; ++i) {
         if (pCreateInfos[i].renderPass == VK_NULL_HANDLE) {
-            const void* curr = pCreateInfos[i].pNext;
-            while (curr != NULL) {
-                const VkBaseInStructure* h = (const VkBaseInStructure*) curr;
-                if (h->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR) {
-                    return true;
-                }
-                curr = h->pNext;
+            if (vku::has_pnext(pCreateInfos[i].pNext, VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR)) {
+                return true;
             }
         }
     }
@@ -472,17 +439,8 @@ void DynamicRenderingModule::on_modify_pipeline_create_info(
     if (is_device_native(device)) return;
     if (createInfo.renderPass != VK_NULL_HANDLE) return;
 
-    const VkPipelineRenderingCreateInfoKHR* renderingCreateInfo = nullptr;
-    const void* curr = createInfo.pNext;
-    while (curr != NULL) {
-        const VkBaseInStructure* h = (const VkBaseInStructure*) curr;
-        if (h->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR) {
-            renderingCreateInfo = (const VkPipelineRenderingCreateInfoKHR*) h;
-            break;
-        }
-        curr = h->pNext;
-    }
-
+    const auto* renderingCreateInfo = vku::find_pnext<VkPipelineRenderingCreateInfoKHR>(
+        createInfo.pNext, VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR);
     if (!renderingCreateInfo) return;
 
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
@@ -507,15 +465,8 @@ void DynamicRenderingModule::on_modify_pipeline_create_info(
     }
 
     // Unlink VkPipelineRenderingCreateInfoKHR from pNext
-    void** c = (void**) &createInfo.pNext;
-    while (*c != NULL) {
-        VkBaseOutStructure* node = (VkBaseOutStructure*) *c;
-        if (node->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR) {
-            *c = (void*) node->pNext;
-            LOG_OPT_DEBUG("Pipeline %u: unlinked VkPipelineRenderingCreateInfoKHR from pNext", index);
-            break;
-        }
-        c = (void**) &node->pNext;
+    if (vku::remove_pnext(createInfo.pNext, VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR)) {
+        LOG_OPT_DEBUG("Pipeline %u: unlinked VkPipelineRenderingCreateInfoKHR from pNext", index);
     }
 }
 
@@ -576,46 +527,31 @@ void DynamicRenderingModule::on_pre_begin_command_buffer(
 
     const VkCommandBufferInheritanceInfo* inInherit = pBeginInfo->pInheritanceInfo;
     if (inInherit->renderPass == VK_NULL_HANDLE) {
-        const void* curr = inInherit->pNext;
-        while (curr != NULL) {
-            const VkBaseInStructure* h = (const VkBaseInStructure*) curr;
-            if (h->sType == VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO_KHR) {
-                const VkCommandBufferInheritanceRenderingInfoKHR* rInfo =
-                    (const VkCommandBufferInheritanceRenderingInfoKHR*) h;
+        const auto* rInfo = vku::find_pnext<VkCommandBufferInheritanceRenderingInfoKHR>(
+            inInherit->pNext, VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO_KHR);
+        if (rInfo) {
+            VkRenderPass compatRP = get_or_create_pipeline_render_pass(
+                device,
+                rInfo->colorAttachmentCount,
+                rInfo->pColorAttachmentFormats,
+                rInfo->depthAttachmentFormat,
+                rInfo->stencilAttachmentFormat,
+                rInfo->rasterizationSamples,
+                rInfo->viewMask
+            );
 
-                VkRenderPass compatRP = get_or_create_pipeline_render_pass(
-                    device,
-                    rInfo->colorAttachmentCount,
-                    rInfo->pColorAttachmentFormats,
-                    rInfo->depthAttachmentFormat,
-                    rInfo->stencilAttachmentFormat,
-                    rInfo->rasterizationSamples,
-                    rInfo->viewMask
-                );
+            if (compatRP != VK_NULL_HANDLE) {
+                modInheritanceInfo = *inInherit;
+                modInheritanceInfo.renderPass = compatRP;
+                modInheritanceInfo.subpass = 0;
 
-                if (compatRP != VK_NULL_HANDLE) {
-                    modInheritanceInfo = *inInherit;
-                    modInheritanceInfo.renderPass = compatRP;
-                    modInheritanceInfo.subpass = 0;
+                vku::remove_pnext(modInheritanceInfo.pNext, VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO_KHR);
 
-                    void** c = (void**) &modInheritanceInfo.pNext;
-                    while (*c != NULL) {
-                        VkBaseOutStructure* node = (VkBaseOutStructure*) *c;
-                        if (node->sType == VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO_KHR) {
-                            *c = (void*) node->pNext;
-                            break;
-                        }
-                        c = (void**) &node->pNext;
-                    }
-
-                    modBeginInfo = *pBeginInfo;
-                    modBeginInfo.pInheritanceInfo = &modInheritanceInfo;
-                    modifiedInheritance = true;
-                    LOG_OPT_DEBUG("Secondary cmd %p: substituted inheritance renderPass %p", (void*)commandBuffer, (void*)(uintptr_t)compatRP);
-                }
-                break;
+                modBeginInfo = *pBeginInfo;
+                modBeginInfo.pInheritanceInfo = &modInheritanceInfo;
+                modifiedInheritance = true;
+                LOG_OPT_DEBUG("Secondary cmd %p: substituted inheritance renderPass %p", (void*)commandBuffer, (void*)(uintptr_t)compatRP);
             }
-            curr = h->pNext;
         }
     }
 }

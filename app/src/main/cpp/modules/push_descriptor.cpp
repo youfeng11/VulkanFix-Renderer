@@ -1,8 +1,11 @@
 #include "push_descriptor.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
+#include "vk_pnext.h"
 #include <string.h>
 #include <stdlib.h>
+
+REGISTER_LAYER_MODULE(PushDescriptorModule);
 
 PushDescriptorModule::PushDescriptorModule() {
     LOGI("Initialized Vulkan VK_KHR_push_descriptor module");
@@ -48,10 +51,8 @@ void PushDescriptorModule::on_enumerate_device_extensions(
 ) {
     if (is_device_native(physicalDevice)) return;
 
-    for (const auto& ext : extensions) {
-        if (strcmp(ext.extensionName, "VK_KHR_push_descriptor") == 0) {
-            return;
-        }
+    if (vku::has_extension(extensions, "VK_KHR_push_descriptor")) {
+        return;
     }
 
     VkExtensionProperties prop{};
@@ -67,16 +68,11 @@ void PushDescriptorModule::on_post_get_properties2(
     void* pUserData
 ) {
     if (!pProperties) return;
-    void* curr = pProperties->pNext;
-    while (curr != NULL) {
-        VkBaseOutStructure* header = (VkBaseOutStructure*) curr;
-        if (header->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR) {
-            VkPhysicalDevicePushDescriptorPropertiesKHR* props =
-                (VkPhysicalDevicePushDescriptorPropertiesKHR*) header;
-            props->maxPushDescriptors = 32;
-            LOG_OPT_DEBUG("PushDescriptor: set maxPushDescriptors = 32 in VkPhysicalDevicePushDescriptorPropertiesKHR");
-        }
-        curr = header->pNext;
+    auto* props = vku::find_pnext<VkPhysicalDevicePushDescriptorPropertiesKHR>(
+        pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR);
+    if (props) {
+        props->maxPushDescriptors = 32;
+        LOG_OPT_DEBUG("PushDescriptor: set maxPushDescriptors = 32 in VkPhysicalDevicePushDescriptorPropertiesKHR");
     }
 }
 
@@ -89,13 +85,8 @@ void PushDescriptorModule::on_pre_create_device(
 ) {
     if (is_device_native(physicalDevice)) return;
 
-    for (auto it = enabledExtensions.begin(); it != enabledExtensions.end();) {
-        if (strcmp(*it, "VK_KHR_push_descriptor") == 0) {
-            it = enabledExtensions.erase(it);
-            LOGI("vkCreateDevice: stripped VK_KHR_push_descriptor from enabledExtensions for physical device %p", physicalDevice);
-        } else {
-            ++it;
-        }
+    if (vku::strip_extension(enabledExtensions, "VK_KHR_push_descriptor")) {
+        LOGI("vkCreateDevice: stripped VK_KHR_push_descriptor from enabledExtensions for physical device %p", physicalDevice);
     }
 }
 

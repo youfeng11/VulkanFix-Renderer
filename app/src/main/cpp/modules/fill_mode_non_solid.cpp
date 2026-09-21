@@ -1,5 +1,9 @@
 #include "fill_mode_non_solid.h"
 #include "driver_loader.h"
+#include "layer_manager.h"
+#include "vk_pnext.h"
+
+REGISTER_LAYER_MODULE(FillModeNonSolidModule);
 
 FillModeNonSolidModule::FillModeNonSolidModule() {
     LOGI("Initialized Vulkan fillModeNonSolid emulation module");
