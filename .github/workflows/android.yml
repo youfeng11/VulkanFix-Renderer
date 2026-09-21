@@ -24,6 +24,9 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
+
       - name: Build with Gradle
         run: ./gradlew assembleDebug --build-cache --warning-mode all
 
