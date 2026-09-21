@@ -133,6 +133,35 @@ public:
         uint32_t set,
         const void* pData);
 
+    VkResult dispatch_create_image(
+        VkDevice device,
+        const VkImageCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkImage* pImage);
+
+    void dispatch_destroy_image(
+        VkDevice device,
+        VkImage image,
+        const VkAllocationCallbacks* pAllocator);
+
+    VkResult dispatch_create_image_view(
+        VkDevice device,
+        const VkImageViewCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkImageView* pView);
+
+    void dispatch_destroy_image_view(
+        VkDevice device,
+        VkImageView imageView,
+        const VkAllocationCallbacks* pAllocator);
+
+    void dispatch_cmd_begin_rendering(
+        VkCommandBuffer commandBuffer,
+        const VkRenderingInfo* pRenderingInfo);
+
+    void dispatch_cmd_end_rendering(
+        VkCommandBuffer commandBuffer);
+
 private:
     LayerManager() = default;
     ~LayerManager() = default;

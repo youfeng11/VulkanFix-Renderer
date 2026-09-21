@@ -140,7 +140,7 @@ void PushDescriptorModule::on_post_create_descriptor_set_layout(
         if (pCreateInfo->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR) {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_push_layouts.insert((uint64_t)(uintptr_t)setLayout);
-            LOGI("PushDescriptor: registered push descriptor layout %p", setLayout);
+            LOGI("PushDescriptor: registered push descriptor layout %p", (void*)(uintptr_t)setLayout);
         }
     }
 }
@@ -373,7 +373,7 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set(
 
     VkDescriptorSetLayout setLayout = get_set_layout(layout, set);
     if (setLayout == VK_NULL_HANDLE) {
-        LOGE("PushDescriptor: no descriptor set layout registered for pipeline layout %p set %u", layout, set);
+        LOGE("PushDescriptor: no descriptor set layout registered for pipeline layout %p set %u", (void*)(uintptr_t)layout, set);
         return false;
     }
 

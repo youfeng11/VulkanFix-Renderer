@@ -132,6 +132,13 @@ public:
         VkCommandBuffer commandBuffer,
         VkCommandBufferResetFlags flags) {}
 
+    virtual void on_pre_begin_command_buffer(
+        VkCommandBuffer commandBuffer,
+        const VkCommandBufferBeginInfo* pBeginInfo,
+        VkCommandBufferBeginInfo& modBeginInfo,
+        VkCommandBufferInheritanceInfo& modInheritanceInfo,
+        bool& modifiedInheritance) {}
+
     // 10. Descriptor Update Template:
     virtual void on_pre_create_descriptor_update_template(
         VkDevice device,
@@ -156,6 +163,35 @@ public:
         VkPipelineLayout layout,
         uint32_t set,
         const void* pData) { return false; }
+
+    // 12. Images and Image Views:
+    virtual void on_post_create_image(
+        VkDevice device,
+        const VkImageCreateInfo* pCreateInfo,
+        VkResult result,
+        VkImage image) {}
+
+    virtual void on_destroy_image(
+        VkDevice device,
+        VkImage image) {}
+
+    virtual void on_post_create_image_view(
+        VkDevice device,
+        const VkImageViewCreateInfo* pCreateInfo,
+        VkResult result,
+        VkImageView imageView) {}
+
+    virtual void on_destroy_image_view(
+        VkDevice device,
+        VkImageView imageView) {}
+
+    // 13. Dynamic Rendering:
+    virtual bool on_cmd_begin_rendering(
+        VkCommandBuffer commandBuffer,
+        const VkRenderingInfo* pRenderingInfo) { return false; }
+
+    virtual bool on_cmd_end_rendering(
+        VkCommandBuffer commandBuffer) { return false; }
 };
 
 #endif // LAYER_MODULE_H

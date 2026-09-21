@@ -11,6 +11,7 @@ add_library(vulkan_fix SHARED
     modules/vertex_attribute_divisor.cpp
     modules/fill_mode_non_solid.cpp
     modules/push_descriptor.cpp
+    modules/dynamic_rendering.cpp
     vulkan_entry.cpp
     egl_stubs.c
 )

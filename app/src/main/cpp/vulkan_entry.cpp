@@ -4,6 +4,7 @@
 #include "modules/vertex_attribute_divisor.h"
 #include "modules/fill_mode_non_solid.h"
 #include "modules/push_descriptor.h"
+#include "modules/dynamic_rendering.h"
 #include <string.h>
 #include <string>
 #include <dirent.h>
@@ -107,6 +108,7 @@ static void init_vulkan_layer() {
     manager.register_module(std::make_unique<VertexAttributeDivisorModule>());
     manager.register_module(std::make_unique<FillModeNonSolidModule>());
     manager.register_module(std::make_unique<PushDescriptorModule>());
+    manager.register_module(std::make_unique<DynamicRenderingModule>());
 
     register_vulkan_ptr();
     check_and_repair_options();
@@ -362,6 +364,66 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdPushDescriptorSetWithTemplateKHR(
         commandBuffer, descriptorUpdateTemplate, layout, set, pData);
 }
 
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateImage(
+    VkDevice device,
+    const VkImageCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkImage* pImage
+) {
+    return LayerManager::get().dispatch_create_image(device, pCreateInfo, pAllocator, pImage);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyImage(
+    VkDevice device,
+    VkImage image,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_image(device, image, pAllocator);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateImageView(
+    VkDevice device,
+    const VkImageViewCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkImageView* pView
+) {
+    return LayerManager::get().dispatch_create_image_view(device, pCreateInfo, pAllocator, pView);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyImageView(
+    VkDevice device,
+    VkImageView imageView,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_image_view(device, imageView, pAllocator);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBeginRendering(
+    VkCommandBuffer commandBuffer,
+    const VkRenderingInfo* pRenderingInfo
+) {
+    LayerManager::get().dispatch_cmd_begin_rendering(commandBuffer, pRenderingInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBeginRenderingKHR(
+    VkCommandBuffer commandBuffer,
+    const VkRenderingInfo* pRenderingInfo
+) {
+    LayerManager::get().dispatch_cmd_begin_rendering(commandBuffer, pRenderingInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdEndRendering(
+    VkCommandBuffer commandBuffer
+) {
+    LayerManager::get().dispatch_cmd_end_rendering(commandBuffer);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdEndRenderingKHR(
+    VkCommandBuffer commandBuffer
+) {
+    LayerManager::get().dispatch_cmd_end_rendering(commandBuffer);
+}
+
 // ============================================================================
 // Dispatchers: vkGetInstanceProcAddr & vkGetDeviceProcAddr
 // ============================================================================
@@ -401,6 +463,14 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     MATCH_FUNC(vkDestroyDescriptorUpdateTemplateKHR);
     MATCH_FUNC(vkCmdPushDescriptorSetKHR);
     MATCH_FUNC(vkCmdPushDescriptorSetWithTemplateKHR);
+    MATCH_FUNC(vkCreateImage);
+    MATCH_FUNC(vkDestroyImage);
+    MATCH_FUNC(vkCreateImageView);
+    MATCH_FUNC(vkDestroyImageView);
+    MATCH_FUNC(vkCmdBeginRendering);
+    MATCH_FUNC(vkCmdBeginRenderingKHR);
+    MATCH_FUNC(vkCmdEndRendering);
+    MATCH_FUNC(vkCmdEndRenderingKHR);
 
     #undef MATCH_FUNC
 
@@ -437,6 +507,14 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     MATCH_FUNC(vkDestroyDescriptorUpdateTemplateKHR);
     MATCH_FUNC(vkCmdPushDescriptorSetKHR);
     MATCH_FUNC(vkCmdPushDescriptorSetWithTemplateKHR);
+    MATCH_FUNC(vkCreateImage);
+    MATCH_FUNC(vkDestroyImage);
+    MATCH_FUNC(vkCreateImageView);
+    MATCH_FUNC(vkDestroyImageView);
+    MATCH_FUNC(vkCmdBeginRendering);
+    MATCH_FUNC(vkCmdBeginRenderingKHR);
+    MATCH_FUNC(vkCmdEndRendering);
+    MATCH_FUNC(vkCmdEndRenderingKHR);
 
     #undef MATCH_FUNC
 
@@ -508,8 +586,6 @@ FORWARD_DEV(VkResult, vkMapMemory, device, (VkDevice device, VkDeviceMemory memo
 FORWARD_DEV_VOID(vkUnmapMemory, device, (VkDevice device, VkDeviceMemory memory), (device, memory))
 FORWARD_DEV(VkResult, vkCreateBuffer, device, (VkDevice device, const VkBufferCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkBuffer* pBuffer), (device, pCreateInfo, pAllocator, pBuffer))
 FORWARD_DEV_VOID(vkDestroyBuffer, device, (VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* pAllocator), (device, buffer, pAllocator))
-FORWARD_DEV(VkResult, vkCreateImageView, device, (VkDevice device, const VkImageViewCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkImageView* pView), (device, pCreateInfo, pAllocator, pView))
-FORWARD_DEV_VOID(vkDestroyImageView, device, (VkDevice device, VkImageView imageView, const VkAllocationCallbacks* pAllocator), (device, imageView, pAllocator))
 FORWARD_DEV(VkResult, vkCreateShaderModule, device, (VkDevice device, const VkShaderModuleCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkShaderModule* pShaderModule), (device, pCreateInfo, pAllocator, pShaderModule))
 FORWARD_DEV_VOID(vkDestroyShaderModule, device, (VkDevice device, VkShaderModule shaderModule, const VkAllocationCallbacks* pAllocator), (device, shaderModule, pAllocator))
 FORWARD_DEV(VkResult, vkCreateRenderPass, device, (VkDevice device, const VkRenderPassCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkRenderPass* pRenderPass), (device, pCreateInfo, pAllocator, pRenderPass))

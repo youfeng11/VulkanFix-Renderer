@@ -489,11 +489,22 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     VkCommandBuffer commandBuffer,
     const VkCommandBufferBeginInfo* pBeginInfo
 ) {
+    if (!pBeginInfo) {
+        PFN_vkBeginCommandBuffer real_fn =
+            (PFN_vkBeginCommandBuffer) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkBeginCommandBuffer");
+        return real_fn ? real_fn(commandBuffer, pBeginInfo) : VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    VkCommandBufferBeginInfo modBeginInfo = *pBeginInfo;
+    VkCommandBufferInheritanceInfo modInheritanceInfo{};
+    bool has_mod_inheritance = false;
+
     {
         std::lock_guard<std::mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_begin_command_buffer(commandBuffer, pBeginInfo);
+                mod->on_pre_begin_command_buffer(commandBuffer, pBeginInfo, modBeginInfo, modInheritanceInfo, has_mod_inheritance);
             }
         }
     }
@@ -501,7 +512,7 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     PFN_vkBeginCommandBuffer real_fn =
         (PFN_vkBeginCommandBuffer) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkBeginCommandBuffer");
     if (real_fn) {
-        return real_fn(commandBuffer, pBeginInfo);
+        return real_fn(commandBuffer, has_mod_inheritance ? &modBeginInfo : pBeginInfo);
     }
     return VK_ERROR_INITIALIZATION_FAILED;
 }
@@ -635,4 +646,144 @@ void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
         }
     }
 }
+
+VkResult LayerManager::dispatch_create_image(
+    VkDevice device,
+    const VkImageCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkImage* pImage
+) {
+    PFN_vkCreateImage real_fn =
+        (PFN_vkCreateImage) get_real_proc(get_last_instance(), device, "vkCreateImage");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult res = real_fn(device, pCreateInfo, pAllocator, pImage);
+    if (res == VK_SUCCESS && pCreateInfo && pImage && *pImage != VK_NULL_HANDLE) {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_post_create_image(device, pCreateInfo, res, *pImage);
+            }
+        }
+    }
+    return res;
+}
+
+void LayerManager::dispatch_destroy_image(
+    VkDevice device,
+    VkImage image,
+    const VkAllocationCallbacks* pAllocator
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_destroy_image(device, image);
+            }
+        }
+    }
+
+    PFN_vkDestroyImage real_fn =
+        (PFN_vkDestroyImage) get_real_proc(get_last_instance(), device, "vkDestroyImage");
+    if (real_fn) {
+        real_fn(device, image, pAllocator);
+    }
+}
+
+VkResult LayerManager::dispatch_create_image_view(
+    VkDevice device,
+    const VkImageViewCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkImageView* pView
+) {
+    PFN_vkCreateImageView real_fn =
+        (PFN_vkCreateImageView) get_real_proc(get_last_instance(), device, "vkCreateImageView");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult res = real_fn(device, pCreateInfo, pAllocator, pView);
+    if (res == VK_SUCCESS && pCreateInfo && pView && *pView != VK_NULL_HANDLE) {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_post_create_image_view(device, pCreateInfo, res, *pView);
+            }
+        }
+    }
+    return res;
+}
+
+void LayerManager::dispatch_destroy_image_view(
+    VkDevice device,
+    VkImageView imageView,
+    const VkAllocationCallbacks* pAllocator
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_destroy_image_view(device, imageView);
+            }
+        }
+    }
+
+    PFN_vkDestroyImageView real_fn =
+        (PFN_vkDestroyImageView) get_real_proc(get_last_instance(), device, "vkDestroyImageView");
+    if (real_fn) {
+        real_fn(device, imageView, pAllocator);
+    }
+}
+
+void LayerManager::dispatch_cmd_begin_rendering(
+    VkCommandBuffer commandBuffer,
+    const VkRenderingInfo* pRenderingInfo
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_begin_rendering(commandBuffer, pRenderingInfo)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        PFN_vkCmdBeginRenderingKHR real_fn =
+            (PFN_vkCmdBeginRenderingKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdBeginRenderingKHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdBeginRenderingKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdBeginRendering");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, pRenderingInfo);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_end_rendering(
+    VkCommandBuffer commandBuffer
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_end_rendering(commandBuffer)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        PFN_vkCmdEndRenderingKHR real_fn =
+            (PFN_vkCmdEndRenderingKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdEndRenderingKHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdEndRenderingKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdEndRendering");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer);
+        }
+    }
+}
+
 
