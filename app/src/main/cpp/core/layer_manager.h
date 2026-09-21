@@ -62,6 +62,77 @@ public:
         const VkAllocationCallbacks* pAllocator,
         VkPipeline* pPipelines);
 
+    inline VkDevice get_primary_device() const {
+        return m_primary_emulated_device.load(std::memory_order_relaxed);
+    }
+
+    VkResult dispatch_create_descriptor_set_layout(
+        VkDevice device,
+        const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkDescriptorSetLayout* pSetLayout);
+
+    void dispatch_destroy_descriptor_set_layout(
+        VkDevice device,
+        VkDescriptorSetLayout descriptorSetLayout,
+        const VkAllocationCallbacks* pAllocator);
+
+    VkResult dispatch_create_pipeline_layout(
+        VkDevice device,
+        const VkPipelineLayoutCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkPipelineLayout* pPipelineLayout);
+
+    void dispatch_destroy_pipeline_layout(
+        VkDevice device,
+        VkPipelineLayout pipelineLayout,
+        const VkAllocationCallbacks* pAllocator);
+
+    VkResult dispatch_allocate_command_buffers(
+        VkDevice device,
+        const VkCommandBufferAllocateInfo* pAllocateInfo,
+        VkCommandBuffer* pCommandBuffers);
+
+    void dispatch_free_command_buffers(
+        VkDevice device,
+        VkCommandPool commandPool,
+        uint32_t commandBufferCount,
+        const VkCommandBuffer* pCommandBuffers);
+
+    VkResult dispatch_begin_command_buffer(
+        VkCommandBuffer commandBuffer,
+        const VkCommandBufferBeginInfo* pBeginInfo);
+
+    VkResult dispatch_reset_command_buffer(
+        VkCommandBuffer commandBuffer,
+        VkCommandBufferResetFlags flags);
+
+    VkResult dispatch_create_descriptor_update_template(
+        VkDevice device,
+        const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate);
+
+    void dispatch_destroy_descriptor_update_template(
+        VkDevice device,
+        VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+        const VkAllocationCallbacks* pAllocator);
+
+    void dispatch_cmd_push_descriptor_set(
+        VkCommandBuffer commandBuffer,
+        VkPipelineBindPoint pipelineBindPoint,
+        VkPipelineLayout layout,
+        uint32_t set,
+        uint32_t descriptorWriteCount,
+        const VkWriteDescriptorSet* pDescriptorWrites);
+
+    void dispatch_cmd_push_descriptor_set_with_template(
+        VkCommandBuffer commandBuffer,
+        VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+        VkPipelineLayout layout,
+        uint32_t set,
+        const void* pData);
+
 private:
     LayerManager() = default;
     ~LayerManager() = default;

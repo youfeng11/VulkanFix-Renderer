@@ -3,6 +3,7 @@
 #include "layer_manager.h"
 #include "modules/vertex_attribute_divisor.h"
 #include "modules/fill_mode_non_solid.h"
+#include "modules/push_descriptor.h"
 #include <string.h>
 #include <string>
 #include <dirent.h>
@@ -105,6 +106,7 @@ static void init_vulkan_layer() {
     auto& manager = LayerManager::get();
     manager.register_module(std::make_unique<VertexAttributeDivisorModule>());
     manager.register_module(std::make_unique<FillModeNonSolidModule>());
+    manager.register_module(std::make_unique<PushDescriptorModule>());
 
     register_vulkan_ptr();
     check_and_repair_options();
@@ -226,6 +228,140 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
 }
 
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
+    VkDevice device,
+    const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDescriptorSetLayout* pSetLayout
+) {
+    return LayerManager::get().dispatch_create_descriptor_set_layout(
+        device, pCreateInfo, pAllocator, pSetLayout);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyDescriptorSetLayout(
+    VkDevice device,
+    VkDescriptorSetLayout descriptorSetLayout,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_descriptor_set_layout(
+        device, descriptorSetLayout, pAllocator);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreatePipelineLayout(
+    VkDevice device,
+    const VkPipelineLayoutCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipelineLayout* pPipelineLayout
+) {
+    return LayerManager::get().dispatch_create_pipeline_layout(
+        device, pCreateInfo, pAllocator, pPipelineLayout);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyPipelineLayout(
+    VkDevice device,
+    VkPipelineLayout pipelineLayout,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_pipeline_layout(
+        device, pipelineLayout, pAllocator);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkAllocateCommandBuffers(
+    VkDevice device,
+    const VkCommandBufferAllocateInfo* pAllocateInfo,
+    VkCommandBuffer* pCommandBuffers
+) {
+    return LayerManager::get().dispatch_allocate_command_buffers(
+        device, pAllocateInfo, pCommandBuffers);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkFreeCommandBuffers(
+    VkDevice device,
+    VkCommandPool commandPool,
+    uint32_t commandBufferCount,
+    const VkCommandBuffer* pCommandBuffers
+) {
+    LayerManager::get().dispatch_free_command_buffers(
+        device, commandPool, commandBufferCount, pCommandBuffers);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkBeginCommandBuffer(
+    VkCommandBuffer commandBuffer,
+    const VkCommandBufferBeginInfo* pBeginInfo
+) {
+    return LayerManager::get().dispatch_begin_command_buffer(
+        commandBuffer, pBeginInfo);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkResetCommandBuffer(
+    VkCommandBuffer commandBuffer,
+    VkCommandBufferResetFlags flags
+) {
+    return LayerManager::get().dispatch_reset_command_buffer(
+        commandBuffer, flags);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
+    VkDevice device,
+    const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate
+) {
+    return LayerManager::get().dispatch_create_descriptor_update_template(
+        device, pCreateInfo, pAllocator, pDescriptorUpdateTemplate);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplateKHR(
+    VkDevice device,
+    const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate
+) {
+    return LayerManager::get().dispatch_create_descriptor_update_template(
+        device, pCreateInfo, pAllocator, pDescriptorUpdateTemplate);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyDescriptorUpdateTemplate(
+    VkDevice device,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_descriptor_update_template(
+        device, descriptorUpdateTemplate, pAllocator);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyDescriptorUpdateTemplateKHR(
+    VkDevice device,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_descriptor_update_template(
+        device, descriptorUpdateTemplate, pAllocator);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdPushDescriptorSetKHR(
+    VkCommandBuffer commandBuffer,
+    VkPipelineBindPoint pipelineBindPoint,
+    VkPipelineLayout layout,
+    uint32_t set,
+    uint32_t descriptorWriteCount,
+    const VkWriteDescriptorSet* pDescriptorWrites
+) {
+    LayerManager::get().dispatch_cmd_push_descriptor_set(
+        commandBuffer, pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdPushDescriptorSetWithTemplateKHR(
+    VkCommandBuffer commandBuffer,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    VkPipelineLayout layout,
+    uint32_t set,
+    const void* pData
+) {
+    LayerManager::get().dispatch_cmd_push_descriptor_set_with_template(
+        commandBuffer, descriptorUpdateTemplate, layout, set, pData);
+}
+
 // ============================================================================
 // Dispatchers: vkGetInstanceProcAddr & vkGetDeviceProcAddr
 // ============================================================================
@@ -251,6 +387,20 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     MATCH_FUNC(vkGetPhysicalDeviceProperties2);
     MATCH_FUNC(vkGetPhysicalDeviceProperties2KHR);
     MATCH_FUNC(vkCreateGraphicsPipelines);
+    MATCH_FUNC(vkCreateDescriptorSetLayout);
+    MATCH_FUNC(vkDestroyDescriptorSetLayout);
+    MATCH_FUNC(vkCreatePipelineLayout);
+    MATCH_FUNC(vkDestroyPipelineLayout);
+    MATCH_FUNC(vkAllocateCommandBuffers);
+    MATCH_FUNC(vkFreeCommandBuffers);
+    MATCH_FUNC(vkBeginCommandBuffer);
+    MATCH_FUNC(vkResetCommandBuffer);
+    MATCH_FUNC(vkCreateDescriptorUpdateTemplate);
+    MATCH_FUNC(vkCreateDescriptorUpdateTemplateKHR);
+    MATCH_FUNC(vkDestroyDescriptorUpdateTemplate);
+    MATCH_FUNC(vkDestroyDescriptorUpdateTemplateKHR);
+    MATCH_FUNC(vkCmdPushDescriptorSetKHR);
+    MATCH_FUNC(vkCmdPushDescriptorSetWithTemplateKHR);
 
     #undef MATCH_FUNC
 
@@ -273,6 +423,20 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     MATCH_FUNC(vkGetDeviceProcAddr);
     MATCH_FUNC(vkDestroyDevice);
     MATCH_FUNC(vkCreateGraphicsPipelines);
+    MATCH_FUNC(vkCreateDescriptorSetLayout);
+    MATCH_FUNC(vkDestroyDescriptorSetLayout);
+    MATCH_FUNC(vkCreatePipelineLayout);
+    MATCH_FUNC(vkDestroyPipelineLayout);
+    MATCH_FUNC(vkAllocateCommandBuffers);
+    MATCH_FUNC(vkFreeCommandBuffers);
+    MATCH_FUNC(vkBeginCommandBuffer);
+    MATCH_FUNC(vkResetCommandBuffer);
+    MATCH_FUNC(vkCreateDescriptorUpdateTemplate);
+    MATCH_FUNC(vkCreateDescriptorUpdateTemplateKHR);
+    MATCH_FUNC(vkDestroyDescriptorUpdateTemplate);
+    MATCH_FUNC(vkDestroyDescriptorUpdateTemplateKHR);
+    MATCH_FUNC(vkCmdPushDescriptorSetKHR);
+    MATCH_FUNC(vkCmdPushDescriptorSetWithTemplateKHR);
 
     #undef MATCH_FUNC
 
@@ -348,8 +512,6 @@ FORWARD_DEV(VkResult, vkCreateImageView, device, (VkDevice device, const VkImage
 FORWARD_DEV_VOID(vkDestroyImageView, device, (VkDevice device, VkImageView imageView, const VkAllocationCallbacks* pAllocator), (device, imageView, pAllocator))
 FORWARD_DEV(VkResult, vkCreateShaderModule, device, (VkDevice device, const VkShaderModuleCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkShaderModule* pShaderModule), (device, pCreateInfo, pAllocator, pShaderModule))
 FORWARD_DEV_VOID(vkDestroyShaderModule, device, (VkDevice device, VkShaderModule shaderModule, const VkAllocationCallbacks* pAllocator), (device, shaderModule, pAllocator))
-FORWARD_DEV(VkResult, vkCreatePipelineLayout, device, (VkDevice device, const VkPipelineLayoutCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkPipelineLayout* pPipelineLayout), (device, pCreateInfo, pAllocator, pPipelineLayout))
-FORWARD_DEV_VOID(vkDestroyPipelineLayout, device, (VkDevice device, VkPipelineLayout pipelineLayout, const VkAllocationCallbacks* pAllocator), (device, pipelineLayout, pAllocator))
 FORWARD_DEV(VkResult, vkCreateRenderPass, device, (VkDevice device, const VkRenderPassCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkRenderPass* pRenderPass), (device, pCreateInfo, pAllocator, pRenderPass))
 FORWARD_DEV_VOID(vkDestroyRenderPass, device, (VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator), (device, renderPass, pAllocator))
 FORWARD_DEV_VOID(vkDestroyPipeline, device, (VkDevice device, VkPipeline pipeline, const VkAllocationCallbacks* pAllocator), (device, pipeline, pAllocator))

@@ -85,6 +85,77 @@ public:
         VkGraphicsPipelineCreateInfo& createInfo,
         VkPipelineVertexInputStateCreateInfo& viState,
         std::vector<void*>& allocationsToFree) {}
+
+    // 7. Descriptor Set Layout:
+    virtual void on_pre_create_descriptor_set_layout(
+        VkDevice device,
+        VkDescriptorSetLayoutCreateInfo& createInfo) {}
+
+    virtual void on_post_create_descriptor_set_layout(
+        VkDevice device,
+        const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+        VkResult result,
+        VkDescriptorSetLayout setLayout) {}
+
+    virtual void on_destroy_descriptor_set_layout(
+        VkDevice device,
+        VkDescriptorSetLayout setLayout) {}
+
+    // 8. Pipeline Layout:
+    virtual void on_post_create_pipeline_layout(
+        VkDevice device,
+        const VkPipelineLayoutCreateInfo* pCreateInfo,
+        VkResult result,
+        VkPipelineLayout pipelineLayout) {}
+
+    virtual void on_destroy_pipeline_layout(
+        VkDevice device,
+        VkPipelineLayout pipelineLayout) {}
+
+    // 9. Command Buffers:
+    virtual void on_post_allocate_command_buffers(
+        VkDevice device,
+        const VkCommandBufferAllocateInfo* pAllocateInfo,
+        VkResult result,
+        VkCommandBuffer* pCommandBuffers) {}
+
+    virtual void on_free_command_buffers(
+        VkDevice device,
+        uint32_t count,
+        const VkCommandBuffer* pCommandBuffers) {}
+
+    virtual void on_begin_command_buffer(
+        VkCommandBuffer commandBuffer,
+        const VkCommandBufferBeginInfo* pBeginInfo) {}
+
+    virtual void on_reset_command_buffer(
+        VkCommandBuffer commandBuffer,
+        VkCommandBufferResetFlags flags) {}
+
+    // 10. Descriptor Update Template:
+    virtual void on_pre_create_descriptor_update_template(
+        VkDevice device,
+        VkDescriptorUpdateTemplateCreateInfo& createInfo) {}
+
+    virtual void on_destroy_descriptor_update_template(
+        VkDevice device,
+        VkDescriptorUpdateTemplate descriptorUpdateTemplate) {}
+
+    // 11. Push Descriptors:
+    virtual bool on_cmd_push_descriptor_set(
+        VkCommandBuffer commandBuffer,
+        VkPipelineBindPoint pipelineBindPoint,
+        VkPipelineLayout layout,
+        uint32_t set,
+        uint32_t descriptorWriteCount,
+        const VkWriteDescriptorSet* pDescriptorWrites) { return false; }
+
+    virtual bool on_cmd_push_descriptor_set_with_template(
+        VkCommandBuffer commandBuffer,
+        VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+        VkPipelineLayout layout,
+        uint32_t set,
+        const void* pData) { return false; }
 };
 
 #endif // LAYER_MODULE_H

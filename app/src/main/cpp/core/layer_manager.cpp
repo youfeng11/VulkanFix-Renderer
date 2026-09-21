@@ -337,3 +337,302 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
 
     return res;
 }
+
+VkResult LayerManager::dispatch_create_descriptor_set_layout(
+    VkDevice device,
+    const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDescriptorSetLayout* pSetLayout
+) {
+    PFN_vkCreateDescriptorSetLayout real_fn =
+        (PFN_vkCreateDescriptorSetLayout) get_real_proc(get_last_instance(), device, "vkCreateDescriptorSetLayout");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    if (!pCreateInfo) return real_fn(device, pCreateInfo, pAllocator, pSetLayout);
+
+    VkDescriptorSetLayoutCreateInfo modInfo = *pCreateInfo;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_pre_create_descriptor_set_layout(device, modInfo);
+            }
+        }
+    }
+
+    VkResult res = real_fn(device, &modInfo, pAllocator, pSetLayout);
+
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_post_create_descriptor_set_layout(device, pCreateInfo, res, (res == VK_SUCCESS && pSetLayout) ? *pSetLayout : VK_NULL_HANDLE);
+            }
+        }
+    }
+
+    return res;
+}
+
+void LayerManager::dispatch_destroy_descriptor_set_layout(
+    VkDevice device,
+    VkDescriptorSetLayout descriptorSetLayout,
+    const VkAllocationCallbacks* pAllocator
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_destroy_descriptor_set_layout(device, descriptorSetLayout);
+            }
+        }
+    }
+
+    PFN_vkDestroyDescriptorSetLayout real_fn =
+        (PFN_vkDestroyDescriptorSetLayout) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorSetLayout");
+    if (real_fn) {
+        real_fn(device, descriptorSetLayout, pAllocator);
+    }
+}
+
+VkResult LayerManager::dispatch_create_pipeline_layout(
+    VkDevice device,
+    const VkPipelineLayoutCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipelineLayout* pPipelineLayout
+) {
+    PFN_vkCreatePipelineLayout real_fn =
+        (PFN_vkCreatePipelineLayout) get_real_proc(get_last_instance(), device, "vkCreatePipelineLayout");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult res = real_fn(device, pCreateInfo, pAllocator, pPipelineLayout);
+
+    if (res == VK_SUCCESS && pCreateInfo && pPipelineLayout) {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_post_create_pipeline_layout(device, pCreateInfo, res, *pPipelineLayout);
+            }
+        }
+    }
+
+    return res;
+}
+
+void LayerManager::dispatch_destroy_pipeline_layout(
+    VkDevice device,
+    VkPipelineLayout pipelineLayout,
+    const VkAllocationCallbacks* pAllocator
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_destroy_pipeline_layout(device, pipelineLayout);
+            }
+        }
+    }
+
+    PFN_vkDestroyPipelineLayout real_fn =
+        (PFN_vkDestroyPipelineLayout) get_real_proc(get_last_instance(), device, "vkDestroyPipelineLayout");
+    if (real_fn) {
+        real_fn(device, pipelineLayout, pAllocator);
+    }
+}
+
+VkResult LayerManager::dispatch_allocate_command_buffers(
+    VkDevice device,
+    const VkCommandBufferAllocateInfo* pAllocateInfo,
+    VkCommandBuffer* pCommandBuffers
+) {
+    PFN_vkAllocateCommandBuffers real_fn =
+        (PFN_vkAllocateCommandBuffers) get_real_proc(get_last_instance(), device, "vkAllocateCommandBuffers");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult res = real_fn(device, pAllocateInfo, pCommandBuffers);
+
+    if (res == VK_SUCCESS && pAllocateInfo && pCommandBuffers) {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
+            }
+        }
+    }
+
+    return res;
+}
+
+void LayerManager::dispatch_free_command_buffers(
+    VkDevice device,
+    VkCommandPool commandPool,
+    uint32_t commandBufferCount,
+    const VkCommandBuffer* pCommandBuffers
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_free_command_buffers(device, commandBufferCount, pCommandBuffers);
+            }
+        }
+    }
+
+    PFN_vkFreeCommandBuffers real_fn =
+        (PFN_vkFreeCommandBuffers) get_real_proc(get_last_instance(), device, "vkFreeCommandBuffers");
+    if (real_fn) {
+        real_fn(device, commandPool, commandBufferCount, pCommandBuffers);
+    }
+}
+
+VkResult LayerManager::dispatch_begin_command_buffer(
+    VkCommandBuffer commandBuffer,
+    const VkCommandBufferBeginInfo* pBeginInfo
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_begin_command_buffer(commandBuffer, pBeginInfo);
+            }
+        }
+    }
+
+    PFN_vkBeginCommandBuffer real_fn =
+        (PFN_vkBeginCommandBuffer) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkBeginCommandBuffer");
+    if (real_fn) {
+        return real_fn(commandBuffer, pBeginInfo);
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VkResult LayerManager::dispatch_reset_command_buffer(
+    VkCommandBuffer commandBuffer,
+    VkCommandBufferResetFlags flags
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_reset_command_buffer(commandBuffer, flags);
+            }
+        }
+    }
+
+    PFN_vkResetCommandBuffer real_fn =
+        (PFN_vkResetCommandBuffer) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkResetCommandBuffer");
+    if (real_fn) {
+        return real_fn(commandBuffer, flags);
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VkResult LayerManager::dispatch_create_descriptor_update_template(
+    VkDevice device,
+    const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate
+) {
+    PFN_vkCreateDescriptorUpdateTemplate real_fn =
+        (PFN_vkCreateDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkCreateDescriptorUpdateTemplate");
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkCreateDescriptorUpdateTemplateKHR");
+    }
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    if (!pCreateInfo) return real_fn(device, pCreateInfo, pAllocator, pDescriptorUpdateTemplate);
+
+    VkDescriptorUpdateTemplateCreateInfo modInfo = *pCreateInfo;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_pre_create_descriptor_update_template(device, modInfo);
+            }
+        }
+    }
+
+    return real_fn(device, &modInfo, pAllocator, pDescriptorUpdateTemplate);
+}
+
+void LayerManager::dispatch_destroy_descriptor_update_template(
+    VkDevice device,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    const VkAllocationCallbacks* pAllocator
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_destroy_descriptor_update_template(device, descriptorUpdateTemplate);
+            }
+        }
+    }
+
+    PFN_vkDestroyDescriptorUpdateTemplate real_fn =
+        (PFN_vkDestroyDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorUpdateTemplate");
+    if (!real_fn) {
+        real_fn = (PFN_vkDestroyDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorUpdateTemplateKHR");
+    }
+    if (real_fn) {
+        real_fn(device, descriptorUpdateTemplate, pAllocator);
+    }
+}
+
+void LayerManager::dispatch_cmd_push_descriptor_set(
+    VkCommandBuffer commandBuffer,
+    VkPipelineBindPoint pipelineBindPoint,
+    VkPipelineLayout layout,
+    uint32_t set,
+    uint32_t descriptorWriteCount,
+    const VkWriteDescriptorSet* pDescriptorWrites
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_push_descriptor_set(
+                    commandBuffer, pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        PFN_vkCmdPushDescriptorSetKHR real_fn =
+            (PFN_vkCmdPushDescriptorSetKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdPushDescriptorSetKHR");
+        if (real_fn) {
+            real_fn(commandBuffer, pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
+    VkCommandBuffer commandBuffer,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    VkPipelineLayout layout,
+    uint32_t set,
+    const void* pData
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_push_descriptor_set_with_template(
+                    commandBuffer, descriptorUpdateTemplate, layout, set, pData)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        PFN_vkCmdPushDescriptorSetWithTemplateKHR real_fn =
+            (PFN_vkCmdPushDescriptorSetWithTemplateKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdPushDescriptorSetWithTemplateKHR");
+        if (real_fn) {
+            real_fn(commandBuffer, descriptorUpdateTemplate, layout, set, pData);
+        }
+    }
+}
+
