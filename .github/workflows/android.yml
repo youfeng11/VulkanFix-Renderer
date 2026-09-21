@@ -24,8 +24,10 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Accept Android SDK licenses
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'ndk;30.0.14904198 cmake;4.3.0'
 
       - name: Build with Gradle
         run: ./gradlew assembleDebug --build-cache --warning-mode all
