@@ -467,6 +467,13 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     MATCH_FUNC(vkCmdBeginRenderingKHR);
     MATCH_FUNC(vkCmdEndRendering);
     MATCH_FUNC(vkCmdEndRenderingKHR);
+    MATCH_FUNC(vkDestroyPipeline);
+    MATCH_FUNC(vkCmdBindPipeline);
+    MATCH_FUNC(vkCmdBindVertexBuffers);
+    MATCH_FUNC(vkCmdBindVertexBuffers2);
+    MATCH_FUNC(vkCmdBindVertexBuffers2EXT);
+    MATCH_FUNC(vkCmdDraw);
+    MATCH_FUNC(vkCmdDrawIndexed);
 
     #undef MATCH_FUNC
 
@@ -514,6 +521,13 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     MATCH_FUNC(vkCmdBeginRenderingKHR);
     MATCH_FUNC(vkCmdEndRendering);
     MATCH_FUNC(vkCmdEndRenderingKHR);
+    MATCH_FUNC(vkDestroyPipeline);
+    MATCH_FUNC(vkCmdBindPipeline);
+    MATCH_FUNC(vkCmdBindVertexBuffers);
+    MATCH_FUNC(vkCmdBindVertexBuffers2);
+    MATCH_FUNC(vkCmdBindVertexBuffers2EXT);
+    MATCH_FUNC(vkCmdDraw);
+    MATCH_FUNC(vkCmdDrawIndexed);
 
     #undef MATCH_FUNC
 
@@ -589,6 +603,75 @@ FORWARD_DEV(VkResult, vkCreateShaderModule, device, (VkDevice device, const VkSh
 FORWARD_DEV_VOID(vkDestroyShaderModule, device, (VkDevice device, VkShaderModule shaderModule, const VkAllocationCallbacks* pAllocator), (device, shaderModule, pAllocator))
 FORWARD_DEV(VkResult, vkCreateRenderPass, device, (VkDevice device, const VkRenderPassCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkRenderPass* pRenderPass), (device, pCreateInfo, pAllocator, pRenderPass))
 FORWARD_DEV_VOID(vkDestroyRenderPass, device, (VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator), (device, renderPass, pAllocator))
-FORWARD_DEV_VOID(vkDestroyPipeline, device, (VkDevice device, VkPipeline pipeline, const VkAllocationCallbacks* pAllocator), (device, pipeline, pAllocator))
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyPipeline(
+    VkDevice device,
+    VkPipeline pipeline,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_pipeline(device, pipeline, pAllocator);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBindPipeline(
+    VkCommandBuffer commandBuffer,
+    VkPipelineBindPoint pipelineBindPoint,
+    VkPipeline pipeline
+) {
+    LayerManager::get().dispatch_cmd_bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBindVertexBuffers(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstBinding,
+    uint32_t bindingCount,
+    const VkBuffer* pBuffers,
+    const VkDeviceSize* pOffsets
+) {
+    LayerManager::get().dispatch_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBindVertexBuffers2(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstBinding,
+    uint32_t bindingCount,
+    const VkBuffer* pBuffers,
+    const VkDeviceSize* pOffsets,
+    const VkDeviceSize* pSizes,
+    const VkDeviceSize* pStrides
+) {
+    LayerManager::get().dispatch_cmd_bind_vertex_buffers2(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBindVertexBuffers2EXT(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstBinding,
+    uint32_t bindingCount,
+    const VkBuffer* pBuffers,
+    const VkDeviceSize* pOffsets,
+    const VkDeviceSize* pSizes,
+    const VkDeviceSize* pStrides
+) {
+    LayerManager::get().dispatch_cmd_bind_vertex_buffers2(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDraw(
+    VkCommandBuffer commandBuffer,
+    uint32_t vertexCount,
+    uint32_t instanceCount,
+    uint32_t firstVertex,
+    uint32_t firstInstance
+) {
+    LayerManager::get().dispatch_cmd_draw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndexed(
+    VkCommandBuffer commandBuffer,
+    uint32_t indexCount,
+    uint32_t instanceCount,
+    uint32_t firstIndex,
+    int32_t vertexOffset,
+    uint32_t firstInstance
+) {
+    LayerManager::get().dispatch_cmd_draw_indexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
 
 } // extern "C"

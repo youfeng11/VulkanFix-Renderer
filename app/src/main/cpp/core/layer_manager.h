@@ -167,6 +167,49 @@ public:
     static void register_module_factory(ModuleFactory factory);
     void init_registered_modules();
 
+    void dispatch_destroy_pipeline(
+        VkDevice device,
+        VkPipeline pipeline,
+        const VkAllocationCallbacks* pAllocator);
+
+    void dispatch_cmd_bind_pipeline(
+        VkCommandBuffer commandBuffer,
+        VkPipelineBindPoint pipelineBindPoint,
+        VkPipeline pipeline);
+
+    void dispatch_cmd_bind_vertex_buffers(
+        VkCommandBuffer commandBuffer,
+        uint32_t firstBinding,
+        uint32_t bindingCount,
+        const VkBuffer* pBuffers,
+        const VkDeviceSize* pOffsets);
+
+    void dispatch_cmd_bind_vertex_buffers2(
+        VkCommandBuffer commandBuffer,
+        uint32_t firstBinding,
+        uint32_t bindingCount,
+        const VkBuffer* pBuffers,
+        const VkDeviceSize* pOffsets,
+        const VkDeviceSize* pSizes,
+        const VkDeviceSize* pStrides);
+
+    void dispatch_cmd_draw(
+        VkCommandBuffer commandBuffer,
+        uint32_t vertexCount,
+        uint32_t instanceCount,
+        uint32_t firstVertex,
+        uint32_t firstInstance);
+
+    void dispatch_cmd_draw_indexed(
+        VkCommandBuffer commandBuffer,
+        uint32_t indexCount,
+        uint32_t instanceCount,
+        uint32_t firstIndex,
+        int32_t vertexOffset,
+        uint32_t firstInstance);
+
+    VkDevice get_device_for_cmd(VkCommandBuffer cmd);
+
     // Custom procedure address registry (allows modules to dynamically export Vulkan entry points)
     void register_custom_proc(const char* name, PFN_vkVoidFunction proc);
     PFN_vkVoidFunction get_custom_proc(const char* name);
@@ -186,6 +229,10 @@ private:
     std::mutex m_state_mutex;
     std::unordered_set<uint64_t> m_emulated_devices;
     std::atomic<VkDevice> m_primary_emulated_device{VK_NULL_HANDLE};
+
+    std::mutex m_cmd_device_mutex;
+    std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
+    std::atomic<VkDevice> m_last_device{VK_NULL_HANDLE};
 };
 
 /**

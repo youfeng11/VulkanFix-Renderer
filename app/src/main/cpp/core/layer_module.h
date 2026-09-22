@@ -86,6 +86,16 @@ public:
         VkPipelineVertexInputStateCreateInfo& viState,
         std::vector<void*>& allocationsToFree) {}
 
+    virtual void on_post_create_graphics_pipelines(
+        VkDevice device,
+        uint32_t count,
+        const VkGraphicsPipelineCreateInfo* pCreateInfos,
+        const VkPipeline* pPipelines) {}
+
+    virtual void on_destroy_pipeline(
+        VkDevice device,
+        VkPipeline pipeline) {}
+
     // 7. Descriptor Set Layout:
     virtual void on_pre_create_descriptor_set_layout(
         VkDevice device,
@@ -138,6 +148,33 @@ public:
         VkCommandBufferBeginInfo& modBeginInfo,
         VkCommandBufferInheritanceInfo& modInheritanceInfo,
         bool& modifiedInheritance) {}
+
+    virtual void on_cmd_bind_pipeline(
+        VkCommandBuffer commandBuffer,
+        VkPipelineBindPoint pipelineBindPoint,
+        VkPipeline pipeline) {}
+
+    virtual void on_cmd_bind_vertex_buffers(
+        VkCommandBuffer commandBuffer,
+        uint32_t firstBinding,
+        uint32_t bindingCount,
+        const VkBuffer* pBuffers,
+        const VkDeviceSize* pOffsets) {}
+
+    virtual bool on_cmd_draw(
+        VkCommandBuffer commandBuffer,
+        uint32_t vertexCount,
+        uint32_t instanceCount,
+        uint32_t firstVertex,
+        uint32_t firstInstance) { return false; }
+
+    virtual bool on_cmd_draw_indexed(
+        VkCommandBuffer commandBuffer,
+        uint32_t indexCount,
+        uint32_t instanceCount,
+        uint32_t firstIndex,
+        int32_t vertexOffset,
+        uint32_t firstInstance) { return false; }
 
     // 10. Descriptor Update Template:
     virtual void on_pre_create_descriptor_update_template(

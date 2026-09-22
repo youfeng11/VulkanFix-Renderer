@@ -270,6 +270,7 @@ VkResult LayerManager::dispatch_create_device(
 
     if (res == VK_SUCCESS && pDevice && *pDevice != VK_NULL_HANDLE) {
         add_emulated_device(*pDevice);
+        m_last_device = *pDevice;
         LOGI("Created logical device %p with layer module emulation enabled", *pDevice);
     }
 
@@ -280,6 +281,20 @@ void LayerManager::dispatch_destroy_device(
     VkDevice device,
     const VkAllocationCallbacks* pAllocator
 ) {
+    {
+        std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
+        for (auto it = m_cmd_devices.begin(); it != m_cmd_devices.end(); ) {
+            if (it->second == device) {
+                it = m_cmd_devices.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (m_last_device.load() == device) {
+            m_last_device = VK_NULL_HANDLE;
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
@@ -360,6 +375,15 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
     }
 
     VkResult res = real_fn(device, pipelineCache, createInfoCount, modInfos, pAllocator, pPipelines);
+
+    if (res == VK_SUCCESS && pPipelines) {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_post_create_graphics_pipelines(device, createInfoCount, modInfos, pPipelines);
+            }
+        }
+    }
 
     for (void* ptr : allocationsToFree) {
         free(ptr);
@@ -484,6 +508,12 @@ VkResult LayerManager::dispatch_allocate_command_buffers(
     VkResult res = real_fn(device, pAllocateInfo, pCommandBuffers);
 
     if (res == VK_SUCCESS && pAllocateInfo && pCommandBuffers) {
+        {
+            std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
+            for (uint32_t i = 0; i < pAllocateInfo->commandBufferCount; i++) {
+                m_cmd_devices[(uint64_t)(uintptr_t)pCommandBuffers[i]] = device;
+            }
+        }
         std::lock_guard<std::mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
@@ -501,6 +531,13 @@ void LayerManager::dispatch_free_command_buffers(
     uint32_t commandBufferCount,
     const VkCommandBuffer* pCommandBuffers
 ) {
+    if (pCommandBuffers) {
+        std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
+        for (uint32_t i = 0; i < commandBufferCount; i++) {
+            m_cmd_devices.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
@@ -814,6 +851,177 @@ void LayerManager::dispatch_cmd_end_rendering(
         }
         if (real_fn) {
             real_fn(commandBuffer);
+        }
+    }
+}
+
+VkDevice LayerManager::get_device_for_cmd(VkCommandBuffer cmd) {
+    {
+        std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
+        auto it = m_cmd_devices.find((uint64_t)(uintptr_t)cmd);
+        if (it != m_cmd_devices.end()) {
+            return it->second;
+        }
+    }
+    return m_last_device.load();
+}
+
+void LayerManager::dispatch_destroy_pipeline(
+    VkDevice device,
+    VkPipeline pipeline,
+    const VkAllocationCallbacks* pAllocator
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_destroy_pipeline(device, pipeline);
+            }
+        }
+    }
+
+    PFN_vkDestroyPipeline real_fn = (PFN_vkDestroyPipeline)
+        get_real_proc(get_last_instance(), device, "vkDestroyPipeline");
+    if (real_fn) {
+        real_fn(device, pipeline, pAllocator);
+    }
+}
+
+void LayerManager::dispatch_cmd_bind_pipeline(
+    VkCommandBuffer commandBuffer,
+    VkPipelineBindPoint pipelineBindPoint,
+    VkPipeline pipeline
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_cmd_bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
+            }
+        }
+    }
+
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    PFN_vkCmdBindPipeline real_fn = (PFN_vkCmdBindPipeline)
+        get_real_proc(get_last_instance(), device, "vkCmdBindPipeline");
+    if (real_fn) {
+        real_fn(commandBuffer, pipelineBindPoint, pipeline);
+    }
+}
+
+void LayerManager::dispatch_cmd_bind_vertex_buffers(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstBinding,
+    uint32_t bindingCount,
+    const VkBuffer* pBuffers,
+    const VkDeviceSize* pOffsets
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+            }
+        }
+    }
+
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    PFN_vkCmdBindVertexBuffers real_fn = (PFN_vkCmdBindVertexBuffers)
+        get_real_proc(get_last_instance(), device, "vkCmdBindVertexBuffers");
+    if (real_fn) {
+        real_fn(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+    }
+}
+
+void LayerManager::dispatch_cmd_bind_vertex_buffers2(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstBinding,
+    uint32_t bindingCount,
+    const VkBuffer* pBuffers,
+    const VkDeviceSize* pOffsets,
+    const VkDeviceSize* pSizes,
+    const VkDeviceSize* pStrides
+) {
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+            }
+        }
+    }
+
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    PFN_vkCmdBindVertexBuffers2 real_fn = (PFN_vkCmdBindVertexBuffers2)
+        get_real_proc(get_last_instance(), device, "vkCmdBindVertexBuffers2");
+    if (!real_fn) {
+        real_fn = (PFN_vkCmdBindVertexBuffers2)
+            get_real_proc(get_last_instance(), device, "vkCmdBindVertexBuffers2EXT");
+    }
+    if (real_fn) {
+        real_fn(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
+    } else {
+        PFN_vkCmdBindVertexBuffers real_fn1 = (PFN_vkCmdBindVertexBuffers)
+            get_real_proc(get_last_instance(), device, "vkCmdBindVertexBuffers");
+        if (real_fn1) {
+            real_fn1(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_draw(
+    VkCommandBuffer commandBuffer,
+    uint32_t vertexCount,
+    uint32_t instanceCount,
+    uint32_t firstVertex,
+    uint32_t firstInstance
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_draw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdDraw real_fn = (PFN_vkCmdDraw)
+            get_real_proc(get_last_instance(), device, "vkCmdDraw");
+        if (real_fn) {
+            real_fn(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_draw_indexed(
+    VkCommandBuffer commandBuffer,
+    uint32_t indexCount,
+    uint32_t instanceCount,
+    uint32_t firstIndex,
+    int32_t vertexOffset,
+    uint32_t firstInstance
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_draw_indexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdDrawIndexed real_fn = (PFN_vkCmdDrawIndexed)
+            get_real_proc(get_last_instance(), device, "vkCmdDrawIndexed");
+        if (real_fn) {
+            real_fn(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
         }
     }
 }
