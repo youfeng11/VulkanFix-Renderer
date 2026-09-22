@@ -35,4 +35,12 @@ static inline bool is_debug_logging() {
 // Helper to safely format 32-bit (uint64_t) and 64-bit non-dispatchable Vulkan handles with %p
 #define VK_HANDLE(h) ((void*)(uintptr_t)(h))
 
+#ifndef PROJECT_VERSION_NAME
+#define PROJECT_VERSION_NAME "1.0"
+#endif
+
+#ifndef PROJECT_VERSION_CODE
+#define PROJECT_VERSION_CODE "1"
+#endif
+
 #endif // VK_COMMON_H

@@ -190,27 +190,34 @@ void LayerManager::dispatch_get_physical_device_properties2(
         if (real_fn1) {
             real_fn1(physicalDevice, &pProperties->properties);
         }
+    } else {
+        std::vector<void*> user_data(m_modules.size(), nullptr);
+        {
+            std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+            for (size_t i = 0; i < m_modules.size(); i++) {
+                if (m_modules[i]->is_enabled()) {
+                    m_modules[i]->on_pre_get_properties2(physicalDevice, pProperties, user_data[i]);
+                }
+            }
+        }
+
+        real_fn(physicalDevice, pProperties);
+
+        {
+            std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+            for (size_t i = 0; i < m_modules.size(); i++) {
+                if (m_modules[i]->is_enabled()) {
+                    m_modules[i]->on_post_get_properties2(physicalDevice, pProperties, user_data[i]);
+                }
+            }
+        }
         return;
     }
 
-    std::vector<void*> user_data(m_modules.size(), nullptr);
-    {
-        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
-        for (size_t i = 0; i < m_modules.size(); i++) {
-            if (m_modules[i]->is_enabled()) {
-                m_modules[i]->on_pre_get_properties2(physicalDevice, pProperties, user_data[i]);
-            }
-        }
-    }
-
-    real_fn(physicalDevice, pProperties);
-
-    {
-        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
-        for (size_t i = 0; i < m_modules.size(); i++) {
-            if (m_modules[i]->is_enabled()) {
-                m_modules[i]->on_post_get_properties2(physicalDevice, pProperties, user_data[i]);
-            }
+    std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+    for (size_t i = 0; i < m_modules.size(); i++) {
+        if (m_modules[i]->is_enabled()) {
+            m_modules[i]->on_post_get_properties2(physicalDevice, pProperties, nullptr);
         }
     }
 }

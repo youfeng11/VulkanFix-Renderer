@@ -165,10 +165,12 @@ public:
 
     bool is_phys_device_native(VkPhysicalDevice physDev);
     bool is_device_native(VkDevice device);
+    uint32_t get_phys_real_api_version(VkPhysicalDevice physDev);
 
 private:
     std::mutex m_mutex;
     std::unordered_map<uint64_t, bool> m_phys_native_support;
+    std::unordered_map<uint64_t, uint32_t> m_phys_real_api_version;
     std::unordered_map<uint64_t, bool> m_device_needs_emulation;
 
     // Timeline semaphores

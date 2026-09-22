@@ -56,31 +56,49 @@ bool Vulkan12Module::is_phys_device_native(VkPhysicalDevice physDev) {
         return it->second;
     }
 
-    const char* force_emu = getenv("FORCE_EMULATE_VULKAN_1_2");
-    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
-        LOGI("FORCE_EMULATE_VULKAN_1_2 set, enabling emulation for physical device %p", physDev);
-        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
-        return false;
-    }
-
-    bool native = false;
+    uint32_t realApiVer = VK_API_VERSION_1_0;
     PFN_vkGetPhysicalDeviceProperties real_props =
         (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
     if (real_props) {
         VkPhysicalDeviceProperties props{};
         real_props(physDev, &props);
-        if (props.apiVersion >= VK_API_VERSION_1_2) {
-            native = true;
-        }
+        realApiVer = props.apiVersion;
+    }
+    m_phys_real_api_version[(uint64_t)(uintptr_t)physDev] = realApiVer;
+
+    const char* force_emu = getenv("FORCE_EMULATE_VULKAN_1_2");
+    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
+        LOGI("FORCE_EMULATE_VULKAN_1_2 set, enabling emulation for physical device %p (real api: 0x%x)", physDev, realApiVer);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
+        return false;
     }
 
+    bool native = (realApiVer >= VK_API_VERSION_1_2);
     m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
     if (!native) {
-        LOGI("Physical device %p lacks native Vulkan 1.2 support, enabling Vulkan 1.2 emulation layer!", physDev);
+        LOGI("Physical device %p lacks native Vulkan 1.2 support (native api: 0x%x), enabling Vulkan 1.2 emulation layer!", physDev, realApiVer);
     } else {
-        LOGI("Physical device %p natively supports Vulkan 1.2+", physDev);
+        LOGI("Physical device %p natively supports Vulkan 1.2+ (native api: 0x%x)", physDev, realApiVer);
     }
     return native;
+}
+
+uint32_t Vulkan12Module::get_phys_real_api_version(VkPhysicalDevice physDev) {
+    if (!physDev) return VK_API_VERSION_1_0;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_phys_real_api_version.find((uint64_t)(uintptr_t)physDev);
+    if (it != m_phys_real_api_version.end()) {
+        return it->second;
+    }
+    PFN_vkGetPhysicalDeviceProperties real_props =
+        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+    if (real_props) {
+        VkPhysicalDeviceProperties props{};
+        real_props(physDev, &props);
+        m_phys_real_api_version[(uint64_t)(uintptr_t)physDev] = props.apiVersion;
+        return props.apiVersion;
+    }
+    return VK_API_VERSION_1_0;
 }
 
 bool Vulkan12Module::is_device_native(VkDevice device) {
@@ -162,6 +180,38 @@ void Vulkan12Module::on_post_get_properties2(
         pProperties->properties.apiVersion = VK_API_VERSION_1_2;
     }
 
+    char driverInfoStr[VK_MAX_DRIVER_INFO_SIZE];
+    uint32_t realApiVer = get_phys_real_api_version(physicalDevice);
+    uint32_t realMajor = VK_VERSION_MAJOR(realApiVer);
+    uint32_t realMinor = VK_VERSION_MINOR(realApiVer);
+    uint32_t realPatch = VK_VERSION_PATCH(realApiVer);
+
+    char realVerStr[32];
+    if (realPatch > 0) {
+        snprintf(realVerStr, sizeof(realVerStr), "%u.%u.%u", realMajor, realMinor, realPatch);
+    } else {
+        snprintf(realVerStr, sizeof(realVerStr), "%u.%u", realMajor, realMinor);
+    }
+
+    uint32_t emuApiVer = pProperties->properties.apiVersion;
+    uint32_t emuMajor = VK_VERSION_MAJOR(emuApiVer);
+    uint32_t emuMinor = VK_VERSION_MINOR(emuApiVer);
+    char emuVerStr[32];
+    if (VK_VERSION_PATCH(emuApiVer) > 0) {
+        snprintf(emuVerStr, sizeof(emuVerStr), "%u.%u.%u", emuMajor, emuMinor, VK_VERSION_PATCH(emuApiVer));
+    } else {
+        snprintf(emuVerStr, sizeof(emuVerStr), "%u.%u", emuMajor, emuMinor);
+    }
+
+    bool isNative = is_phys_device_native(physicalDevice);
+    if (isNative) {
+        snprintf(driverInfoStr, sizeof(driverInfoStr), "%s (%s), Vulkan %s",
+                 PROJECT_VERSION_NAME, PROJECT_VERSION_CODE, realVerStr);
+    } else {
+        snprintf(driverInfoStr, sizeof(driverInfoStr), "%s (%s), Vulkan %s (Vulkan %s)",
+                 PROJECT_VERSION_NAME, PROJECT_VERSION_CODE, emuVerStr, realVerStr);
+    }
+
     if (pUserData) {
         auto* unlinks = reinterpret_cast<PropertiesUnlinkData*>(pUserData);
 
@@ -169,8 +219,10 @@ void Vulkan12Module::on_post_get_properties2(
             auto* dp = vku::relink_pnext<VkPhysicalDeviceDriverProperties>(pProperties->pNext, unlinks->driver_props);
             if (dp) {
                 dp->driverID = VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
-                strncpy(dp->driverName, "Vulkan-1.2-Layer", VK_MAX_DRIVER_NAME_SIZE - 1);
-                strncpy(dp->driverInfo, "Emulated Vulkan 1.2 Compatibility Layer", VK_MAX_DRIVER_INFO_SIZE - 1);
+                strncpy(dp->driverName, "Vulkan Fix", VK_MAX_DRIVER_NAME_SIZE - 1);
+                dp->driverName[VK_MAX_DRIVER_NAME_SIZE - 1] = '\0';
+                strncpy(dp->driverInfo, driverInfoStr, VK_MAX_DRIVER_INFO_SIZE - 1);
+                dp->driverInfo[VK_MAX_DRIVER_INFO_SIZE - 1] = '\0';
                 dp->conformanceVersion = {1, 2, 0, 0};
             }
         }
@@ -179,8 +231,10 @@ void Vulkan12Module::on_post_get_properties2(
             auto* v12 = vku::relink_pnext<VkPhysicalDeviceVulkan12Properties>(pProperties->pNext, unlinks->v12_props);
             if (v12) {
                 v12->driverID = VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
-                strncpy(v12->driverName, "Vulkan-1.2-Layer", VK_MAX_DRIVER_NAME_SIZE - 1);
-                strncpy(v12->driverInfo, "Emulated Vulkan 1.2 Compatibility Layer", VK_MAX_DRIVER_INFO_SIZE - 1);
+                strncpy(v12->driverName, "Vulkan Fix", VK_MAX_DRIVER_NAME_SIZE - 1);
+                v12->driverName[VK_MAX_DRIVER_NAME_SIZE - 1] = '\0';
+                strncpy(v12->driverInfo, driverInfoStr, VK_MAX_DRIVER_INFO_SIZE - 1);
+                v12->driverInfo[VK_MAX_DRIVER_INFO_SIZE - 1] = '\0';
                 v12->conformanceVersion = {1, 2, 0, 0};
                 v12->denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
                 v12->roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
@@ -229,6 +283,23 @@ void Vulkan12Module::on_post_get_properties2(
         }
 
         delete unlinks;
+    }
+
+    auto* dp_existing = vku::find_pnext_mut<VkPhysicalDeviceDriverProperties>(
+        pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES);
+    if (dp_existing) {
+        strncpy(dp_existing->driverName, "Vulkan Fix", VK_MAX_DRIVER_NAME_SIZE - 1);
+        dp_existing->driverName[VK_MAX_DRIVER_NAME_SIZE - 1] = '\0';
+        strncpy(dp_existing->driverInfo, driverInfoStr, VK_MAX_DRIVER_INFO_SIZE - 1);
+        dp_existing->driverInfo[VK_MAX_DRIVER_INFO_SIZE - 1] = '\0';
+    }
+    auto* v12_existing = vku::find_pnext_mut<VkPhysicalDeviceVulkan12Properties>(
+        pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES);
+    if (v12_existing) {
+        strncpy(v12_existing->driverName, "Vulkan Fix", VK_MAX_DRIVER_NAME_SIZE - 1);
+        v12_existing->driverName[VK_MAX_DRIVER_NAME_SIZE - 1] = '\0';
+        strncpy(v12_existing->driverInfo, driverInfoStr, VK_MAX_DRIVER_INFO_SIZE - 1);
+        v12_existing->driverInfo[VK_MAX_DRIVER_INFO_SIZE - 1] = '\0';
     }
 }
 
