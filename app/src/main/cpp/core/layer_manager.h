@@ -209,6 +209,50 @@ public:
         uint32_t firstInstance);
 
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
+    VkDevice get_device_for_queue(VkQueue queue);
+
+    void dispatch_get_device_queue(
+        VkDevice device,
+        uint32_t queueFamilyIndex,
+        uint32_t queueIndex,
+        VkQueue* pQueue);
+
+    void dispatch_get_device_queue2(
+        VkDevice device,
+        const VkDeviceQueueInfo2* pQueueInfo,
+        VkQueue* pQueue);
+
+    void dispatch_cmd_set_event2(
+        VkCommandBuffer commandBuffer,
+        VkEvent event,
+        const VkDependencyInfo* pDependencyInfo);
+
+    void dispatch_cmd_reset_event2(
+        VkCommandBuffer commandBuffer,
+        VkEvent event,
+        VkPipelineStageFlags2 stageMask);
+
+    void dispatch_cmd_wait_events2(
+        VkCommandBuffer commandBuffer,
+        uint32_t eventCount,
+        const VkEvent* pEvents,
+        const VkDependencyInfo* pDependencyInfos);
+
+    void dispatch_cmd_pipeline_barrier2(
+        VkCommandBuffer commandBuffer,
+        const VkDependencyInfo* pDependencyInfo);
+
+    void dispatch_cmd_write_timestamp2(
+        VkCommandBuffer commandBuffer,
+        VkPipelineStageFlags2 stage,
+        VkQueryPool queryPool,
+        uint32_t query);
+
+    VkResult dispatch_queue_submit2(
+        VkQueue queue,
+        uint32_t submitCount,
+        const VkSubmitInfo2* pSubmits,
+        VkFence fence);
 
     // Custom procedure address registry (allows modules to dynamically export Vulkan entry points)
     void register_custom_proc(const char* name, PFN_vkVoidFunction proc);
@@ -232,6 +276,7 @@ private:
 
     std::mutex m_cmd_device_mutex;
     std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
+    std::unordered_map<uint64_t, VkDevice> m_queue_devices;
     std::atomic<VkDevice> m_last_device{VK_NULL_HANDLE};
 };
 

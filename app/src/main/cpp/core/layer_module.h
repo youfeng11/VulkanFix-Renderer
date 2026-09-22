@@ -229,6 +229,40 @@ public:
 
     virtual bool on_cmd_end_rendering(
         VkCommandBuffer commandBuffer) { return false; }
+
+    // 14. Synchronization2:
+    virtual bool on_cmd_set_event2(
+        VkCommandBuffer commandBuffer,
+        VkEvent event,
+        const VkDependencyInfo* pDependencyInfo) { return false; }
+
+    virtual bool on_cmd_reset_event2(
+        VkCommandBuffer commandBuffer,
+        VkEvent event,
+        VkPipelineStageFlags2 stageMask) { return false; }
+
+    virtual bool on_cmd_wait_events2(
+        VkCommandBuffer commandBuffer,
+        uint32_t eventCount,
+        const VkEvent* pEvents,
+        const VkDependencyInfo* pDependencyInfos) { return false; }
+
+    virtual bool on_cmd_pipeline_barrier2(
+        VkCommandBuffer commandBuffer,
+        const VkDependencyInfo* pDependencyInfo) { return false; }
+
+    virtual bool on_cmd_write_timestamp2(
+        VkCommandBuffer commandBuffer,
+        VkPipelineStageFlags2 stage,
+        VkQueryPool queryPool,
+        uint32_t query) { return false; }
+
+    virtual bool on_queue_submit2(
+        VkQueue queue,
+        uint32_t submitCount,
+        const VkSubmitInfo2* pSubmits,
+        VkFence fence,
+        VkResult& outResult) { return false; }
 };
 
 #endif // LAYER_MODULE_H

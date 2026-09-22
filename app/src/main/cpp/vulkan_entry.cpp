@@ -474,6 +474,20 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     MATCH_FUNC(vkCmdBindVertexBuffers2EXT);
     MATCH_FUNC(vkCmdDraw);
     MATCH_FUNC(vkCmdDrawIndexed);
+    MATCH_FUNC(vkGetDeviceQueue);
+    MATCH_FUNC(vkGetDeviceQueue2);
+    MATCH_FUNC(vkCmdSetEvent2);
+    MATCH_FUNC(vkCmdSetEvent2KHR);
+    MATCH_FUNC(vkCmdResetEvent2);
+    MATCH_FUNC(vkCmdResetEvent2KHR);
+    MATCH_FUNC(vkCmdWaitEvents2);
+    MATCH_FUNC(vkCmdWaitEvents2KHR);
+    MATCH_FUNC(vkCmdPipelineBarrier2);
+    MATCH_FUNC(vkCmdPipelineBarrier2KHR);
+    MATCH_FUNC(vkCmdWriteTimestamp2);
+    MATCH_FUNC(vkCmdWriteTimestamp2KHR);
+    MATCH_FUNC(vkQueueSubmit2);
+    MATCH_FUNC(vkQueueSubmit2KHR);
 
     #undef MATCH_FUNC
 
@@ -528,6 +542,20 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     MATCH_FUNC(vkCmdBindVertexBuffers2EXT);
     MATCH_FUNC(vkCmdDraw);
     MATCH_FUNC(vkCmdDrawIndexed);
+    MATCH_FUNC(vkGetDeviceQueue);
+    MATCH_FUNC(vkGetDeviceQueue2);
+    MATCH_FUNC(vkCmdSetEvent2);
+    MATCH_FUNC(vkCmdSetEvent2KHR);
+    MATCH_FUNC(vkCmdResetEvent2);
+    MATCH_FUNC(vkCmdResetEvent2KHR);
+    MATCH_FUNC(vkCmdWaitEvents2);
+    MATCH_FUNC(vkCmdWaitEvents2KHR);
+    MATCH_FUNC(vkCmdPipelineBarrier2);
+    MATCH_FUNC(vkCmdPipelineBarrier2KHR);
+    MATCH_FUNC(vkCmdWriteTimestamp2);
+    MATCH_FUNC(vkCmdWriteTimestamp2KHR);
+    MATCH_FUNC(vkQueueSubmit2);
+    MATCH_FUNC(vkQueueSubmit2KHR);
 
     #undef MATCH_FUNC
 
@@ -589,7 +617,22 @@ FORWARD_INST(void, vkGetPhysicalDeviceQueueFamilyProperties, (VkPhysicalDevice p
 FORWARD_INST(void, vkGetPhysicalDeviceMemoryProperties, (VkPhysicalDevice physDev, VkPhysicalDeviceMemoryProperties* pProps), (physDev, pProps))
 FORWARD_INST(VkResult, vkEnumerateDeviceLayerProperties, (VkPhysicalDevice physDev, uint32_t* pCount, VkLayerProperties* pProps), (physDev, pCount, pProps))
 
-FORWARD_DEV_VOID(vkGetDeviceQueue, device, (VkDevice device, uint32_t queueFamilyIndex, uint32_t queueIndex, VkQueue* pQueue), (device, queueFamilyIndex, queueIndex, pQueue))
+VK_LAYER_EXPORT void VKAPI_CALL vkGetDeviceQueue(
+    VkDevice device,
+    uint32_t queueFamilyIndex,
+    uint32_t queueIndex,
+    VkQueue* pQueue
+) {
+    LayerManager::get().dispatch_get_device_queue(device, queueFamilyIndex, queueIndex, pQueue);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetDeviceQueue2(
+    VkDevice device,
+    const VkDeviceQueueInfo2* pQueueInfo,
+    VkQueue* pQueue
+) {
+    LayerManager::get().dispatch_get_device_queue2(device, pQueueInfo, pQueue);
+}
 FORWARD_QUEUE(VkResult, vkQueueSubmit, (VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits, VkFence fence), (queue, submitCount, pSubmits, fence))
 FORWARD_QUEUE(VkResult, vkQueueWaitIdle, (VkQueue queue), (queue))
 FORWARD_DEV(VkResult, vkDeviceWaitIdle, device, (VkDevice device), (device))
@@ -672,6 +715,106 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndexed(
     uint32_t firstInstance
 ) {
     LayerManager::get().dispatch_cmd_draw_indexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetEvent2(
+    VkCommandBuffer commandBuffer,
+    VkEvent event,
+    const VkDependencyInfo* pDependencyInfo
+) {
+    LayerManager::get().dispatch_cmd_set_event2(commandBuffer, event, pDependencyInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetEvent2KHR(
+    VkCommandBuffer commandBuffer,
+    VkEvent event,
+    const VkDependencyInfo* pDependencyInfo
+) {
+    LayerManager::get().dispatch_cmd_set_event2(commandBuffer, event, pDependencyInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdResetEvent2(
+    VkCommandBuffer commandBuffer,
+    VkEvent event,
+    VkPipelineStageFlags2 stageMask
+) {
+    LayerManager::get().dispatch_cmd_reset_event2(commandBuffer, event, stageMask);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdResetEvent2KHR(
+    VkCommandBuffer commandBuffer,
+    VkEvent event,
+    VkPipelineStageFlags2 stageMask
+) {
+    LayerManager::get().dispatch_cmd_reset_event2(commandBuffer, event, stageMask);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdWaitEvents2(
+    VkCommandBuffer commandBuffer,
+    uint32_t eventCount,
+    const VkEvent* pEvents,
+    const VkDependencyInfo* pDependencyInfos
+) {
+    LayerManager::get().dispatch_cmd_wait_events2(commandBuffer, eventCount, pEvents, pDependencyInfos);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdWaitEvents2KHR(
+    VkCommandBuffer commandBuffer,
+    uint32_t eventCount,
+    const VkEvent* pEvents,
+    const VkDependencyInfo* pDependencyInfos
+) {
+    LayerManager::get().dispatch_cmd_wait_events2(commandBuffer, eventCount, pEvents, pDependencyInfos);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdPipelineBarrier2(
+    VkCommandBuffer commandBuffer,
+    const VkDependencyInfo* pDependencyInfo
+) {
+    LayerManager::get().dispatch_cmd_pipeline_barrier2(commandBuffer, pDependencyInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdPipelineBarrier2KHR(
+    VkCommandBuffer commandBuffer,
+    const VkDependencyInfo* pDependencyInfo
+) {
+    LayerManager::get().dispatch_cmd_pipeline_barrier2(commandBuffer, pDependencyInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdWriteTimestamp2(
+    VkCommandBuffer commandBuffer,
+    VkPipelineStageFlags2 stage,
+    VkQueryPool queryPool,
+    uint32_t query
+) {
+    LayerManager::get().dispatch_cmd_write_timestamp2(commandBuffer, stage, queryPool, query);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdWriteTimestamp2KHR(
+    VkCommandBuffer commandBuffer,
+    VkPipelineStageFlags2 stage,
+    VkQueryPool queryPool,
+    uint32_t query
+) {
+    LayerManager::get().dispatch_cmd_write_timestamp2(commandBuffer, stage, queryPool, query);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkQueueSubmit2(
+    VkQueue queue,
+    uint32_t submitCount,
+    const VkSubmitInfo2* pSubmits,
+    VkFence fence
+) {
+    return LayerManager::get().dispatch_queue_submit2(queue, submitCount, pSubmits, fence);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkQueueSubmit2KHR(
+    VkQueue queue,
+    uint32_t submitCount,
+    const VkSubmitInfo2* pSubmits,
+    VkFence fence
+) {
+    return LayerManager::get().dispatch_queue_submit2(queue, submitCount, pSubmits, fence);
 }
 
 } // extern "C"

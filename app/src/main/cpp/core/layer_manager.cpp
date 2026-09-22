@@ -290,6 +290,13 @@ void LayerManager::dispatch_destroy_device(
                 ++it;
             }
         }
+        for (auto it = m_queue_devices.begin(); it != m_queue_devices.end(); ) {
+            if (it->second == device) {
+                it = m_queue_devices.erase(it);
+            } else {
+                ++it;
+            }
+        }
         if (m_last_device.load() == device) {
             m_last_device = VK_NULL_HANDLE;
         }
@@ -1031,5 +1038,229 @@ void LayerManager::dispatch_cmd_draw_indexed(
         }
     }
 }
+
+VkDevice LayerManager::get_device_for_queue(VkQueue queue) {
+    std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
+    auto it = m_queue_devices.find((uint64_t)(uintptr_t)queue);
+    if (it != m_queue_devices.end()) {
+        return it->second;
+    }
+    return m_last_device.load();
+}
+
+void LayerManager::dispatch_get_device_queue(
+    VkDevice device,
+    uint32_t queueFamilyIndex,
+    uint32_t queueIndex,
+    VkQueue* pQueue
+) {
+    PFN_vkGetDeviceQueue real_fn =
+        (PFN_vkGetDeviceQueue) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue");
+    if (real_fn) {
+        real_fn(device, queueFamilyIndex, queueIndex, pQueue);
+        if (pQueue && *pQueue != VK_NULL_HANDLE) {
+            std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
+            m_queue_devices[(uint64_t)(uintptr_t)*pQueue] = device;
+        }
+    }
+}
+
+void LayerManager::dispatch_get_device_queue2(
+    VkDevice device,
+    const VkDeviceQueueInfo2* pQueueInfo,
+    VkQueue* pQueue
+) {
+    PFN_vkGetDeviceQueue2 real_fn =
+        (PFN_vkGetDeviceQueue2) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue2");
+    if (real_fn) {
+        real_fn(device, pQueueInfo, pQueue);
+        if (pQueue && *pQueue != VK_NULL_HANDLE) {
+            std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
+            m_queue_devices[(uint64_t)(uintptr_t)*pQueue] = device;
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_set_event2(
+    VkCommandBuffer commandBuffer,
+    VkEvent event,
+    const VkDependencyInfo* pDependencyInfo
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_set_event2(commandBuffer, event, pDependencyInfo)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdSetEvent2KHR real_fn =
+            (PFN_vkCmdSetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdSetEvent2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdSetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdSetEvent2");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, event, pDependencyInfo);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_reset_event2(
+    VkCommandBuffer commandBuffer,
+    VkEvent event,
+    VkPipelineStageFlags2 stageMask
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_reset_event2(commandBuffer, event, stageMask)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdResetEvent2KHR real_fn =
+            (PFN_vkCmdResetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdResetEvent2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdResetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdResetEvent2");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, event, stageMask);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_wait_events2(
+    VkCommandBuffer commandBuffer,
+    uint32_t eventCount,
+    const VkEvent* pEvents,
+    const VkDependencyInfo* pDependencyInfos
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_wait_events2(commandBuffer, eventCount, pEvents, pDependencyInfos)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdWaitEvents2KHR real_fn =
+            (PFN_vkCmdWaitEvents2KHR) get_real_proc(get_last_instance(), device, "vkCmdWaitEvents2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdWaitEvents2KHR) get_real_proc(get_last_instance(), device, "vkCmdWaitEvents2");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, eventCount, pEvents, pDependencyInfos);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_pipeline_barrier2(
+    VkCommandBuffer commandBuffer,
+    const VkDependencyInfo* pDependencyInfo
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_pipeline_barrier2(commandBuffer, pDependencyInfo)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdPipelineBarrier2KHR real_fn =
+            (PFN_vkCmdPipelineBarrier2KHR) get_real_proc(get_last_instance(), device, "vkCmdPipelineBarrier2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdPipelineBarrier2KHR) get_real_proc(get_last_instance(), device, "vkCmdPipelineBarrier2");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, pDependencyInfo);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_write_timestamp2(
+    VkCommandBuffer commandBuffer,
+    VkPipelineStageFlags2 stage,
+    VkQueryPool queryPool,
+    uint32_t query
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_write_timestamp2(commandBuffer, stage, queryPool, query)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdWriteTimestamp2KHR real_fn =
+            (PFN_vkCmdWriteTimestamp2KHR) get_real_proc(get_last_instance(), device, "vkCmdWriteTimestamp2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdWriteTimestamp2KHR) get_real_proc(get_last_instance(), device, "vkCmdWriteTimestamp2");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, stage, queryPool, query);
+        }
+    }
+}
+
+VkResult LayerManager::dispatch_queue_submit2(
+    VkQueue queue,
+    uint32_t submitCount,
+    const VkSubmitInfo2* pSubmits,
+    VkFence fence
+) {
+    VkResult res = VK_SUCCESS;
+    bool handled = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_queue_submit2(queue, submitCount, pSubmits, fence, res)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        VkDevice device = get_device_for_queue(queue);
+        PFN_vkQueueSubmit2KHR real_fn =
+            (PFN_vkQueueSubmit2KHR) get_real_proc(get_last_instance(), device, "vkQueueSubmit2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkQueueSubmit2KHR) get_real_proc(get_last_instance(), device, "vkQueueSubmit2");
+        }
+        if (real_fn) {
+            res = real_fn(queue, submitCount, pSubmits, fence);
+        } else {
+            LOGE("vkQueueSubmit2: neither handled by module nor found in native driver!");
+            res = VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    return res;
+}
+
 
 
