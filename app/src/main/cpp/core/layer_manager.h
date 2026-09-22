@@ -44,6 +44,10 @@ public:
         VkPhysicalDevice physicalDevice,
         VkPhysicalDeviceProperties2* pProperties);
 
+    void dispatch_get_physical_device_properties(
+        VkPhysicalDevice physicalDevice,
+        VkPhysicalDeviceProperties* pProperties);
+
     VkResult dispatch_create_device(
         VkPhysicalDevice physicalDevice,
         const VkDeviceCreateInfo* pCreateInfo,
@@ -222,6 +226,8 @@ public:
         const VkDeviceQueueInfo2* pQueueInfo,
         VkQueue* pQueue);
 
+    bool get_device_queue_info(VkDevice device, VkQueue& outQueue, uint32_t& outQueueFamily);
+
     void dispatch_cmd_set_event2(
         VkCommandBuffer commandBuffer,
         VkEvent event,
@@ -254,6 +260,97 @@ public:
         const VkSubmitInfo2* pSubmits,
         VkFence fence);
 
+    VkResult dispatch_queue_submit(
+        VkQueue queue,
+        uint32_t submitCount,
+        const VkSubmitInfo* pSubmits,
+        VkFence fence);
+
+    VkResult dispatch_queue_wait_idle(VkQueue queue);
+    VkResult dispatch_device_wait_idle(VkDevice device);
+    bool is_timeline_semaphore(VkSemaphore semaphore);
+
+    VkResult dispatch_create_semaphore(
+        VkDevice device,
+        const VkSemaphoreCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkSemaphore* pSemaphore);
+
+    void dispatch_destroy_semaphore(
+        VkDevice device,
+        VkSemaphore semaphore,
+        const VkAllocationCallbacks* pAllocator);
+
+    VkResult dispatch_get_semaphore_counter_value(
+        VkDevice device,
+        VkSemaphore semaphore,
+        uint64_t* pValue);
+
+    VkResult dispatch_wait_semaphores(
+        VkDevice device,
+        const VkSemaphoreWaitInfo* pWaitInfo,
+        uint64_t timeout);
+
+    VkResult dispatch_signal_semaphore(
+        VkDevice device,
+        const VkSemaphoreSignalInfo* pSignalInfo);
+
+    void dispatch_reset_query_pool(
+        VkDevice device,
+        VkQueryPool queryPool,
+        uint32_t firstQuery,
+        uint32_t queryCount);
+
+    VkResult dispatch_create_render_pass2(
+        VkDevice device,
+        const VkRenderPassCreateInfo2* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkRenderPass* pRenderPass);
+
+    void dispatch_cmd_begin_render_pass2(
+        VkCommandBuffer commandBuffer,
+        const VkRenderPassBeginInfo* pRenderPassBegin,
+        const VkSubpassBeginInfo* pSubpassBeginInfo);
+
+    void dispatch_cmd_next_subpass2(
+        VkCommandBuffer commandBuffer,
+        const VkSubpassBeginInfo* pSubpassBeginInfo,
+        const VkSubpassEndInfo* pSubpassEndInfo);
+
+    void dispatch_cmd_end_render_pass2(
+        VkCommandBuffer commandBuffer,
+        const VkSubpassEndInfo* pSubpassEndInfo);
+
+    void dispatch_cmd_draw_indirect_count(
+        VkCommandBuffer commandBuffer,
+        VkBuffer buffer,
+        VkDeviceSize offset,
+        VkBuffer countBuffer,
+        VkDeviceSize countBufferOffset,
+        uint32_t maxDrawCount,
+        uint32_t stride);
+
+    void dispatch_cmd_draw_indexed_indirect_count(
+        VkCommandBuffer commandBuffer,
+        VkBuffer buffer,
+        VkDeviceSize offset,
+        VkBuffer countBuffer,
+        VkDeviceSize countBufferOffset,
+        uint32_t maxDrawCount,
+        uint32_t stride);
+
+    VkDeviceAddress dispatch_get_buffer_device_address(
+        VkDevice device,
+        const VkBufferDeviceAddressInfo* pInfo);
+
+    uint64_t dispatch_get_buffer_opaque_capture_address(
+        VkDevice device,
+        const VkBufferDeviceAddressInfo* pInfo);
+
+    uint64_t dispatch_get_device_memory_opaque_capture_address(
+        VkDevice device,
+        const VkDeviceMemoryOpaqueCaptureAddressInfo* pInfo);
+
     // Custom procedure address registry (allows modules to dynamically export Vulkan entry points)
     void register_custom_proc(const char* name, PFN_vkVoidFunction proc);
     PFN_vkVoidFunction get_custom_proc(const char* name);
@@ -265,7 +362,7 @@ private:
     LayerManager& operator=(const LayerManager&) = delete;
 
     std::vector<std::unique_ptr<IVulkanLayerModule>> m_modules;
-    std::mutex m_modules_mutex;
+    std::recursive_mutex m_modules_mutex;
 
     std::mutex m_proc_mutex;
     std::unordered_map<std::string, PFN_vkVoidFunction> m_custom_procs;
@@ -277,6 +374,7 @@ private:
     std::mutex m_cmd_device_mutex;
     std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
     std::unordered_map<uint64_t, VkDevice> m_queue_devices;
+    std::unordered_map<uint64_t, std::pair<VkQueue, uint32_t>> m_device_queues;
     std::atomic<VkDevice> m_last_device{VK_NULL_HANDLE};
 };
 

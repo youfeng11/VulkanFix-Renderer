@@ -566,13 +566,7 @@ bool Synchronization2Module::on_queue_submit2(
     if (is_device_native(device)) return false;
 
     if (submitCount == 0 || !pSubmits) {
-        PFN_vkQueueSubmit real_fn =
-            (PFN_vkQueueSubmit) get_real_proc(get_last_instance(), device, "vkQueueSubmit");
-        if (real_fn) {
-            outResult = real_fn(queue, 0, nullptr, fence);
-        } else {
-            outResult = VK_ERROR_INITIALIZATION_FAILED;
-        }
+        outResult = LayerManager::get().dispatch_queue_submit(queue, 0, nullptr, fence);
         return true;
     }
 
@@ -659,12 +653,6 @@ bool Synchronization2Module::on_queue_submit2(
         }
     }
 
-    PFN_vkQueueSubmit real_fn =
-        (PFN_vkQueueSubmit) get_real_proc(get_last_instance(), device, "vkQueueSubmit");
-    if (real_fn) {
-        outResult = real_fn(queue, (uint32_t)v1Submits.size(), v1Submits.data(), fence);
-    } else {
-        outResult = VK_ERROR_INITIALIZATION_FAILED;
-    }
+    outResult = LayerManager::get().dispatch_queue_submit(queue, (uint32_t)v1Submits.size(), v1Submits.data(), fence);
     return true;
 }

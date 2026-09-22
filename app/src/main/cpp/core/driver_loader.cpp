@@ -108,7 +108,7 @@ void* get_real_proc(VkInstance instance, VkDevice device, const char* name) {
     init_real_vulkan();
     void* ptr = NULL;
 
-    // 1. If device is valid, try cached real vkGetDeviceProcAddr
+    // 1. If device is valid, try real vkGetDeviceProcAddr
     if (device != VK_NULL_HANDLE) {
         if (!g_real_vkGetDeviceProcAddr && g_real_vkGetInstanceProcAddr) {
             g_real_vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr) g_real_vkGetInstanceProcAddr(instance ? instance : g_last_instance, "vkGetDeviceProcAddr");
@@ -117,6 +117,17 @@ void* get_real_proc(VkInstance instance, VkDevice device, const char* name) {
             ptr = (void*) g_real_vkGetDeviceProcAddr(device, name);
             if (ptr) return ptr;
         }
+        // Special case: standard queue functions might be queried from instance on some Vulkan 1.0 loaders
+        if (name && (strncmp(name, "vkQueue", 7) == 0)) {
+            VkInstance inst = (instance != VK_NULL_HANDLE) ? instance : g_last_instance;
+            if (inst != VK_NULL_HANDLE && g_real_vkGetInstanceProcAddr) {
+                ptr = (void*) g_real_vkGetInstanceProcAddr(inst, name);
+                if (ptr) return ptr;
+            }
+        }
+        // Device-level function not supported by real driver! DO NOT fall through to dlsym,
+        // as Android libvulkan loader exports generic trampolines that branch to NULL and crash!
+        return NULL;
     }
 
     // 2. If instance is valid (or g_last_instance is available), try vkGetInstanceProcAddr
@@ -126,7 +137,7 @@ void* get_real_proc(VkInstance instance, VkDevice device, const char* name) {
         if (ptr) return ptr;
     }
 
-    // 3. Try dlsym directly on real Vulkan library handle
+    // 3. Try dlsym directly on real Vulkan library handle (only for global functions like vkCreateInstance)
     if (g_real_vulkan_handle) {
         ptr = dlsym(g_real_vulkan_handle, name);
         if (ptr) return ptr;

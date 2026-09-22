@@ -6,8 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
 # Automatically discover all core and module sources
-file(GLOB_RECURSE CORE_SOURCES core/*.cpp)
-file(GLOB_RECURSE MODULE_SOURCES modules/*.cpp)
+file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS core/*.cpp)
+file(GLOB_RECURSE MODULE_SOURCES CONFIGURE_DEPENDS modules/*.cpp)
 
 add_library(vulkan_fix SHARED
     ${CORE_SOURCES}

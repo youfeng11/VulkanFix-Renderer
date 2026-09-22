@@ -42,6 +42,11 @@ public:
         void* pUserData) {}
 
     // 3. Physical Device Properties Query:
+    // Core Vulkan 1.0 properties query
+    virtual void on_get_properties(
+        VkPhysicalDevice physicalDevice,
+        VkPhysicalDeviceProperties* pProperties) {}
+
     virtual void on_pre_get_properties2(
         VkPhysicalDevice physicalDevice,
         VkPhysicalDeviceProperties2* pProperties,
@@ -263,6 +268,105 @@ public:
         const VkSubmitInfo2* pSubmits,
         VkFence fence,
         VkResult& outResult) { return false; }
+
+    virtual bool on_queue_submit(
+        VkQueue queue,
+        uint32_t submitCount,
+        const VkSubmitInfo* pSubmits,
+        VkFence fence,
+        VkResult& outResult) { return false; }
+
+    // 15. Semaphore & Timeline Semaphore:
+    virtual void on_pre_create_semaphore(
+        VkDevice device,
+        VkSemaphoreCreateInfo& createInfo,
+        void*& pUserData) {}
+
+    virtual void on_post_create_semaphore(
+        VkDevice device,
+        const VkSemaphoreCreateInfo* pCreateInfo,
+        VkResult result,
+        VkSemaphore semaphore,
+        void* pUserData) {}
+
+    virtual void on_destroy_semaphore(
+        VkDevice device,
+        VkSemaphore semaphore) {}
+
+    virtual bool on_get_semaphore_counter_value(
+        VkDevice device,
+        VkSemaphore semaphore,
+        uint64_t* pValue,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_wait_semaphores(
+        VkDevice device,
+        const VkSemaphoreWaitInfo* pWaitInfo,
+        uint64_t timeout,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_signal_semaphore(
+        VkDevice device,
+        const VkSemaphoreSignalInfo* pSignalInfo,
+        VkResult& outResult) { return false; }
+
+    virtual void on_queue_wait_idle(VkQueue queue) {}
+    virtual void on_device_wait_idle(VkDevice device) {}
+    virtual bool is_timeline_semaphore(VkSemaphore semaphore) { return false; }
+
+    // 16. Host Query Reset:
+    virtual bool on_reset_query_pool(
+        VkDevice device,
+        VkQueryPool queryPool,
+        uint32_t firstQuery,
+        uint32_t queryCount) { return false; }
+
+    // 17. RenderPass2:
+    virtual bool on_create_render_pass2(
+        VkDevice device,
+        const VkRenderPassCreateInfo2* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkRenderPass* pRenderPass,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_cmd_begin_render_pass2(
+        VkCommandBuffer commandBuffer,
+        const VkRenderPassBeginInfo* pRenderPassBegin,
+        const VkSubpassBeginInfo* pSubpassBeginInfo) { return false; }
+
+    virtual bool on_cmd_next_subpass2(
+        VkCommandBuffer commandBuffer,
+        const VkSubpassBeginInfo* pSubpassBeginInfo,
+        const VkSubpassEndInfo* pSubpassEndInfo) { return false; }
+
+    virtual bool on_cmd_end_render_pass2(
+        VkCommandBuffer commandBuffer,
+        const VkSubpassEndInfo* pSubpassEndInfo) { return false; }
+
+    // 18. Draw Indirect Count:
+    virtual bool on_cmd_draw_indirect_count(
+        VkCommandBuffer commandBuffer,
+        VkBuffer buffer,
+        VkDeviceSize offset,
+        VkBuffer countBuffer,
+        VkDeviceSize countBufferOffset,
+        uint32_t maxDrawCount,
+        uint32_t stride) { return false; }
+
+    virtual bool on_cmd_draw_indexed_indirect_count(
+        VkCommandBuffer commandBuffer,
+        VkBuffer buffer,
+        VkDeviceSize offset,
+        VkBuffer countBuffer,
+        VkDeviceSize countBufferOffset,
+        uint32_t maxDrawCount,
+        uint32_t stride) { return false; }
+
+    // 19. Buffer Device Address:
+    virtual bool on_get_buffer_device_address(
+        VkDevice device,
+        const VkBufferDeviceAddressInfo* pInfo,
+        VkDeviceAddress& outAddress) { return false; }
 };
 
 #endif // LAYER_MODULE_H

@@ -39,7 +39,7 @@ PFN_vkVoidFunction LayerManager::get_custom_proc(const char* name) {
 }
 
 void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
-    std::lock_guard<std::mutex> lock(m_modules_mutex);
+    std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
     LOGI("Registering Vulkan layer module: %s", module->get_name());
     m_modules.push_back(std::move(module));
 }
@@ -88,7 +88,7 @@ VkResult LayerManager::dispatch_enumerate_device_extensions(
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_enumerate_device_extensions(physicalDevice, extensions);
@@ -121,7 +121,7 @@ void LayerManager::dispatch_get_physical_device_features(
         real_fn(physicalDevice, pFeatures);
     }
 
-    std::lock_guard<std::mutex> lock(m_modules_mutex);
+    std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
     for (auto& mod : m_modules) {
         if (mod->is_enabled()) {
             mod->on_get_features(physicalDevice, pFeatures);
@@ -152,7 +152,7 @@ void LayerManager::dispatch_get_physical_device_features2(
 
     std::vector<void*> user_data(m_modules.size(), nullptr);
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (size_t i = 0; i < m_modules.size(); i++) {
             if (m_modules[i]->is_enabled()) {
                 m_modules[i]->on_pre_get_features2(physicalDevice, pFeatures, user_data[i]);
@@ -163,7 +163,7 @@ void LayerManager::dispatch_get_physical_device_features2(
     real_fn(physicalDevice, pFeatures);
 
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (size_t i = 0; i < m_modules.size(); i++) {
             if (m_modules[i]->is_enabled()) {
                 m_modules[i]->on_post_get_features2(physicalDevice, pFeatures, user_data[i]);
@@ -195,7 +195,7 @@ void LayerManager::dispatch_get_physical_device_properties2(
 
     std::vector<void*> user_data(m_modules.size(), nullptr);
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (size_t i = 0; i < m_modules.size(); i++) {
             if (m_modules[i]->is_enabled()) {
                 m_modules[i]->on_pre_get_properties2(physicalDevice, pProperties, user_data[i]);
@@ -206,11 +206,31 @@ void LayerManager::dispatch_get_physical_device_properties2(
     real_fn(physicalDevice, pProperties);
 
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (size_t i = 0; i < m_modules.size(); i++) {
             if (m_modules[i]->is_enabled()) {
                 m_modules[i]->on_post_get_properties2(physicalDevice, pProperties, user_data[i]);
             }
+        }
+    }
+}
+
+void LayerManager::dispatch_get_physical_device_properties(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties* pProperties
+) {
+    if (!pProperties) return;
+
+    PFN_vkGetPhysicalDeviceProperties real_fn =
+        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+    if (real_fn) {
+        real_fn(physicalDevice, pProperties);
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+    for (auto& mod : m_modules) {
+        if (mod->is_enabled()) {
+            mod->on_get_properties(physicalDevice, pProperties);
         }
     }
 }
@@ -246,7 +266,7 @@ VkResult LayerManager::dispatch_create_device(
 
     std::vector<void*> user_data(m_modules.size(), nullptr);
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (size_t i = 0; i < m_modules.size(); i++) {
             if (m_modules[i]->is_enabled()) {
                 m_modules[i]->on_pre_create_device(physicalDevice, &modCreateInfo, has_mod_features ? &modFeatures : nullptr, enabledExtensions, user_data[i]);
@@ -260,7 +280,7 @@ VkResult LayerManager::dispatch_create_device(
     VkResult res = real_fn(physicalDevice, &modCreateInfo, pAllocator, pDevice);
 
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (size_t i = 0; i < m_modules.size(); i++) {
             if (m_modules[i]->is_enabled()) {
                 m_modules[i]->on_post_create_device(physicalDevice, (res == VK_SUCCESS && pDevice) ? *pDevice : VK_NULL_HANDLE, res, user_data[i]);
@@ -297,13 +317,14 @@ void LayerManager::dispatch_destroy_device(
                 ++it;
             }
         }
+        m_device_queues.erase((uint64_t)(uintptr_t)device);
         if (m_last_device.load() == device) {
             m_last_device = VK_NULL_HANDLE;
         }
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_destroy_device(device);
@@ -384,7 +405,7 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
     VkResult res = real_fn(device, pipelineCache, createInfoCount, modInfos, pAllocator, pPipelines);
 
     if (res == VK_SUCCESS && pPipelines) {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_post_create_graphics_pipelines(device, createInfoCount, modInfos, pPipelines);
@@ -415,7 +436,7 @@ VkResult LayerManager::dispatch_create_descriptor_set_layout(
 
     VkDescriptorSetLayoutCreateInfo modInfo = *pCreateInfo;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_pre_create_descriptor_set_layout(device, modInfo);
@@ -426,7 +447,7 @@ VkResult LayerManager::dispatch_create_descriptor_set_layout(
     VkResult res = real_fn(device, &modInfo, pAllocator, pSetLayout);
 
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_post_create_descriptor_set_layout(device, pCreateInfo, res, (res == VK_SUCCESS && pSetLayout) ? *pSetLayout : VK_NULL_HANDLE);
@@ -443,7 +464,7 @@ void LayerManager::dispatch_destroy_descriptor_set_layout(
     const VkAllocationCallbacks* pAllocator
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_destroy_descriptor_set_layout(device, descriptorSetLayout);
@@ -471,7 +492,7 @@ VkResult LayerManager::dispatch_create_pipeline_layout(
     VkResult res = real_fn(device, pCreateInfo, pAllocator, pPipelineLayout);
 
     if (res == VK_SUCCESS && pCreateInfo && pPipelineLayout) {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_post_create_pipeline_layout(device, pCreateInfo, res, *pPipelineLayout);
@@ -488,7 +509,7 @@ void LayerManager::dispatch_destroy_pipeline_layout(
     const VkAllocationCallbacks* pAllocator
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_destroy_pipeline_layout(device, pipelineLayout);
@@ -521,7 +542,7 @@ VkResult LayerManager::dispatch_allocate_command_buffers(
                 m_cmd_devices[(uint64_t)(uintptr_t)pCommandBuffers[i]] = device;
             }
         }
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
@@ -546,7 +567,7 @@ void LayerManager::dispatch_free_command_buffers(
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_free_command_buffers(device, commandBufferCount, pCommandBuffers);
@@ -577,7 +598,7 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     bool has_mod_inheritance = false;
 
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_begin_command_buffer(commandBuffer, pBeginInfo);
@@ -599,7 +620,7 @@ VkResult LayerManager::dispatch_reset_command_buffer(
     VkCommandBufferResetFlags flags
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_reset_command_buffer(commandBuffer, flags);
@@ -633,7 +654,7 @@ VkResult LayerManager::dispatch_create_descriptor_update_template(
 
     VkDescriptorUpdateTemplateCreateInfo modInfo = *pCreateInfo;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_pre_create_descriptor_update_template(device, modInfo);
@@ -650,7 +671,7 @@ void LayerManager::dispatch_destroy_descriptor_update_template(
     const VkAllocationCallbacks* pAllocator
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_destroy_descriptor_update_template(device, descriptorUpdateTemplate);
@@ -678,7 +699,7 @@ void LayerManager::dispatch_cmd_push_descriptor_set(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_push_descriptor_set(
                     commandBuffer, pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites)) {
@@ -707,7 +728,7 @@ void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_push_descriptor_set_with_template(
                     commandBuffer, descriptorUpdateTemplate, layout, set, pData)) {
@@ -739,7 +760,7 @@ VkResult LayerManager::dispatch_create_image(
 
     VkResult res = real_fn(device, pCreateInfo, pAllocator, pImage);
     if (res == VK_SUCCESS && pCreateInfo && pImage && *pImage != VK_NULL_HANDLE) {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_post_create_image(device, pCreateInfo, res, *pImage);
@@ -755,7 +776,7 @@ void LayerManager::dispatch_destroy_image(
     const VkAllocationCallbacks* pAllocator
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_destroy_image(device, image);
@@ -782,7 +803,7 @@ VkResult LayerManager::dispatch_create_image_view(
 
     VkResult res = real_fn(device, pCreateInfo, pAllocator, pView);
     if (res == VK_SUCCESS && pCreateInfo && pView && *pView != VK_NULL_HANDLE) {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_post_create_image_view(device, pCreateInfo, res, *pView);
@@ -798,7 +819,7 @@ void LayerManager::dispatch_destroy_image_view(
     const VkAllocationCallbacks* pAllocator
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_destroy_image_view(device, imageView);
@@ -819,7 +840,7 @@ void LayerManager::dispatch_cmd_begin_rendering(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_begin_rendering(commandBuffer, pRenderingInfo)) {
                 handled = true;
@@ -846,7 +867,7 @@ void LayerManager::dispatch_cmd_end_rendering(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_end_rendering(commandBuffer)) {
                 handled = true;
@@ -885,7 +906,7 @@ void LayerManager::dispatch_destroy_pipeline(
     const VkAllocationCallbacks* pAllocator
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_destroy_pipeline(device, pipeline);
@@ -906,7 +927,7 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     VkPipeline pipeline
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_cmd_bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
@@ -930,7 +951,7 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers(
     const VkDeviceSize* pOffsets
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
@@ -956,7 +977,7 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
     const VkDeviceSize* pStrides
 ) {
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
@@ -991,7 +1012,7 @@ void LayerManager::dispatch_cmd_draw(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_draw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance)) {
                 handled = true;
@@ -1020,7 +1041,7 @@ void LayerManager::dispatch_cmd_draw_indexed(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_draw_indexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance)) {
                 handled = true;
@@ -1061,6 +1082,7 @@ void LayerManager::dispatch_get_device_queue(
         if (pQueue && *pQueue != VK_NULL_HANDLE) {
             std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
             m_queue_devices[(uint64_t)(uintptr_t)*pQueue] = device;
+            m_device_queues[(uint64_t)(uintptr_t)device] = {*pQueue, queueFamilyIndex};
         }
     }
 }
@@ -1074,11 +1096,23 @@ void LayerManager::dispatch_get_device_queue2(
         (PFN_vkGetDeviceQueue2) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue2");
     if (real_fn) {
         real_fn(device, pQueueInfo, pQueue);
-        if (pQueue && *pQueue != VK_NULL_HANDLE) {
+        if (pQueue && *pQueue != VK_NULL_HANDLE && pQueueInfo) {
             std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
             m_queue_devices[(uint64_t)(uintptr_t)*pQueue] = device;
+            m_device_queues[(uint64_t)(uintptr_t)device] = {*pQueue, pQueueInfo->queueFamilyIndex};
         }
     }
+}
+
+bool LayerManager::get_device_queue_info(VkDevice device, VkQueue& outQueue, uint32_t& outQueueFamily) {
+    std::lock_guard<std::mutex> lock(m_cmd_device_mutex);
+    auto it = m_device_queues.find((uint64_t)(uintptr_t)device);
+    if (it != m_device_queues.end()) {
+        outQueue = it->second.first;
+        outQueueFamily = it->second.second;
+        return true;
+    }
+    return false;
 }
 
 void LayerManager::dispatch_cmd_set_event2(
@@ -1088,7 +1122,7 @@ void LayerManager::dispatch_cmd_set_event2(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_set_event2(commandBuffer, event, pDependencyInfo)) {
                 handled = true;
@@ -1117,7 +1151,7 @@ void LayerManager::dispatch_cmd_reset_event2(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_reset_event2(commandBuffer, event, stageMask)) {
                 handled = true;
@@ -1147,7 +1181,7 @@ void LayerManager::dispatch_cmd_wait_events2(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_wait_events2(commandBuffer, eventCount, pEvents, pDependencyInfos)) {
                 handled = true;
@@ -1175,7 +1209,7 @@ void LayerManager::dispatch_cmd_pipeline_barrier2(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_pipeline_barrier2(commandBuffer, pDependencyInfo)) {
                 handled = true;
@@ -1205,7 +1239,7 @@ void LayerManager::dispatch_cmd_write_timestamp2(
 ) {
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_cmd_write_timestamp2(commandBuffer, stage, queryPool, query)) {
                 handled = true;
@@ -1236,7 +1270,7 @@ VkResult LayerManager::dispatch_queue_submit2(
     VkResult res = VK_SUCCESS;
     bool handled = false;
     {
-        std::lock_guard<std::mutex> lock(m_modules_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
             if (mod->is_enabled() && mod->on_queue_submit2(queue, submitCount, pSubmits, fence, res)) {
                 handled = true;
@@ -1260,6 +1294,501 @@ VkResult LayerManager::dispatch_queue_submit2(
         }
     }
     return res;
+}
+
+VkResult LayerManager::dispatch_queue_submit(
+    VkQueue queue,
+    uint32_t submitCount,
+    const VkSubmitInfo* pSubmits,
+    VkFence fence
+) {
+    VkResult res = VK_SUCCESS;
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_queue_submit(queue, submitCount, pSubmits, fence, res)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+
+    if (!handled) {
+        VkDevice device = get_device_for_queue(queue);
+        PFN_vkQueueSubmit real_fn =
+            (PFN_vkQueueSubmit) get_real_proc(get_last_instance(), device, "vkQueueSubmit");
+        if (real_fn) {
+            res = real_fn(queue, submitCount, pSubmits, fence);
+        } else {
+            res = VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    return res;
+}
+
+VkResult LayerManager::dispatch_queue_wait_idle(VkQueue queue) {
+    PFN_vkQueueWaitIdle real_fn =
+        (PFN_vkQueueWaitIdle) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkQueueWaitIdle");
+    VkResult res = real_fn ? real_fn(queue) : VK_SUCCESS;
+    if (res == VK_SUCCESS) {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_queue_wait_idle(queue);
+            }
+        }
+    }
+    return res;
+}
+
+VkResult LayerManager::dispatch_device_wait_idle(VkDevice device) {
+    PFN_vkDeviceWaitIdle real_fn =
+        (PFN_vkDeviceWaitIdle) get_real_proc(get_last_instance(), device, "vkDeviceWaitIdle");
+    VkResult res = real_fn ? real_fn(device) : VK_SUCCESS;
+    if (res == VK_SUCCESS) {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_device_wait_idle(device);
+            }
+        }
+    }
+    return res;
+}
+
+bool LayerManager::is_timeline_semaphore(VkSemaphore semaphore) {
+    if (semaphore == VK_NULL_HANDLE) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+    for (auto& mod : m_modules) {
+        if (mod->is_enabled() && mod->is_timeline_semaphore(semaphore)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+VkResult LayerManager::dispatch_create_semaphore(
+    VkDevice device,
+    const VkSemaphoreCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSemaphore* pSemaphore
+) {
+    PFN_vkCreateSemaphore real_fn =
+        (PFN_vkCreateSemaphore) get_real_proc(get_last_instance(), device, "vkCreateSemaphore");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    if (!pCreateInfo) return real_fn(device, pCreateInfo, pAllocator, pSemaphore);
+
+    VkSemaphoreCreateInfo modInfo = *pCreateInfo;
+    std::vector<void*> user_data(m_modules.size(), nullptr);
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (size_t i = 0; i < m_modules.size(); i++) {
+            if (m_modules[i]->is_enabled()) {
+                m_modules[i]->on_pre_create_semaphore(device, modInfo, user_data[i]);
+            }
+        }
+    }
+
+    VkResult res = real_fn(device, &modInfo, pAllocator, pSemaphore);
+
+    if (res == VK_SUCCESS && pSemaphore && *pSemaphore != VK_NULL_HANDLE) {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (size_t i = 0; i < m_modules.size(); i++) {
+            if (m_modules[i]->is_enabled()) {
+                m_modules[i]->on_post_create_semaphore(device, pCreateInfo, res, *pSemaphore, user_data[i]);
+            }
+        }
+    }
+    return res;
+}
+
+void LayerManager::dispatch_destroy_semaphore(
+    VkDevice device,
+    VkSemaphore semaphore,
+    const VkAllocationCallbacks* pAllocator
+) {
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_destroy_semaphore(device, semaphore);
+            }
+        }
+    }
+
+    PFN_vkDestroySemaphore real_fn =
+        (PFN_vkDestroySemaphore) get_real_proc(get_last_instance(), device, "vkDestroySemaphore");
+    if (real_fn) {
+        real_fn(device, semaphore, pAllocator);
+    }
+}
+
+VkResult LayerManager::dispatch_get_semaphore_counter_value(
+    VkDevice device,
+    VkSemaphore semaphore,
+    uint64_t* pValue
+) {
+    VkResult res = VK_SUCCESS;
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_get_semaphore_counter_value(device, semaphore, pValue, res)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        PFN_vkGetSemaphoreCounterValueKHR real_fn =
+            (PFN_vkGetSemaphoreCounterValueKHR) get_real_proc(get_last_instance(), device, "vkGetSemaphoreCounterValueKHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkGetSemaphoreCounterValueKHR) get_real_proc(get_last_instance(), device, "vkGetSemaphoreCounterValue");
+        }
+        if (real_fn) {
+            res = real_fn(device, semaphore, pValue);
+        } else {
+            res = VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    return res;
+}
+
+VkResult LayerManager::dispatch_wait_semaphores(
+    VkDevice device,
+    const VkSemaphoreWaitInfo* pWaitInfo,
+    uint64_t timeout
+) {
+    VkResult res = VK_SUCCESS;
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_wait_semaphores(device, pWaitInfo, timeout, res)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        PFN_vkWaitSemaphoresKHR real_fn =
+            (PFN_vkWaitSemaphoresKHR) get_real_proc(get_last_instance(), device, "vkWaitSemaphoresKHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkWaitSemaphoresKHR) get_real_proc(get_last_instance(), device, "vkWaitSemaphores");
+        }
+        if (real_fn) {
+            res = real_fn(device, pWaitInfo, timeout);
+        } else {
+            res = VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    return res;
+}
+
+VkResult LayerManager::dispatch_signal_semaphore(
+    VkDevice device,
+    const VkSemaphoreSignalInfo* pSignalInfo
+) {
+    VkResult res = VK_SUCCESS;
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_signal_semaphore(device, pSignalInfo, res)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        PFN_vkSignalSemaphoreKHR real_fn =
+            (PFN_vkSignalSemaphoreKHR) get_real_proc(get_last_instance(), device, "vkSignalSemaphoreKHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkSignalSemaphoreKHR) get_real_proc(get_last_instance(), device, "vkSignalSemaphore");
+        }
+        if (real_fn) {
+            res = real_fn(device, pSignalInfo);
+        } else {
+            res = VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    return res;
+}
+
+void LayerManager::dispatch_reset_query_pool(
+    VkDevice device,
+    VkQueryPool queryPool,
+    uint32_t firstQuery,
+    uint32_t queryCount
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_reset_query_pool(device, queryPool, firstQuery, queryCount)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        PFN_vkResetQueryPool real_fn =
+            (PFN_vkResetQueryPool) get_real_proc(get_last_instance(), device, "vkResetQueryPool");
+        if (!real_fn) {
+            real_fn = (PFN_vkResetQueryPool) get_real_proc(get_last_instance(), device, "vkResetQueryPoolEXT");
+        }
+        if (real_fn) {
+            real_fn(device, queryPool, firstQuery, queryCount);
+        }
+    }
+}
+
+VkResult LayerManager::dispatch_create_render_pass2(
+    VkDevice device,
+    const VkRenderPassCreateInfo2* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkRenderPass* pRenderPass
+) {
+    VkResult res = VK_SUCCESS;
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_create_render_pass2(device, pCreateInfo, pAllocator, pRenderPass, res)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        PFN_vkCreateRenderPass2KHR real_fn =
+            (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2");
+        }
+        if (real_fn) {
+            res = real_fn(device, pCreateInfo, pAllocator, pRenderPass);
+        } else {
+            res = VK_ERROR_INITIALIZATION_FAILED;
+        }
+    }
+    return res;
+}
+
+void LayerManager::dispatch_cmd_begin_render_pass2(
+    VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo* pRenderPassBegin,
+    const VkSubpassBeginInfo* pSubpassBeginInfo
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_begin_render_pass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdBeginRenderPass2KHR real_fn =
+            (PFN_vkCmdBeginRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCmdBeginRenderPass2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdBeginRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCmdBeginRenderPass2");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_next_subpass2(
+    VkCommandBuffer commandBuffer,
+    const VkSubpassBeginInfo* pSubpassBeginInfo,
+    const VkSubpassEndInfo* pSubpassEndInfo
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_next_subpass2(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdNextSubpass2KHR real_fn =
+            (PFN_vkCmdNextSubpass2KHR) get_real_proc(get_last_instance(), device, "vkCmdNextSubpass2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdNextSubpass2KHR) get_real_proc(get_last_instance(), device, "vkCmdNextSubpass2");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_end_render_pass2(
+    VkCommandBuffer commandBuffer,
+    const VkSubpassEndInfo* pSubpassEndInfo
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_end_render_pass2(commandBuffer, pSubpassEndInfo)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdEndRenderPass2KHR real_fn =
+            (PFN_vkCmdEndRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCmdEndRenderPass2KHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdEndRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCmdEndRenderPass2");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, pSubpassEndInfo);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_draw_indirect_count(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkBuffer countBuffer,
+    VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount,
+    uint32_t stride
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_draw_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdDrawIndirectCountKHR real_fn =
+            (PFN_vkCmdDrawIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndirectCountKHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdDrawIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndirectCount");
+        }
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdDrawIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndirectCountAMD");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+        }
+    }
+}
+
+void LayerManager::dispatch_cmd_draw_indexed_indirect_count(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkBuffer countBuffer,
+    VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount,
+    uint32_t stride
+) {
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_cmd_draw_indexed_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
+        PFN_vkCmdDrawIndexedIndirectCountKHR real_fn =
+            (PFN_vkCmdDrawIndexedIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndexedIndirectCountKHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdDrawIndexedIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndexedIndirectCount");
+        }
+        if (!real_fn) {
+            real_fn = (PFN_vkCmdDrawIndexedIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndexedIndirectCountAMD");
+        }
+        if (real_fn) {
+            real_fn(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+        }
+    }
+}
+
+VkDeviceAddress LayerManager::dispatch_get_buffer_device_address(
+    VkDevice device,
+    const VkBufferDeviceAddressInfo* pInfo
+) {
+    VkDeviceAddress addr = 0;
+    bool handled = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled() && mod->on_get_buffer_device_address(device, pInfo, addr)) {
+                handled = true;
+                break;
+            }
+        }
+    }
+    if (!handled) {
+        PFN_vkGetBufferDeviceAddressKHR real_fn =
+            (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddressKHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddress");
+        }
+        if (!real_fn) {
+            real_fn = (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddressEXT");
+        }
+        if (real_fn) {
+            addr = real_fn(device, pInfo);
+        }
+    }
+    return addr;
+}
+
+uint64_t LayerManager::dispatch_get_buffer_opaque_capture_address(
+    VkDevice device,
+    const VkBufferDeviceAddressInfo* pInfo
+) {
+    PFN_vkGetBufferOpaqueCaptureAddressKHR real_fn =
+        (PFN_vkGetBufferOpaqueCaptureAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferOpaqueCaptureAddressKHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetBufferOpaqueCaptureAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferOpaqueCaptureAddress");
+    }
+    if (real_fn) {
+        return real_fn(device, pInfo);
+    }
+    return pInfo ? (uint64_t)(uintptr_t)pInfo->buffer : 0;
+}
+
+uint64_t LayerManager::dispatch_get_device_memory_opaque_capture_address(
+    VkDevice device,
+    const VkDeviceMemoryOpaqueCaptureAddressInfo* pInfo
+) {
+    PFN_vkGetDeviceMemoryOpaqueCaptureAddressKHR real_fn =
+        (PFN_vkGetDeviceMemoryOpaqueCaptureAddressKHR) get_real_proc(get_last_instance(), device, "vkGetDeviceMemoryOpaqueCaptureAddressKHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetDeviceMemoryOpaqueCaptureAddressKHR) get_real_proc(get_last_instance(), device, "vkGetDeviceMemoryOpaqueCaptureAddress");
+    }
+    if (real_fn) {
+        return real_fn(device, pInfo);
+    }
+    return pInfo ? (uint64_t)(uintptr_t)pInfo->memory : 0;
 }
 
 

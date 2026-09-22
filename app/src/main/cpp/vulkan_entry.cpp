@@ -488,6 +488,42 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     MATCH_FUNC(vkCmdWriteTimestamp2KHR);
     MATCH_FUNC(vkQueueSubmit2);
     MATCH_FUNC(vkQueueSubmit2KHR);
+    MATCH_FUNC(vkEnumerateInstanceVersion);
+    MATCH_FUNC(vkGetPhysicalDeviceProperties);
+    MATCH_FUNC(vkQueueSubmit);
+    MATCH_FUNC(vkQueueWaitIdle);
+    MATCH_FUNC(vkDeviceWaitIdle);
+    MATCH_FUNC(vkCreateSemaphore);
+    MATCH_FUNC(vkDestroySemaphore);
+    MATCH_FUNC(vkGetSemaphoreCounterValue);
+    MATCH_FUNC(vkGetSemaphoreCounterValueKHR);
+    MATCH_FUNC(vkWaitSemaphores);
+    MATCH_FUNC(vkWaitSemaphoresKHR);
+    MATCH_FUNC(vkSignalSemaphore);
+    MATCH_FUNC(vkSignalSemaphoreKHR);
+    MATCH_FUNC(vkResetQueryPool);
+    MATCH_FUNC(vkResetQueryPoolEXT);
+    MATCH_FUNC(vkCreateRenderPass2);
+    MATCH_FUNC(vkCreateRenderPass2KHR);
+    MATCH_FUNC(vkCmdBeginRenderPass2);
+    MATCH_FUNC(vkCmdBeginRenderPass2KHR);
+    MATCH_FUNC(vkCmdNextSubpass2);
+    MATCH_FUNC(vkCmdNextSubpass2KHR);
+    MATCH_FUNC(vkCmdEndRenderPass2);
+    MATCH_FUNC(vkCmdEndRenderPass2KHR);
+    MATCH_FUNC(vkCmdDrawIndirectCount);
+    MATCH_FUNC(vkCmdDrawIndirectCountKHR);
+    MATCH_FUNC(vkCmdDrawIndirectCountAMD);
+    MATCH_FUNC(vkCmdDrawIndexedIndirectCount);
+    MATCH_FUNC(vkCmdDrawIndexedIndirectCountKHR);
+    MATCH_FUNC(vkCmdDrawIndexedIndirectCountAMD);
+    MATCH_FUNC(vkGetBufferDeviceAddress);
+    MATCH_FUNC(vkGetBufferDeviceAddressKHR);
+    MATCH_FUNC(vkGetBufferDeviceAddressEXT);
+    MATCH_FUNC(vkGetBufferOpaqueCaptureAddress);
+    MATCH_FUNC(vkGetBufferOpaqueCaptureAddressKHR);
+    MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddress);
+    MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddressKHR);
 
     #undef MATCH_FUNC
 
@@ -556,6 +592,40 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     MATCH_FUNC(vkCmdWriteTimestamp2KHR);
     MATCH_FUNC(vkQueueSubmit2);
     MATCH_FUNC(vkQueueSubmit2KHR);
+    MATCH_FUNC(vkQueueSubmit);
+    MATCH_FUNC(vkQueueWaitIdle);
+    MATCH_FUNC(vkDeviceWaitIdle);
+    MATCH_FUNC(vkCreateSemaphore);
+    MATCH_FUNC(vkDestroySemaphore);
+    MATCH_FUNC(vkGetSemaphoreCounterValue);
+    MATCH_FUNC(vkGetSemaphoreCounterValueKHR);
+    MATCH_FUNC(vkWaitSemaphores);
+    MATCH_FUNC(vkWaitSemaphoresKHR);
+    MATCH_FUNC(vkSignalSemaphore);
+    MATCH_FUNC(vkSignalSemaphoreKHR);
+    MATCH_FUNC(vkResetQueryPool);
+    MATCH_FUNC(vkResetQueryPoolEXT);
+    MATCH_FUNC(vkCreateRenderPass2);
+    MATCH_FUNC(vkCreateRenderPass2KHR);
+    MATCH_FUNC(vkCmdBeginRenderPass2);
+    MATCH_FUNC(vkCmdBeginRenderPass2KHR);
+    MATCH_FUNC(vkCmdNextSubpass2);
+    MATCH_FUNC(vkCmdNextSubpass2KHR);
+    MATCH_FUNC(vkCmdEndRenderPass2);
+    MATCH_FUNC(vkCmdEndRenderPass2KHR);
+    MATCH_FUNC(vkCmdDrawIndirectCount);
+    MATCH_FUNC(vkCmdDrawIndirectCountKHR);
+    MATCH_FUNC(vkCmdDrawIndirectCountAMD);
+    MATCH_FUNC(vkCmdDrawIndexedIndirectCount);
+    MATCH_FUNC(vkCmdDrawIndexedIndirectCountKHR);
+    MATCH_FUNC(vkCmdDrawIndexedIndirectCountAMD);
+    MATCH_FUNC(vkGetBufferDeviceAddress);
+    MATCH_FUNC(vkGetBufferDeviceAddressKHR);
+    MATCH_FUNC(vkGetBufferDeviceAddressEXT);
+    MATCH_FUNC(vkGetBufferOpaqueCaptureAddress);
+    MATCH_FUNC(vkGetBufferOpaqueCaptureAddressKHR);
+    MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddress);
+    MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddressKHR);
 
     #undef MATCH_FUNC
 
@@ -610,7 +680,31 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
 FORWARD_INST(VkResult, vkEnumeratePhysicalDevices, (VkInstance instance, uint32_t* pCount, VkPhysicalDevice* pDevices), (instance, pCount, pDevices))
 FORWARD_INST(VkResult, vkEnumerateInstanceExtensionProperties, (const char* pLayer, uint32_t* pCount, VkExtensionProperties* pProps), (pLayer, pCount, pProps))
 FORWARD_INST(VkResult, vkEnumerateInstanceLayerProperties, (uint32_t* pCount, VkLayerProperties* pProps), (pCount, pProps))
-FORWARD_INST(void, vkGetPhysicalDeviceProperties, (VkPhysicalDevice physDev, VkPhysicalDeviceProperties* pProps), (physDev, pProps))
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceVersion(
+    uint32_t* pApiVersion
+) {
+    if (!pApiVersion) return VK_ERROR_INITIALIZATION_FAILED;
+    init_real_vulkan();
+    typedef VkResult (VKAPI_PTR *PFN_vkEnumerateInstanceVersion)(uint32_t*);
+    PFN_vkEnumerateInstanceVersion real_fn =
+        (PFN_vkEnumerateInstanceVersion) get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
+    if (real_fn) {
+        VkResult res = real_fn(pApiVersion);
+        if (res == VK_SUCCESS && *pApiVersion < VK_API_VERSION_1_2) {
+            *pApiVersion = VK_API_VERSION_1_2;
+        }
+        return res;
+    }
+    *pApiVersion = VK_API_VERSION_1_2;
+    return VK_SUCCESS;
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceProperties(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties* pProperties
+) {
+    LayerManager::get().dispatch_get_physical_device_properties(physicalDevice, pProperties);
+}
 FORWARD_INST(void, vkGetPhysicalDeviceFormatProperties, (VkPhysicalDevice physDev, VkFormat format, VkFormatProperties* pProps), (physDev, format, pProps))
 FORWARD_INST(VkResult, vkGetPhysicalDeviceImageFormatProperties, (VkPhysicalDevice physDev, VkFormat format, VkImageType type, VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags, VkImageFormatProperties* pProps), (physDev, format, type, tiling, usage, flags, pProps))
 FORWARD_INST(void, vkGetPhysicalDeviceQueueFamilyProperties, (VkPhysicalDevice physDev, uint32_t* pCount, VkQueueFamilyProperties* pProps), (physDev, pCount, pProps))
@@ -633,9 +727,21 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetDeviceQueue2(
 ) {
     LayerManager::get().dispatch_get_device_queue2(device, pQueueInfo, pQueue);
 }
-FORWARD_QUEUE(VkResult, vkQueueSubmit, (VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits, VkFence fence), (queue, submitCount, pSubmits, fence))
-FORWARD_QUEUE(VkResult, vkQueueWaitIdle, (VkQueue queue), (queue))
-FORWARD_DEV(VkResult, vkDeviceWaitIdle, device, (VkDevice device), (device))
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkQueueSubmit(
+    VkQueue queue,
+    uint32_t submitCount,
+    const VkSubmitInfo* pSubmits,
+    VkFence fence
+) {
+    return LayerManager::get().dispatch_queue_submit(queue, submitCount, pSubmits, fence);
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue) {
+    return LayerManager::get().dispatch_queue_wait_idle(queue);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkDeviceWaitIdle(VkDevice device) {
+    return LayerManager::get().dispatch_device_wait_idle(device);
+}
 FORWARD_DEV(VkResult, vkAllocateMemory, device, (VkDevice device, const VkMemoryAllocateInfo* pAllocateInfo, const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory), (device, pAllocateInfo, pAllocator, pMemory))
 FORWARD_DEV_VOID(vkFreeMemory, device, (VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* pAllocator), (device, memory, pAllocator))
 FORWARD_DEV(VkResult, vkMapMemory, device, (VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** ppData), (device, memory, offset, size, flags, ppData))
@@ -815,6 +921,276 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkQueueSubmit2KHR(
     VkFence fence
 ) {
     return LayerManager::get().dispatch_queue_submit2(queue, submitCount, pSubmits, fence);
+}
+
+// ----------------------------------------------------------------------------
+// Vulkan 1.2 Core Functions & Promoted Extensions
+// ----------------------------------------------------------------------------
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateSemaphore(
+    VkDevice device,
+    const VkSemaphoreCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSemaphore* pSemaphore
+) {
+    return LayerManager::get().dispatch_create_semaphore(device, pCreateInfo, pAllocator, pSemaphore);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroySemaphore(
+    VkDevice device,
+    VkSemaphore semaphore,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_semaphore(device, semaphore, pAllocator);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetSemaphoreCounterValue(
+    VkDevice device,
+    VkSemaphore semaphore,
+    uint64_t* pValue
+) {
+    return LayerManager::get().dispatch_get_semaphore_counter_value(device, semaphore, pValue);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetSemaphoreCounterValueKHR(
+    VkDevice device,
+    VkSemaphore semaphore,
+    uint64_t* pValue
+) {
+    return LayerManager::get().dispatch_get_semaphore_counter_value(device, semaphore, pValue);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkWaitSemaphores(
+    VkDevice device,
+    const VkSemaphoreWaitInfo* pWaitInfo,
+    uint64_t timeout
+) {
+    return LayerManager::get().dispatch_wait_semaphores(device, pWaitInfo, timeout);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkWaitSemaphoresKHR(
+    VkDevice device,
+    const VkSemaphoreWaitInfo* pWaitInfo,
+    uint64_t timeout
+) {
+    return LayerManager::get().dispatch_wait_semaphores(device, pWaitInfo, timeout);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkSignalSemaphore(
+    VkDevice device,
+    const VkSemaphoreSignalInfo* pSignalInfo
+) {
+    return LayerManager::get().dispatch_signal_semaphore(device, pSignalInfo);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkSignalSemaphoreKHR(
+    VkDevice device,
+    const VkSemaphoreSignalInfo* pSignalInfo
+) {
+    return LayerManager::get().dispatch_signal_semaphore(device, pSignalInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkResetQueryPool(
+    VkDevice device,
+    VkQueryPool queryPool,
+    uint32_t firstQuery,
+    uint32_t queryCount
+) {
+    LayerManager::get().dispatch_reset_query_pool(device, queryPool, firstQuery, queryCount);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkResetQueryPoolEXT(
+    VkDevice device,
+    VkQueryPool queryPool,
+    uint32_t firstQuery,
+    uint32_t queryCount
+) {
+    LayerManager::get().dispatch_reset_query_pool(device, queryPool, firstQuery, queryCount);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateRenderPass2(
+    VkDevice device,
+    const VkRenderPassCreateInfo2* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkRenderPass* pRenderPass
+) {
+    return LayerManager::get().dispatch_create_render_pass2(device, pCreateInfo, pAllocator, pRenderPass);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateRenderPass2KHR(
+    VkDevice device,
+    const VkRenderPassCreateInfo2* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkRenderPass* pRenderPass
+) {
+    return LayerManager::get().dispatch_create_render_pass2(device, pCreateInfo, pAllocator, pRenderPass);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBeginRenderPass2(
+    VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo* pRenderPassBegin,
+    const VkSubpassBeginInfo* pSubpassBeginInfo
+) {
+    LayerManager::get().dispatch_cmd_begin_render_pass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBeginRenderPass2KHR(
+    VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo* pRenderPassBegin,
+    const VkSubpassBeginInfo* pSubpassBeginInfo
+) {
+    LayerManager::get().dispatch_cmd_begin_render_pass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdNextSubpass2(
+    VkCommandBuffer commandBuffer,
+    const VkSubpassBeginInfo* pSubpassBeginInfo,
+    const VkSubpassEndInfo* pSubpassEndInfo
+) {
+    LayerManager::get().dispatch_cmd_next_subpass2(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdNextSubpass2KHR(
+    VkCommandBuffer commandBuffer,
+    const VkSubpassBeginInfo* pSubpassBeginInfo,
+    const VkSubpassEndInfo* pSubpassEndInfo
+) {
+    LayerManager::get().dispatch_cmd_next_subpass2(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdEndRenderPass2(
+    VkCommandBuffer commandBuffer,
+    const VkSubpassEndInfo* pSubpassEndInfo
+) {
+    LayerManager::get().dispatch_cmd_end_render_pass2(commandBuffer, pSubpassEndInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdEndRenderPass2KHR(
+    VkCommandBuffer commandBuffer,
+    const VkSubpassEndInfo* pSubpassEndInfo
+) {
+    LayerManager::get().dispatch_cmd_end_render_pass2(commandBuffer, pSubpassEndInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndirectCount(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkBuffer countBuffer,
+    VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount,
+    uint32_t stride
+) {
+    LayerManager::get().dispatch_cmd_draw_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndirectCountKHR(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkBuffer countBuffer,
+    VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount,
+    uint32_t stride
+) {
+    LayerManager::get().dispatch_cmd_draw_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndirectCountAMD(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkBuffer countBuffer,
+    VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount,
+    uint32_t stride
+) {
+    LayerManager::get().dispatch_cmd_draw_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndexedIndirectCount(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkBuffer countBuffer,
+    VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount,
+    uint32_t stride
+) {
+    LayerManager::get().dispatch_cmd_draw_indexed_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndexedIndirectCountKHR(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkBuffer countBuffer,
+    VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount,
+    uint32_t stride
+) {
+    LayerManager::get().dispatch_cmd_draw_indexed_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndexedIndirectCountAMD(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkBuffer countBuffer,
+    VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount,
+    uint32_t stride
+) {
+    LayerManager::get().dispatch_cmd_draw_indexed_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+}
+
+VK_LAYER_EXPORT VkDeviceAddress VKAPI_CALL vkGetBufferDeviceAddress(
+    VkDevice device,
+    const VkBufferDeviceAddressInfo* pInfo
+) {
+    return LayerManager::get().dispatch_get_buffer_device_address(device, pInfo);
+}
+
+VK_LAYER_EXPORT VkDeviceAddress VKAPI_CALL vkGetBufferDeviceAddressKHR(
+    VkDevice device,
+    const VkBufferDeviceAddressInfo* pInfo
+) {
+    return LayerManager::get().dispatch_get_buffer_device_address(device, pInfo);
+}
+
+VK_LAYER_EXPORT VkDeviceAddress VKAPI_CALL vkGetBufferDeviceAddressEXT(
+    VkDevice device,
+    const VkBufferDeviceAddressInfo* pInfo
+) {
+    return LayerManager::get().dispatch_get_buffer_device_address(device, pInfo);
+}
+
+VK_LAYER_EXPORT uint64_t VKAPI_CALL vkGetBufferOpaqueCaptureAddress(
+    VkDevice device,
+    const VkBufferDeviceAddressInfo* pInfo
+) {
+    return LayerManager::get().dispatch_get_buffer_opaque_capture_address(device, pInfo);
+}
+
+VK_LAYER_EXPORT uint64_t VKAPI_CALL vkGetBufferOpaqueCaptureAddressKHR(
+    VkDevice device,
+    const VkBufferDeviceAddressInfo* pInfo
+) {
+    return LayerManager::get().dispatch_get_buffer_opaque_capture_address(device, pInfo);
+}
+
+VK_LAYER_EXPORT uint64_t VKAPI_CALL vkGetDeviceMemoryOpaqueCaptureAddress(
+    VkDevice device,
+    const VkDeviceMemoryOpaqueCaptureAddressInfo* pInfo
+) {
+    return LayerManager::get().dispatch_get_device_memory_opaque_capture_address(device, pInfo);
+}
+
+VK_LAYER_EXPORT uint64_t VKAPI_CALL vkGetDeviceMemoryOpaqueCaptureAddressKHR(
+    VkDevice device,
+    const VkDeviceMemoryOpaqueCaptureAddressInfo* pInfo
+) {
+    return LayerManager::get().dispatch_get_device_memory_opaque_capture_address(device, pInfo);
 }
 
 } // extern "C"
