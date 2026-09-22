@@ -351,6 +351,74 @@ public:
         VkDevice device,
         const VkDeviceMemoryOpaqueCaptureAddressInfo* pInfo);
 
+    // Vulkan 1.1 Core / Promoted Features
+    VkResult dispatch_bind_buffer_memory2(
+        VkDevice device,
+        uint32_t bindInfoCount,
+        const VkBindBufferMemoryInfo* pBindInfos);
+
+    VkResult dispatch_bind_image_memory2(
+        VkDevice device,
+        uint32_t bindInfoCount,
+        const VkBindImageMemoryInfo* pBindInfos);
+
+    void dispatch_get_buffer_memory_requirements2(
+        VkDevice device,
+        const VkBufferMemoryRequirementsInfo2* pInfo,
+        VkMemoryRequirements2* pMemoryRequirements);
+
+    void dispatch_get_image_memory_requirements2(
+        VkDevice device,
+        const VkImageMemoryRequirementsInfo2* pInfo,
+        VkMemoryRequirements2* pMemoryRequirements);
+
+    void dispatch_get_image_sparse_memory_requirements2(
+        VkDevice device,
+        const VkImageSparseMemoryRequirementsInfo2* pInfo,
+        uint32_t* pSparseMemoryRequirementCount,
+        VkSparseImageMemoryRequirements2* pSparseMemoryRequirements);
+
+    void dispatch_update_descriptor_set_with_template(
+        VkDevice device,
+        VkDescriptorSet descriptorSet,
+        VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+        const void* pData);
+
+    void dispatch_get_descriptor_set_layout_support(
+        VkDevice device,
+        const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+        VkDescriptorSetLayoutSupport* pSupport);
+
+    void dispatch_cmd_dispatch_base(
+        VkCommandBuffer commandBuffer,
+        uint32_t baseGroupX,
+        uint32_t baseGroupY,
+        uint32_t baseGroupZ,
+        uint32_t groupCountX,
+        uint32_t groupCountY,
+        uint32_t groupCountZ);
+
+    VkResult dispatch_enumerate_physical_device_groups(
+        VkInstance instance,
+        uint32_t* pPhysicalDeviceGroupCount,
+        VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties);
+
+    void dispatch_trim_command_pool(
+        VkDevice device,
+        VkCommandPool commandPool,
+        VkCommandPoolTrimFlags flags);
+
+    void dispatch_cmd_set_device_mask(
+        VkCommandBuffer commandBuffer,
+        uint32_t deviceMask);
+
+    void dispatch_get_device_group_peer_memory_features(
+        VkDevice device,
+        uint32_t heapIndex,
+        uint32_t localDeviceIndex,
+        uint32_t remoteDeviceIndex,
+        VkPeerMemoryFeatureFlags* pPeerMemoryFeatures);
+
     // Custom procedure address registry (allows modules to dynamically export Vulkan entry points)
     void register_custom_proc(const char* name, PFN_vkVoidFunction proc);
     PFN_vkVoidFunction get_custom_proc(const char* name);

@@ -186,9 +186,23 @@ public:
         VkDevice device,
         VkDescriptorUpdateTemplateCreateInfo& createInfo) {}
 
-    virtual void on_destroy_descriptor_update_template(
+    virtual bool on_create_descriptor_update_template(
         VkDevice device,
-        VkDescriptorUpdateTemplate descriptorUpdateTemplate) {}
+        const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_destroy_descriptor_update_template(
+        VkDevice device,
+        VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+        const VkAllocationCallbacks* pAllocator) { return false; }
+
+    virtual bool on_update_descriptor_set_with_template(
+        VkDevice device,
+        VkDescriptorSet descriptorSet,
+        VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+        const void* pData) { return false; }
 
     // 11. Push Descriptors:
     virtual bool on_cmd_push_descriptor_set(
@@ -367,6 +381,71 @@ public:
         VkDevice device,
         const VkBufferDeviceAddressInfo* pInfo,
         VkDeviceAddress& outAddress) { return false; }
+
+    // 20. Vulkan 1.1 Core / Promoted Features:
+    virtual bool on_bind_buffer_memory2(
+        VkDevice device,
+        uint32_t bindInfoCount,
+        const VkBindBufferMemoryInfo* pBindInfos,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_bind_image_memory2(
+        VkDevice device,
+        uint32_t bindInfoCount,
+        const VkBindImageMemoryInfo* pBindInfos,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_get_buffer_memory_requirements2(
+        VkDevice device,
+        const VkBufferMemoryRequirementsInfo2* pInfo,
+        VkMemoryRequirements2* pMemoryRequirements) { return false; }
+
+    virtual bool on_get_image_memory_requirements2(
+        VkDevice device,
+        const VkImageMemoryRequirementsInfo2* pInfo,
+        VkMemoryRequirements2* pMemoryRequirements) { return false; }
+
+    virtual bool on_get_image_sparse_memory_requirements2(
+        VkDevice device,
+        const VkImageSparseMemoryRequirementsInfo2* pInfo,
+        uint32_t* pSparseMemoryRequirementCount,
+        VkSparseImageMemoryRequirements2* pSparseMemoryRequirements) { return false; }
+
+    virtual bool on_get_descriptor_set_layout_support(
+        VkDevice device,
+        const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+        VkDescriptorSetLayoutSupport* pSupport) { return false; }
+
+    virtual bool on_cmd_dispatch_base(
+        VkCommandBuffer commandBuffer,
+        uint32_t baseGroupX,
+        uint32_t baseGroupY,
+        uint32_t baseGroupZ,
+        uint32_t groupCountX,
+        uint32_t groupCountY,
+        uint32_t groupCountZ) { return false; }
+
+    virtual bool on_enumerate_physical_device_groups(
+        VkInstance instance,
+        uint32_t* pPhysicalDeviceGroupCount,
+        VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties,
+        VkResult& outResult) { return false; }
+
+    virtual void on_trim_command_pool(
+        VkDevice device,
+        VkCommandPool commandPool,
+        VkCommandPoolTrimFlags flags) {}
+
+    virtual void on_cmd_set_device_mask(
+        VkCommandBuffer commandBuffer,
+        uint32_t deviceMask) {}
+
+    virtual bool on_get_device_group_peer_memory_features(
+        VkDevice device,
+        uint32_t heapIndex,
+        uint32_t localDeviceIndex,
+        uint32_t remoteDeviceIndex,
+        VkPeerMemoryFeatureFlags* pPeerMemoryFeatures) { return false; }
 };
 
 #endif // LAYER_MODULE_H

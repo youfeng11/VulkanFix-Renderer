@@ -334,6 +334,26 @@ VK_LAYER_EXPORT void VKAPI_CALL vkDestroyDescriptorUpdateTemplateKHR(
         device, descriptorUpdateTemplate, pAllocator);
 }
 
+VK_LAYER_EXPORT void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
+    VkDevice device,
+    VkDescriptorSet descriptorSet,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    const void* pData
+) {
+    LayerManager::get().dispatch_update_descriptor_set_with_template(
+        device, descriptorSet, descriptorUpdateTemplate, pData);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkUpdateDescriptorSetWithTemplateKHR(
+    VkDevice device,
+    VkDescriptorSet descriptorSet,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    const void* pData
+) {
+    LayerManager::get().dispatch_update_descriptor_set_with_template(
+        device, descriptorSet, descriptorUpdateTemplate, pData);
+}
+
 VK_LAYER_EXPORT void VKAPI_CALL vkCmdPushDescriptorSetKHR(
     VkCommandBuffer commandBuffer,
     VkPipelineBindPoint pipelineBindPoint,
@@ -525,6 +545,52 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddress);
     MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddressKHR);
 
+    // Vulkan 1.1 Core / Promoted Entry Points
+    MATCH_FUNC(vkBindBufferMemory2);
+    MATCH_FUNC(vkBindBufferMemory2KHR);
+    MATCH_FUNC(vkBindImageMemory2);
+    MATCH_FUNC(vkBindImageMemory2KHR);
+    MATCH_FUNC(vkGetBufferMemoryRequirements2);
+    MATCH_FUNC(vkGetBufferMemoryRequirements2KHR);
+    MATCH_FUNC(vkGetImageMemoryRequirements2);
+    MATCH_FUNC(vkGetImageMemoryRequirements2KHR);
+    MATCH_FUNC(vkGetImageSparseMemoryRequirements2);
+    MATCH_FUNC(vkGetImageSparseMemoryRequirements2KHR);
+    MATCH_FUNC(vkUpdateDescriptorSetWithTemplate);
+    MATCH_FUNC(vkUpdateDescriptorSetWithTemplateKHR);
+    MATCH_FUNC(vkGetDescriptorSetLayoutSupport);
+    MATCH_FUNC(vkGetDescriptorSetLayoutSupportKHR);
+    MATCH_FUNC(vkTrimCommandPool);
+    MATCH_FUNC(vkTrimCommandPoolKHR);
+    MATCH_FUNC(vkCmdDispatchBase);
+    MATCH_FUNC(vkCmdDispatchBaseKHR);
+    MATCH_FUNC(vkCmdSetDeviceMask);
+    MATCH_FUNC(vkCmdSetDeviceMaskKHR);
+    MATCH_FUNC(vkGetDeviceGroupPeerMemoryFeatures);
+    MATCH_FUNC(vkGetDeviceGroupPeerMemoryFeaturesKHR);
+    MATCH_FUNC(vkEnumeratePhysicalDeviceGroups);
+    MATCH_FUNC(vkEnumeratePhysicalDeviceGroupsKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceFormatProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceFormatProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceImageFormatProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceImageFormatProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceQueueFamilyProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceQueueFamilyProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceMemoryProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceMemoryProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceSparseImageFormatProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceSparseImageFormatProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalBufferProperties);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalBufferPropertiesKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalFenceProperties);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalFencePropertiesKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalSemaphoreProperties);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalSemaphorePropertiesKHR);
+    MATCH_FUNC(vkCreateSamplerYcbcrConversion);
+    MATCH_FUNC(vkCreateSamplerYcbcrConversionKHR);
+    MATCH_FUNC(vkDestroySamplerYcbcrConversion);
+    MATCH_FUNC(vkDestroySamplerYcbcrConversionKHR);
+
     #undef MATCH_FUNC
 
     init_real_vulkan();
@@ -626,6 +692,52 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     MATCH_FUNC(vkGetBufferOpaqueCaptureAddressKHR);
     MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddress);
     MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddressKHR);
+
+    // Vulkan 1.1 Core / Promoted Entry Points
+    MATCH_FUNC(vkBindBufferMemory2);
+    MATCH_FUNC(vkBindBufferMemory2KHR);
+    MATCH_FUNC(vkBindImageMemory2);
+    MATCH_FUNC(vkBindImageMemory2KHR);
+    MATCH_FUNC(vkGetBufferMemoryRequirements2);
+    MATCH_FUNC(vkGetBufferMemoryRequirements2KHR);
+    MATCH_FUNC(vkGetImageMemoryRequirements2);
+    MATCH_FUNC(vkGetImageMemoryRequirements2KHR);
+    MATCH_FUNC(vkGetImageSparseMemoryRequirements2);
+    MATCH_FUNC(vkGetImageSparseMemoryRequirements2KHR);
+    MATCH_FUNC(vkUpdateDescriptorSetWithTemplate);
+    MATCH_FUNC(vkUpdateDescriptorSetWithTemplateKHR);
+    MATCH_FUNC(vkGetDescriptorSetLayoutSupport);
+    MATCH_FUNC(vkGetDescriptorSetLayoutSupportKHR);
+    MATCH_FUNC(vkTrimCommandPool);
+    MATCH_FUNC(vkTrimCommandPoolKHR);
+    MATCH_FUNC(vkCmdDispatchBase);
+    MATCH_FUNC(vkCmdDispatchBaseKHR);
+    MATCH_FUNC(vkCmdSetDeviceMask);
+    MATCH_FUNC(vkCmdSetDeviceMaskKHR);
+    MATCH_FUNC(vkGetDeviceGroupPeerMemoryFeatures);
+    MATCH_FUNC(vkGetDeviceGroupPeerMemoryFeaturesKHR);
+    MATCH_FUNC(vkEnumeratePhysicalDeviceGroups);
+    MATCH_FUNC(vkEnumeratePhysicalDeviceGroupsKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceFormatProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceFormatProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceImageFormatProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceImageFormatProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceQueueFamilyProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceQueueFamilyProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceMemoryProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceMemoryProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceSparseImageFormatProperties2);
+    MATCH_FUNC(vkGetPhysicalDeviceSparseImageFormatProperties2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalBufferProperties);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalBufferPropertiesKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalFenceProperties);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalFencePropertiesKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalSemaphoreProperties);
+    MATCH_FUNC(vkGetPhysicalDeviceExternalSemaphorePropertiesKHR);
+    MATCH_FUNC(vkCreateSamplerYcbcrConversion);
+    MATCH_FUNC(vkCreateSamplerYcbcrConversionKHR);
+    MATCH_FUNC(vkDestroySamplerYcbcrConversion);
+    MATCH_FUNC(vkDestroySamplerYcbcrConversionKHR);
 
     #undef MATCH_FUNC
 
@@ -1191,6 +1303,517 @@ VK_LAYER_EXPORT uint64_t VKAPI_CALL vkGetDeviceMemoryOpaqueCaptureAddressKHR(
     const VkDeviceMemoryOpaqueCaptureAddressInfo* pInfo
 ) {
     return LayerManager::get().dispatch_get_device_memory_opaque_capture_address(device, pInfo);
+}
+
+// ============================================================================
+// Vulkan 1.1 Exported Entry Points
+// ============================================================================
+
+// Memory Binding 2
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkBindBufferMemory2(
+    VkDevice device,
+    uint32_t bindInfoCount,
+    const VkBindBufferMemoryInfo* pBindInfos
+) {
+    return LayerManager::get().dispatch_bind_buffer_memory2(device, bindInfoCount, pBindInfos);
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkBindBufferMemory2KHR(
+    VkDevice device,
+    uint32_t bindInfoCount,
+    const VkBindBufferMemoryInfo* pBindInfos
+) {
+    return LayerManager::get().dispatch_bind_buffer_memory2(device, bindInfoCount, pBindInfos);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkBindImageMemory2(
+    VkDevice device,
+    uint32_t bindInfoCount,
+    const VkBindImageMemoryInfo* pBindInfos
+) {
+    return LayerManager::get().dispatch_bind_image_memory2(device, bindInfoCount, pBindInfos);
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkBindImageMemory2KHR(
+    VkDevice device,
+    uint32_t bindInfoCount,
+    const VkBindImageMemoryInfo* pBindInfos
+) {
+    return LayerManager::get().dispatch_bind_image_memory2(device, bindInfoCount, pBindInfos);
+}
+
+// Memory Requirements 2
+VK_LAYER_EXPORT void VKAPI_CALL vkGetBufferMemoryRequirements2(
+    VkDevice device,
+    const VkBufferMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    LayerManager::get().dispatch_get_buffer_memory_requirements2(device, pInfo, pMemoryRequirements);
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(
+    VkDevice device,
+    const VkBufferMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    LayerManager::get().dispatch_get_buffer_memory_requirements2(device, pInfo, pMemoryRequirements);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetImageMemoryRequirements2(
+    VkDevice device,
+    const VkImageMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    LayerManager::get().dispatch_get_image_memory_requirements2(device, pInfo, pMemoryRequirements);
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetImageMemoryRequirements2KHR(
+    VkDevice device,
+    const VkImageMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    LayerManager::get().dispatch_get_image_memory_requirements2(device, pInfo, pMemoryRequirements);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetImageSparseMemoryRequirements2(
+    VkDevice device,
+    const VkImageSparseMemoryRequirementsInfo2* pInfo,
+    uint32_t* pSparseMemoryRequirementCount,
+    VkSparseImageMemoryRequirements2* pSparseMemoryRequirements
+) {
+    LayerManager::get().dispatch_get_image_sparse_memory_requirements2(
+        device, pInfo, pSparseMemoryRequirementCount, pSparseMemoryRequirements);
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetImageSparseMemoryRequirements2KHR(
+    VkDevice device,
+    const VkImageSparseMemoryRequirementsInfo2* pInfo,
+    uint32_t* pSparseMemoryRequirementCount,
+    VkSparseImageMemoryRequirements2* pSparseMemoryRequirements
+) {
+    LayerManager::get().dispatch_get_image_sparse_memory_requirements2(
+        device, pInfo, pSparseMemoryRequirementCount, pSparseMemoryRequirements);
+}
+
+// Maintenance 1 & 3
+VK_LAYER_EXPORT void VKAPI_CALL vkTrimCommandPool(
+    VkDevice device,
+    VkCommandPool commandPool,
+    VkCommandPoolTrimFlags flags
+) {
+    LayerManager::get().dispatch_trim_command_pool(device, commandPool, flags);
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkTrimCommandPoolKHR(
+    VkDevice device,
+    VkCommandPool commandPool,
+    VkCommandPoolTrimFlags flags
+) {
+    LayerManager::get().dispatch_trim_command_pool(device, commandPool, flags);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetDescriptorSetLayoutSupport(
+    VkDevice device,
+    const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+    VkDescriptorSetLayoutSupport* pSupport
+) {
+    LayerManager::get().dispatch_get_descriptor_set_layout_support(device, pCreateInfo, pSupport);
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetDescriptorSetLayoutSupportKHR(
+    VkDevice device,
+    const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+    VkDescriptorSetLayoutSupport* pSupport
+) {
+    LayerManager::get().dispatch_get_descriptor_set_layout_support(device, pCreateInfo, pSupport);
+}
+
+// Device Groups & Dispatch Base
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDispatchBase(
+    VkCommandBuffer commandBuffer,
+    uint32_t baseGroupX,
+    uint32_t baseGroupY,
+    uint32_t baseGroupZ,
+    uint32_t groupCountX,
+    uint32_t groupCountY,
+    uint32_t groupCountZ
+) {
+    LayerManager::get().dispatch_cmd_dispatch_base(
+        commandBuffer, baseGroupX, baseGroupY, baseGroupZ, groupCountX, groupCountY, groupCountZ);
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDispatchBaseKHR(
+    VkCommandBuffer commandBuffer,
+    uint32_t baseGroupX,
+    uint32_t baseGroupY,
+    uint32_t baseGroupZ,
+    uint32_t groupCountX,
+    uint32_t groupCountY,
+    uint32_t groupCountZ
+) {
+    LayerManager::get().dispatch_cmd_dispatch_base(
+        commandBuffer, baseGroupX, baseGroupY, baseGroupZ, groupCountX, groupCountY, groupCountZ);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetDeviceMask(
+    VkCommandBuffer commandBuffer,
+    uint32_t deviceMask
+) {
+    LayerManager::get().dispatch_cmd_set_device_mask(commandBuffer, deviceMask);
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetDeviceMaskKHR(
+    VkCommandBuffer commandBuffer,
+    uint32_t deviceMask
+) {
+    LayerManager::get().dispatch_cmd_set_device_mask(commandBuffer, deviceMask);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetDeviceGroupPeerMemoryFeatures(
+    VkDevice device,
+    uint32_t heapIndex,
+    uint32_t localDeviceIndex,
+    uint32_t remoteDeviceIndex,
+    VkPeerMemoryFeatureFlags* pPeerMemoryFeatures
+) {
+    LayerManager::get().dispatch_get_device_group_peer_memory_features(
+        device, heapIndex, localDeviceIndex, remoteDeviceIndex, pPeerMemoryFeatures);
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetDeviceGroupPeerMemoryFeaturesKHR(
+    VkDevice device,
+    uint32_t heapIndex,
+    uint32_t localDeviceIndex,
+    uint32_t remoteDeviceIndex,
+    VkPeerMemoryFeatureFlags* pPeerMemoryFeatures
+) {
+    LayerManager::get().dispatch_get_device_group_peer_memory_features(
+        device, heapIndex, localDeviceIndex, remoteDeviceIndex, pPeerMemoryFeatures);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumeratePhysicalDeviceGroups(
+    VkInstance instance,
+    uint32_t* pPhysicalDeviceGroupCount,
+    VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties
+) {
+    return LayerManager::get().dispatch_enumerate_physical_device_groups(
+        instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumeratePhysicalDeviceGroupsKHR(
+    VkInstance instance,
+    uint32_t* pPhysicalDeviceGroupCount,
+    VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties
+) {
+    return LayerManager::get().dispatch_enumerate_physical_device_groups(
+        instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
+}
+
+// Physical Device Properties 2
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceFormatProperties2(
+    VkPhysicalDevice physicalDevice,
+    VkFormat format,
+    VkFormatProperties2* pFormatProperties
+) {
+    PFN_vkGetPhysicalDeviceFormatProperties2 real_fn =
+        (PFN_vkGetPhysicalDeviceFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFormatProperties2");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetPhysicalDeviceFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFormatProperties2KHR");
+    }
+    if (real_fn) {
+        real_fn(physicalDevice, format, pFormatProperties);
+        return;
+    }
+    if (pFormatProperties) {
+        PFN_vkGetPhysicalDeviceFormatProperties real_fp =
+            (PFN_vkGetPhysicalDeviceFormatProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFormatProperties");
+        if (real_fp) {
+            real_fp(physicalDevice, format, &pFormatProperties->formatProperties);
+        }
+    }
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceFormatProperties2KHR(
+    VkPhysicalDevice physicalDevice,
+    VkFormat format,
+    VkFormatProperties2* pFormatProperties
+) {
+    vkGetPhysicalDeviceFormatProperties2(physicalDevice, format, pFormatProperties);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties2(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceImageFormatInfo2* pImageFormatInfo,
+    VkImageFormatProperties2* pImageFormatProperties
+) {
+    PFN_vkGetPhysicalDeviceImageFormatProperties2 real_fn =
+        (PFN_vkGetPhysicalDeviceImageFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceImageFormatProperties2");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetPhysicalDeviceImageFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceImageFormatProperties2KHR");
+    }
+    if (real_fn) {
+        return real_fn(physicalDevice, pImageFormatInfo, pImageFormatProperties);
+    }
+    if (!pImageFormatInfo || !pImageFormatProperties) return VK_ERROR_INITIALIZATION_FAILED;
+
+    PFN_vkGetPhysicalDeviceImageFormatProperties real_ifp =
+        (PFN_vkGetPhysicalDeviceImageFormatProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceImageFormatProperties");
+    if (real_ifp) {
+        return real_ifp(
+            physicalDevice,
+            pImageFormatInfo->format,
+            pImageFormatInfo->type,
+            pImageFormatInfo->tiling,
+            pImageFormatInfo->usage,
+            pImageFormatInfo->flags,
+            &pImageFormatProperties->imageFormatProperties
+        );
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties2KHR(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceImageFormatInfo2* pImageFormatInfo,
+    VkImageFormatProperties2* pImageFormatProperties
+) {
+    return vkGetPhysicalDeviceImageFormatProperties2(physicalDevice, pImageFormatInfo, pImageFormatProperties);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2(
+    VkPhysicalDevice physicalDevice,
+    uint32_t* pQueueFamilyPropertyCount,
+    VkQueueFamilyProperties2* pQueueFamilyProperties
+) {
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties2 real_fn =
+        (PFN_vkGetPhysicalDeviceQueueFamilyProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceQueueFamilyProperties2");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetPhysicalDeviceQueueFamilyProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceQueueFamilyProperties2KHR");
+    }
+    if (real_fn) {
+        real_fn(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+        return;
+    }
+
+    if (!pQueueFamilyPropertyCount) return;
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties real_qfp =
+        (PFN_vkGetPhysicalDeviceQueueFamilyProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceQueueFamilyProperties");
+    if (!real_qfp) return;
+
+    if (!pQueueFamilyProperties) {
+        real_qfp(physicalDevice, pQueueFamilyPropertyCount, nullptr);
+        return;
+    }
+
+    uint32_t count = *pQueueFamilyPropertyCount;
+    std::vector<VkQueueFamilyProperties> nativeProps(count);
+    real_qfp(physicalDevice, &count, nativeProps.data());
+    for (uint32_t i = 0; i < count; ++i) {
+        pQueueFamilyProperties[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+        pQueueFamilyProperties[i].pNext = nullptr;
+        pQueueFamilyProperties[i].queueFamilyProperties = nativeProps[i];
+    }
+    *pQueueFamilyPropertyCount = count;
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2KHR(
+    VkPhysicalDevice physicalDevice,
+    uint32_t* pQueueFamilyPropertyCount,
+    VkQueueFamilyProperties2* pQueueFamilyProperties
+) {
+    vkGetPhysicalDeviceQueueFamilyProperties2(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties2(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceMemoryProperties2* pMemoryProperties
+) {
+    PFN_vkGetPhysicalDeviceMemoryProperties2 real_fn =
+        (PFN_vkGetPhysicalDeviceMemoryProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceMemoryProperties2");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetPhysicalDeviceMemoryProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceMemoryProperties2KHR");
+    }
+    if (real_fn) {
+        real_fn(physicalDevice, pMemoryProperties);
+        return;
+    }
+    if (pMemoryProperties) {
+        PFN_vkGetPhysicalDeviceMemoryProperties real_mp =
+            (PFN_vkGetPhysicalDeviceMemoryProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceMemoryProperties");
+        if (real_mp) {
+            real_mp(physicalDevice, &pMemoryProperties->memoryProperties);
+        }
+    }
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties2KHR(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceMemoryProperties2* pMemoryProperties
+) {
+    vkGetPhysicalDeviceMemoryProperties2(physicalDevice, pMemoryProperties);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceSparseImageFormatProperties2(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceSparseImageFormatInfo2* pFormatInfo,
+    uint32_t* pPropertyCount,
+    VkSparseImageFormatProperties2* pProperties
+) {
+    PFN_vkGetPhysicalDeviceSparseImageFormatProperties2 real_fn =
+        (PFN_vkGetPhysicalDeviceSparseImageFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSparseImageFormatProperties2");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetPhysicalDeviceSparseImageFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSparseImageFormatProperties2KHR");
+    }
+    if (real_fn) {
+        real_fn(physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        return;
+    }
+    if (!pFormatInfo || !pPropertyCount) return;
+    PFN_vkGetPhysicalDeviceSparseImageFormatProperties real_sfp =
+        (PFN_vkGetPhysicalDeviceSparseImageFormatProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSparseImageFormatProperties");
+    if (!real_sfp) {
+        *pPropertyCount = 0;
+        return;
+    }
+    if (!pProperties) {
+        real_sfp(physicalDevice, pFormatInfo->format, pFormatInfo->type, pFormatInfo->samples, pFormatInfo->usage, pFormatInfo->tiling, pPropertyCount, nullptr);
+        return;
+    }
+    uint32_t count = *pPropertyCount;
+    std::vector<VkSparseImageFormatProperties> nativeProps(count);
+    real_sfp(physicalDevice, pFormatInfo->format, pFormatInfo->type, pFormatInfo->samples, pFormatInfo->usage, pFormatInfo->tiling, &count, nativeProps.data());
+    for (uint32_t i = 0; i < count; ++i) {
+        pProperties[i].sType = VK_STRUCTURE_TYPE_SPARSE_IMAGE_FORMAT_PROPERTIES_2;
+        pProperties[i].pNext = nullptr;
+        pProperties[i].properties = nativeProps[i];
+    }
+    *pPropertyCount = count;
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceSparseImageFormatInfo2* pFormatInfo,
+    uint32_t* pPropertyCount,
+    VkSparseImageFormatProperties2* pProperties
+) {
+    vkGetPhysicalDeviceSparseImageFormatProperties2(physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+}
+
+// External Properties
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceExternalBufferProperties(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceExternalBufferInfo* pExternalBufferInfo,
+    VkExternalBufferProperties* pExternalBufferProperties
+) {
+    PFN_vkGetPhysicalDeviceExternalBufferProperties real_fn =
+        (PFN_vkGetPhysicalDeviceExternalBufferProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalBufferProperties");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetPhysicalDeviceExternalBufferProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalBufferPropertiesKHR");
+    }
+    if (real_fn) {
+        real_fn(physicalDevice, pExternalBufferInfo, pExternalBufferProperties);
+        return;
+    }
+    if (pExternalBufferProperties) {
+        pExternalBufferProperties->externalMemoryProperties.externalMemoryFeatures = 0;
+        pExternalBufferProperties->externalMemoryProperties.exportFromImportedHandleTypes = 0;
+        pExternalBufferProperties->externalMemoryProperties.compatibleHandleTypes = 0;
+    }
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceExternalBufferPropertiesKHR(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceExternalBufferInfo* pExternalBufferInfo,
+    VkExternalBufferProperties* pExternalBufferProperties
+) {
+    vkGetPhysicalDeviceExternalBufferProperties(physicalDevice, pExternalBufferInfo, pExternalBufferProperties);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceExternalFenceProperties(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceExternalFenceInfo* pExternalFenceInfo,
+    VkExternalFenceProperties* pExternalFenceProperties
+) {
+    PFN_vkGetPhysicalDeviceExternalFenceProperties real_fn =
+        (PFN_vkGetPhysicalDeviceExternalFenceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalFenceProperties");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetPhysicalDeviceExternalFenceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalFencePropertiesKHR");
+    }
+    if (real_fn) {
+        real_fn(physicalDevice, pExternalFenceInfo, pExternalFenceProperties);
+        return;
+    }
+    if (pExternalFenceProperties) {
+        pExternalFenceProperties->exportFromImportedHandleTypes = 0;
+        pExternalFenceProperties->compatibleHandleTypes = 0;
+        pExternalFenceProperties->externalFenceFeatures = 0;
+    }
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceExternalFencePropertiesKHR(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceExternalFenceInfo* pExternalFenceInfo,
+    VkExternalFenceProperties* pExternalFenceProperties
+) {
+    vkGetPhysicalDeviceExternalFenceProperties(physicalDevice, pExternalFenceInfo, pExternalFenceProperties);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceExternalSemaphoreProperties(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceExternalSemaphoreInfo* pExternalSemaphoreInfo,
+    VkExternalSemaphoreProperties* pExternalSemaphoreProperties
+) {
+    PFN_vkGetPhysicalDeviceExternalSemaphoreProperties real_fn =
+        (PFN_vkGetPhysicalDeviceExternalSemaphoreProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalSemaphoreProperties");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetPhysicalDeviceExternalSemaphoreProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR");
+    }
+    if (real_fn) {
+        real_fn(physicalDevice, pExternalSemaphoreInfo, pExternalSemaphoreProperties);
+        return;
+    }
+    if (pExternalSemaphoreProperties) {
+        pExternalSemaphoreProperties->exportFromImportedHandleTypes = 0;
+        pExternalSemaphoreProperties->compatibleHandleTypes = 0;
+        pExternalSemaphoreProperties->externalSemaphoreFeatures = 0;
+    }
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceExternalSemaphorePropertiesKHR(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceExternalSemaphoreInfo* pExternalSemaphoreInfo,
+    VkExternalSemaphoreProperties* pExternalSemaphoreProperties
+) {
+    vkGetPhysicalDeviceExternalSemaphoreProperties(physicalDevice, pExternalSemaphoreInfo, pExternalSemaphoreProperties);
+}
+
+// Sampler YCbCr Conversion
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateSamplerYcbcrConversion(
+    VkDevice device,
+    const VkSamplerYcbcrConversionCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSamplerYcbcrConversion* pYcbcrConversion
+) {
+    PFN_vkCreateSamplerYcbcrConversion real_fn =
+        (PFN_vkCreateSamplerYcbcrConversion) get_real_proc(get_last_instance(), device, "vkCreateSamplerYcbcrConversion");
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateSamplerYcbcrConversion) get_real_proc(get_last_instance(), device, "vkCreateSamplerYcbcrConversionKHR");
+    }
+    if (real_fn) {
+        return real_fn(device, pCreateInfo, pAllocator, pYcbcrConversion);
+    }
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateSamplerYcbcrConversionKHR(
+    VkDevice device,
+    const VkSamplerYcbcrConversionCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSamplerYcbcrConversion* pYcbcrConversion
+) {
+    return vkCreateSamplerYcbcrConversion(device, pCreateInfo, pAllocator, pYcbcrConversion);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroySamplerYcbcrConversion(
+    VkDevice device,
+    VkSamplerYcbcrConversion ycbcrConversion,
+    const VkAllocationCallbacks* pAllocator
+) {
+    PFN_vkDestroySamplerYcbcrConversion real_fn =
+        (PFN_vkDestroySamplerYcbcrConversion) get_real_proc(get_last_instance(), device, "vkDestroySamplerYcbcrConversion");
+    if (!real_fn) {
+        real_fn = (PFN_vkDestroySamplerYcbcrConversion) get_real_proc(get_last_instance(), device, "vkDestroySamplerYcbcrConversionKHR");
+    }
+    if (real_fn) {
+        real_fn(device, ycbcrConversion, pAllocator);
+    }
+}
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroySamplerYcbcrConversionKHR(
+    VkDevice device,
+    VkSamplerYcbcrConversion ycbcrConversion,
+    const VkAllocationCallbacks* pAllocator
+) {
+    vkDestroySamplerYcbcrConversion(device, ycbcrConversion, pAllocator);
 }
 
 } // extern "C"
