@@ -9,11 +9,18 @@ FillModeNonSolidModule::FillModeNonSolidModule() {
     LOGI("Initialized Vulkan fillModeNonSolid emulation module");
 }
 
-bool FillModeNonSolidModule::is_device_native(VkPhysicalDevice physDev) {
+bool FillModeNonSolidModule::is_phys_device_native(VkPhysicalDevice physDev) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_native_support.find((uint64_t)(uintptr_t)physDev);
-    if (it != m_native_support.end()) {
+    auto it = m_phys_native_support.find((uint64_t)(uintptr_t)physDev);
+    if (it != m_phys_native_support.end()) {
         return it->second;
+    }
+
+    const char* force_emu = getenv("FORCE_EMULATE_FILL_MODE_NON_SOLID");
+    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
+        LOGI("FORCE_EMULATE_FILL_MODE_NON_SOLID set, enabling emulation for physical device %p", physDev);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
+        return false;
     }
 
     PFN_vkGetPhysicalDeviceFeatures real_fn =
@@ -24,7 +31,7 @@ bool FillModeNonSolidModule::is_device_native(VkPhysicalDevice physDev) {
         real_fn(physDev, &feat);
         native = (feat.fillModeNonSolid == VK_TRUE);
     }
-    m_native_support[(uint64_t)(uintptr_t)physDev] = native;
+    m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
     if (!native) {
         LOGI("Physical device %p lacks native fillModeNonSolid, enabling automatic emulation!", physDev);
     } else {
@@ -33,12 +40,21 @@ bool FillModeNonSolidModule::is_device_native(VkPhysicalDevice physDev) {
     return native;
 }
 
+bool FillModeNonSolidModule::is_device_native(VkDevice device) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_device_native_support.find((uint64_t)(uintptr_t)device);
+    if (it != m_device_native_support.end()) {
+        return it->second;
+    }
+    return false;
+}
+
 void FillModeNonSolidModule::on_get_features(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceFeatures* pFeatures
 ) {
     if (!pFeatures) return;
-    if (!is_device_native(physicalDevice)) {
+    if (!is_phys_device_native(physicalDevice)) {
         pFeatures->fillModeNonSolid = VK_TRUE;
         LOG_OPT_DEBUG("Emulated fillModeNonSolid = VK_TRUE in vkGetPhysicalDeviceFeatures");
     }
@@ -50,7 +66,7 @@ void FillModeNonSolidModule::on_post_get_features2(
     void* pUserData
 ) {
     if (!pFeatures) return;
-    if (!is_device_native(physicalDevice)) {
+    if (!is_phys_device_native(physicalDevice)) {
         pFeatures->features.fillModeNonSolid = VK_TRUE;
         LOG_OPT_DEBUG("Emulated fillModeNonSolid = VK_TRUE in vkGetPhysicalDeviceFeatures2");
     }
@@ -63,7 +79,7 @@ void FillModeNonSolidModule::on_pre_create_device(
     std::vector<const char*>& enabledExtensions,
     void*& pUserData
 ) {
-    if (is_device_native(physicalDevice) || !pCreateInfo) return;
+    if (is_phys_device_native(physicalDevice) || !pCreateInfo) return;
 
     // 1. If application enabled fillModeNonSolid in pEnabledFeatures, strip it for real driver
     if (pEnabledFeatures && pEnabledFeatures->fillModeNonSolid) {
@@ -86,12 +102,31 @@ void FillModeNonSolidModule::on_pre_create_device(
     }
 }
 
+void FillModeNonSolidModule::on_post_create_device(
+    VkPhysicalDevice physicalDevice,
+    VkDevice device,
+    VkResult result,
+    void* pUserData
+) {
+    if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
+        bool native = is_phys_device_native(physicalDevice);
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_device_native_support[(uint64_t)(uintptr_t)device] = native;
+        LOGI("Device %p created: fillModeNonSolid %s", device, native ? "NATIVE" : "EMULATED");
+    }
+}
+
+void FillModeNonSolidModule::on_destroy_device(VkDevice device) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_device_native_support.erase((uint64_t)(uintptr_t)device);
+}
+
 bool FillModeNonSolidModule::needs_pipeline_interception(
     VkDevice device,
     uint32_t createInfoCount,
     const VkGraphicsPipelineCreateInfo* pCreateInfos
 ) {
-    if (!pCreateInfos || createInfoCount == 0) return false;
+    if (is_device_native(device) || !pCreateInfos || createInfoCount == 0) return false;
 
     for (uint32_t i = 0; i < createInfoCount; i++) {
         const VkPipelineRasterizationStateCreateInfo* r = pCreateInfos[i].pRasterizationState;
@@ -109,7 +144,7 @@ void FillModeNonSolidModule::on_modify_pipeline_create_info(
     VkPipelineVertexInputStateCreateInfo& viState,
     std::vector<void*>& allocationsToFree
 ) {
-    if (createInfo.pRasterizationState == NULL) return;
+    if (is_device_native(device) || createInfo.pRasterizationState == NULL) return;
 
     if (createInfo.pRasterizationState->polygonMode != VK_POLYGON_MODE_FILL) {
         VkPipelineRasterizationStateCreateInfo* modRaster = (VkPipelineRasterizationStateCreateInfo*)

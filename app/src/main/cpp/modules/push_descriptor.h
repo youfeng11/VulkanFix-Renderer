@@ -51,6 +51,11 @@ public:
         std::vector<VkExtensionProperties>& extensions) override;
 
     // 2. Properties
+    void on_pre_get_properties2(
+        VkPhysicalDevice physicalDevice,
+        VkPhysicalDeviceProperties2* pProperties,
+        void*& pUserData) override;
+
     void on_post_get_properties2(
         VkPhysicalDevice physicalDevice,
         VkPhysicalDeviceProperties2* pProperties,
@@ -63,6 +68,12 @@ public:
         VkPhysicalDeviceFeatures* pEnabledFeatures,
         std::vector<const char*>& enabledExtensions,
         void*& pUserData) override;
+
+    void on_post_create_device(
+        VkPhysicalDevice physicalDevice,
+        VkDevice device,
+        VkResult result,
+        void* pUserData) override;
 
     void on_destroy_device(VkDevice device) override;
 
@@ -134,7 +145,8 @@ public:
         const void* pData) override;
 
 private:
-    bool is_device_native(VkPhysicalDevice physDev);
+    bool is_phys_device_native(VkPhysicalDevice physDev);
+    bool is_device_native(VkDevice device);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
     VkDescriptorSetLayout get_set_layout(VkPipelineLayout layout, uint32_t set);
     VkDescriptorSet allocate_push_set(VkDevice device, VkCommandBuffer cmd, VkDescriptorSetLayout setLayout);
@@ -149,7 +161,8 @@ private:
     };
 
     std::mutex m_mutex;
-    std::unordered_map<uint64_t, bool> m_native_support;
+    std::unordered_map<uint64_t, bool> m_phys_native_support;
+    std::unordered_map<uint64_t, bool> m_device_native_support;
     std::unordered_set<uint64_t> m_push_layouts;
     std::unordered_map<uint64_t, std::vector<VkDescriptorSetLayout>> m_pipeline_layouts;
     std::unordered_map<uint64_t, CmdPushState> m_cmd_states;

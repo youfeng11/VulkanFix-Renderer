@@ -108,6 +108,13 @@ bool DynamicRenderingModule::is_phys_device_native(VkPhysicalDevice physDev) {
         return it->second;
     }
 
+    const char* force_emu = getenv("FORCE_EMULATE_DYNAMIC_RENDERING");
+    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
+        LOGI("FORCE_EMULATE_DYNAMIC_RENDERING set, enabling emulation for physical device %p", physDev);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
+        return false;
+    }
+
     bool native = false;
     PFN_vkEnumerateDeviceExtensionProperties real_ext_fn =
         (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
@@ -184,17 +191,16 @@ void DynamicRenderingModule::on_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
     std::vector<VkExtensionProperties>& extensions
 ) {
-    if (is_phys_device_native(physicalDevice)) return;
+    bool has_ext = vku::has_extension(extensions, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
 
-    if (vku::has_extension(extensions, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
-        return;
+    if (!has_ext) {
+        VkExtensionProperties prop{};
+        memset(&prop, 0, sizeof(prop));
+        strncpy(prop.extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
+        prop.specVersion = VK_KHR_DYNAMIC_RENDERING_SPEC_VERSION;
+        extensions.push_back(prop);
+        LOGI("Injected extension: %s (spec version %u)", VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, prop.specVersion);
     }
-
-    VkExtensionProperties prop{};
-    strncpy(prop.extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
-    prop.specVersion = VK_KHR_DYNAMIC_RENDERING_SPEC_VERSION;
-    extensions.push_back(prop);
-    LOGI("Emulated extension: %s (spec version %u)", VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, prop.specVersion);
 }
 
 void DynamicRenderingModule::on_pre_get_features2(
@@ -224,9 +230,16 @@ void DynamicRenderingModule::on_post_get_features2(
             pFeatures->pNext, pUserData);
         dynFeatures->dynamicRendering = VK_TRUE;
         LOG_OPT_DEBUG("DynamicRendering: supplied dynamicRendering = VK_TRUE in VkPhysicalDeviceDynamicRenderingFeaturesKHR");
+    } else {
+        auto* dyn = vku::find_pnext_mut<VkPhysicalDeviceDynamicRenderingFeaturesKHR>(
+            pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR);
+        if (dyn) {
+            dyn->dynamicRendering = VK_TRUE;
+            LOG_OPT_DEBUG("DynamicRendering: supplied dynamicRendering = VK_TRUE in VkPhysicalDeviceDynamicRenderingFeaturesKHR");
+        }
     }
 
-    auto* v13 = vku::find_pnext<VkPhysicalDeviceVulkan13Features>(
+    auto* v13 = vku::find_pnext_mut<VkPhysicalDeviceVulkan13Features>(
         pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
     if (v13) {
         v13->dynamicRendering = VK_TRUE;

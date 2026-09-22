@@ -11,11 +11,18 @@ PushDescriptorModule::PushDescriptorModule() {
     LOGI("Initialized Vulkan VK_KHR_push_descriptor module");
 }
 
-bool PushDescriptorModule::is_device_native(VkPhysicalDevice physDev) {
+bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_native_support.find((uint64_t)(uintptr_t)physDev);
-    if (it != m_native_support.end()) {
+    auto it = m_phys_native_support.find((uint64_t)(uintptr_t)physDev);
+    if (it != m_phys_native_support.end()) {
         return it->second;
+    }
+
+    const char* force_emu = getenv("FORCE_EMULATE_PUSH_DESCRIPTOR");
+    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
+        LOGI("FORCE_EMULATE_PUSH_DESCRIPTOR set, enabling emulation for physical device %p", physDev);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
+        return false;
     }
 
     PFN_vkEnumerateDeviceExtensionProperties real_fn =
@@ -36,7 +43,7 @@ bool PushDescriptorModule::is_device_native(VkPhysicalDevice physDev) {
         }
     }
 
-    m_native_support[(uint64_t)(uintptr_t)physDev] = native;
+    m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
     if (!native) {
         LOGI("Physical device %p lacks native VK_KHR_push_descriptor, enabling emulation layer!", physDev);
     } else {
@@ -45,21 +52,40 @@ bool PushDescriptorModule::is_device_native(VkPhysicalDevice physDev) {
     return native;
 }
 
+bool PushDescriptorModule::is_device_native(VkDevice device) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_device_native_support.find((uint64_t)(uintptr_t)device);
+    if (it != m_device_native_support.end()) {
+        return it->second;
+    }
+    return false;
+}
+
 void PushDescriptorModule::on_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
     std::vector<VkExtensionProperties>& extensions
 ) {
-    if (is_device_native(physicalDevice)) return;
+    bool has_ext = vku::has_extension(extensions, "VK_KHR_push_descriptor");
 
-    if (vku::has_extension(extensions, "VK_KHR_push_descriptor")) {
-        return;
+    if (!has_ext) {
+        VkExtensionProperties prop{};
+        memset(&prop, 0, sizeof(prop));
+        strncpy(prop.extensionName, "VK_KHR_push_descriptor", VK_MAX_EXTENSION_NAME_SIZE - 1);
+        prop.specVersion = VK_KHR_PUSH_DESCRIPTOR_SPEC_VERSION;
+        extensions.push_back(prop);
+        LOGI("Injected extension: VK_KHR_push_descriptor (spec version %u)", prop.specVersion);
     }
+}
 
-    VkExtensionProperties prop{};
-    strncpy(prop.extensionName, "VK_KHR_push_descriptor", VK_MAX_EXTENSION_NAME_SIZE - 1);
-    prop.specVersion = VK_KHR_PUSH_DESCRIPTOR_SPEC_VERSION;
-    extensions.push_back(prop);
-    LOGI("Emulated extension: VK_KHR_push_descriptor (spec version %u)", prop.specVersion);
+void PushDescriptorModule::on_pre_get_properties2(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties2* pProperties,
+    void*& pUserData
+) {
+    pUserData = nullptr;
+    if (!pProperties || is_phys_device_native(physicalDevice)) return;
+
+    pUserData = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR);
 }
 
 void PushDescriptorModule::on_post_get_properties2(
@@ -68,11 +94,18 @@ void PushDescriptorModule::on_post_get_properties2(
     void* pUserData
 ) {
     if (!pProperties) return;
-    auto* props = vku::find_pnext<VkPhysicalDevicePushDescriptorPropertiesKHR>(
-        pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR);
-    if (props) {
+
+    if (pUserData) {
+        auto* props = vku::relink_pnext<VkPhysicalDevicePushDescriptorPropertiesKHR>(
+            pProperties->pNext, pUserData);
         props->maxPushDescriptors = 32;
-        LOG_OPT_DEBUG("PushDescriptor: set maxPushDescriptors = 32 in VkPhysicalDevicePushDescriptorPropertiesKHR");
+        LOG_OPT_DEBUG("PushDescriptor: supplied maxPushDescriptors = 32 in VkPhysicalDevicePushDescriptorPropertiesKHR");
+    } else {
+        auto* props = vku::find_pnext_mut<VkPhysicalDevicePushDescriptorPropertiesKHR>(
+            pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR);
+        if (props && props->maxPushDescriptors == 0) {
+            props->maxPushDescriptors = 32;
+        }
     }
 }
 
@@ -83,15 +116,31 @@ void PushDescriptorModule::on_pre_create_device(
     std::vector<const char*>& enabledExtensions,
     void*& pUserData
 ) {
-    if (is_device_native(physicalDevice)) return;
+    if (is_phys_device_native(physicalDevice) || !pCreateInfo) return;
 
     if (vku::strip_extension(enabledExtensions, "VK_KHR_push_descriptor")) {
         LOGI("vkCreateDevice: stripped VK_KHR_push_descriptor from enabledExtensions for physical device %p", physicalDevice);
     }
 }
 
+void PushDescriptorModule::on_post_create_device(
+    VkPhysicalDevice physicalDevice,
+    VkDevice device,
+    VkResult result,
+    void* pUserData
+) {
+    if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
+        bool native = is_phys_device_native(physicalDevice);
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_device_native_support[(uint64_t)(uintptr_t)device] = native;
+        LOGI("Device %p created: push descriptor %s", device, native ? "NATIVE" : "EMULATED");
+    }
+}
+
 void PushDescriptorModule::on_destroy_device(VkDevice device) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    m_device_native_support.erase((uint64_t)(uintptr_t)device);
+
     PFN_vkDestroyDescriptorPool real_destroy_pool = (PFN_vkDestroyDescriptorPool)
         get_real_proc(get_last_instance(), device, "vkDestroyDescriptorPool");
 
@@ -115,6 +164,8 @@ void PushDescriptorModule::on_pre_create_descriptor_set_layout(
     VkDevice device,
     VkDescriptorSetLayoutCreateInfo& createInfo
 ) {
+    if (is_device_native(device)) return;
+
     if (createInfo.flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR) {
         createInfo.flags &= ~VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
         LOG_OPT_DEBUG("PushDescriptor: stripped PUSH_DESCRIPTOR_BIT from VkDescriptorSetLayoutCreateInfo");
@@ -127,6 +178,8 @@ void PushDescriptorModule::on_post_create_descriptor_set_layout(
     VkResult result,
     VkDescriptorSetLayout setLayout
 ) {
+    if (is_device_native(device)) return;
+
     if (result == VK_SUCCESS && pCreateInfo && setLayout != VK_NULL_HANDLE) {
         if (pCreateInfo->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR) {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -238,6 +291,8 @@ void PushDescriptorModule::on_pre_create_descriptor_update_template(
     VkDevice device,
     VkDescriptorUpdateTemplateCreateInfo& createInfo
 ) {
+    if (is_device_native(device)) return;
+
     if (createInfo.templateType == VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR) {
         createInfo.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET;
         LOG_OPT_DEBUG("PushDescriptor: redirected templateType to DESCRIPTOR_SET");
@@ -360,7 +415,7 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set(
     const VkWriteDescriptorSet* pDescriptorWrites
 ) {
     VkDevice device = get_device_for_cmd(commandBuffer);
-    if (device == VK_NULL_HANDLE) return false;
+    if (device == VK_NULL_HANDLE || is_device_native(device)) return false;
 
     VkDescriptorSetLayout setLayout = get_set_layout(layout, set);
     if (setLayout == VK_NULL_HANDLE) {
@@ -411,7 +466,7 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set_with_template(
     const void* pData
 ) {
     VkDevice device = get_device_for_cmd(commandBuffer);
-    if (device == VK_NULL_HANDLE) return false;
+    if (device == VK_NULL_HANDLE || is_device_native(device)) return false;
 
     VkDescriptorSetLayout setLayout = get_set_layout(layout, set);
     if (setLayout == VK_NULL_HANDLE) return false;

@@ -558,9 +558,10 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     VkCommandBuffer commandBuffer,
     const VkCommandBufferBeginInfo* pBeginInfo
 ) {
+    VkDevice device = get_device_for_cmd(commandBuffer);
     if (!pBeginInfo) {
         PFN_vkBeginCommandBuffer real_fn =
-            (PFN_vkBeginCommandBuffer) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkBeginCommandBuffer");
+            (PFN_vkBeginCommandBuffer) get_real_proc(get_last_instance(), device, "vkBeginCommandBuffer");
         return real_fn ? real_fn(commandBuffer, pBeginInfo) : VK_ERROR_INITIALIZATION_FAILED;
     }
 
@@ -579,7 +580,7 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     }
 
     PFN_vkBeginCommandBuffer real_fn =
-        (PFN_vkBeginCommandBuffer) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkBeginCommandBuffer");
+        (PFN_vkBeginCommandBuffer) get_real_proc(get_last_instance(), device, "vkBeginCommandBuffer");
     if (real_fn) {
         return real_fn(commandBuffer, has_mod_inheritance ? &modBeginInfo : pBeginInfo);
     }
@@ -599,8 +600,9 @@ VkResult LayerManager::dispatch_reset_command_buffer(
         }
     }
 
+    VkDevice device = get_device_for_cmd(commandBuffer);
     PFN_vkResetCommandBuffer real_fn =
-        (PFN_vkResetCommandBuffer) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkResetCommandBuffer");
+        (PFN_vkResetCommandBuffer) get_real_proc(get_last_instance(), device, "vkResetCommandBuffer");
     if (real_fn) {
         return real_fn(commandBuffer, flags);
     }
@@ -680,8 +682,9 @@ void LayerManager::dispatch_cmd_push_descriptor_set(
     }
 
     if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
         PFN_vkCmdPushDescriptorSetKHR real_fn =
-            (PFN_vkCmdPushDescriptorSetKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdPushDescriptorSetKHR");
+            (PFN_vkCmdPushDescriptorSetKHR) get_real_proc(get_last_instance(), device, "vkCmdPushDescriptorSetKHR");
         if (real_fn) {
             real_fn(commandBuffer, pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites);
         }
@@ -708,8 +711,9 @@ void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
     }
 
     if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
         PFN_vkCmdPushDescriptorSetWithTemplateKHR real_fn =
-            (PFN_vkCmdPushDescriptorSetWithTemplateKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdPushDescriptorSetWithTemplateKHR");
+            (PFN_vkCmdPushDescriptorSetWithTemplateKHR) get_real_proc(get_last_instance(), device, "vkCmdPushDescriptorSetWithTemplateKHR");
         if (real_fn) {
             real_fn(commandBuffer, descriptorUpdateTemplate, layout, set, pData);
         }
@@ -818,10 +822,11 @@ void LayerManager::dispatch_cmd_begin_rendering(
     }
 
     if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
         PFN_vkCmdBeginRenderingKHR real_fn =
-            (PFN_vkCmdBeginRenderingKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdBeginRenderingKHR");
+            (PFN_vkCmdBeginRenderingKHR) get_real_proc(get_last_instance(), device, "vkCmdBeginRenderingKHR");
         if (!real_fn) {
-            real_fn = (PFN_vkCmdBeginRenderingKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdBeginRendering");
+            real_fn = (PFN_vkCmdBeginRenderingKHR) get_real_proc(get_last_instance(), device, "vkCmdBeginRendering");
         }
         if (real_fn) {
             real_fn(commandBuffer, pRenderingInfo);
@@ -844,10 +849,11 @@ void LayerManager::dispatch_cmd_end_rendering(
     }
 
     if (!handled) {
+        VkDevice device = get_device_for_cmd(commandBuffer);
         PFN_vkCmdEndRenderingKHR real_fn =
-            (PFN_vkCmdEndRenderingKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdEndRenderingKHR");
+            (PFN_vkCmdEndRenderingKHR) get_real_proc(get_last_instance(), device, "vkCmdEndRenderingKHR");
         if (!real_fn) {
-            real_fn = (PFN_vkCmdEndRenderingKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkCmdEndRendering");
+            real_fn = (PFN_vkCmdEndRenderingKHR) get_real_proc(get_last_instance(), device, "vkCmdEndRendering");
         }
         if (real_fn) {
             real_fn(commandBuffer);

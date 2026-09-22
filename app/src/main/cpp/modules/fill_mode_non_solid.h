@@ -32,6 +32,14 @@ public:
         std::vector<const char*>& enabledExtensions,
         void*& pUserData) override;
 
+    void on_post_create_device(
+        VkPhysicalDevice physicalDevice,
+        VkDevice device,
+        VkResult result,
+        void* pUserData) override;
+
+    void on_destroy_device(VkDevice device) override;
+
     bool needs_pipeline_interception(
         VkDevice device,
         uint32_t createInfoCount,
@@ -45,10 +53,12 @@ public:
         std::vector<void*>& allocationsToFree) override;
 
 private:
-    bool is_device_native(VkPhysicalDevice physDev);
+    bool is_phys_device_native(VkPhysicalDevice physDev);
+    bool is_device_native(VkDevice device);
 
     std::mutex m_mutex;
-    std::unordered_map<uint64_t, bool> m_native_support;
+    std::unordered_map<uint64_t, bool> m_phys_native_support;
+    std::unordered_map<uint64_t, bool> m_device_native_support;
 };
 
 #endif // FILL_MODE_NON_SOLID_H

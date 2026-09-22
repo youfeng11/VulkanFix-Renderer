@@ -12,57 +12,84 @@ VertexAttributeDivisorModule::VertexAttributeDivisorModule() {
     LOGI("Initialized Vulkan Vertex Attribute Divisor emulation module (with full instance rate divisor support)");
 }
 
-bool VertexAttributeDivisorModule::query_native_support(VkPhysicalDevice physDev) {
-    const char* force_emu = getenv("FORCE_EMULATE_DIVISOR");
-    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
-        LOGI("FORCE_EMULATE_DIVISOR set, disabling native divisor detection for %p", physDev);
-        return false;
-    }
-
-    PFN_vkGetPhysicalDeviceFeatures2 real_gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)
-        get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2");
-    if (!real_gpf2) {
-        real_gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)
-            get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2KHR");
-    }
-
-    if (!real_gpf2) return false;
-
-    VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT divisorFeatures{};
-    divisorFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT;
-    divisorFeatures.pNext = nullptr;
-
-    VkPhysicalDeviceFeatures2 features2{};
-    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = &divisorFeatures;
-
-    real_gpf2(physDev, &features2);
-
-    return (divisorFeatures.vertexAttributeInstanceRateDivisor == VK_TRUE);
-}
-
-bool VertexAttributeDivisorModule::is_phys_device_native(VkPhysicalDevice physDev) {
+VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe_phys_device(VkPhysicalDevice physDev) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_phys_native_support.find((uint64_t)(uintptr_t)physDev);
-    if (it != m_phys_native_support.end()) {
+    auto it = m_phys_devices.find((uint64_t)(uintptr_t)physDev);
+    if (it != m_phys_devices.end() && it->second.probed) {
         return it->second;
     }
 
-    bool native = query_native_support(physDev);
-    m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
-    if (!native) {
-        LOGI("Physical device %p lacks native vertexAttributeInstanceRateDivisor, enabling emulation layer!", physDev);
-    } else {
-        LOGI("Physical device %p natively supports vertexAttributeInstanceRateDivisor", physDev);
+    PhysDeviceInfo info{};
+    if (it != m_phys_devices.end()) {
+        info = it->second;
     }
-    return native;
+
+    // 1. Probe native device extensions if not already known
+    if (!info.probed) {
+        PFN_vkEnumerateDeviceExtensionProperties real_ext_fn =
+            (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+        if (real_ext_fn) {
+            uint32_t count = 0;
+            if (real_ext_fn(physDev, NULL, &count, NULL) == VK_SUCCESS && count > 0) {
+                std::vector<VkExtensionProperties> exts(count);
+                if (real_ext_fn(physDev, NULL, &count, exts.data()) == VK_SUCCESS) {
+                    for (const auto& e : exts) {
+                        if (strcmp(e.extensionName, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) == 0) {
+                            info.native_has_ext = true;
+                        }
+                        if (strcmp(e.extensionName, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) == 0) {
+                            info.native_has_khr = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Probe native feature support (vertexAttributeInstanceRateDivisor and zeroDivisor)
+    const char* force_emu = getenv("FORCE_EMULATE_DIVISOR");
+    bool forced = (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0));
+
+    if (!forced && (info.native_has_ext || info.native_has_khr)) {
+        PFN_vkGetPhysicalDeviceFeatures2 real_gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)
+            get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2");
+        if (!real_gpf2) {
+            real_gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)
+                get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2KHR");
+        }
+
+        if (real_gpf2) {
+            VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT divisorFeatures{};
+            divisorFeatures.sType = info.native_has_khr
+                ? VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR
+                : VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT;
+            divisorFeatures.pNext = nullptr;
+
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &divisorFeatures;
+
+            real_gpf2(physDev, &features2);
+
+            info.native_has_rate_divisor = (divisorFeatures.vertexAttributeInstanceRateDivisor == VK_TRUE);
+            info.native_has_zero_divisor = (divisorFeatures.vertexAttributeInstanceRateZeroDivisor == VK_TRUE);
+        }
+    }
+
+    info.probed = true;
+    m_phys_devices[(uint64_t)(uintptr_t)physDev] = info;
+
+    LOGI("Physical device %p: native EXT=%d, native KHR=%d, native rateDivisor=%d, native zeroDivisor=%d",
+         physDev, info.native_has_ext, info.native_has_khr, info.native_has_rate_divisor, info.native_has_zero_divisor);
+
+    return info;
 }
 
 bool VertexAttributeDivisorModule::is_device_native(VkDevice device) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_device_native_support.find((uint64_t)(uintptr_t)device);
-    if (it != m_device_native_support.end()) {
-        return it->second;
+    auto it = m_device_needs_emulation.find((uint64_t)(uintptr_t)device);
+    if (it != m_device_needs_emulation.end()) {
+        return !it->second;
     }
     return false;
 }
@@ -92,18 +119,31 @@ void VertexAttributeDivisorModule::on_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
     std::vector<VkExtensionProperties>& extensions
 ) {
-    if (is_phys_device_native(physicalDevice)) return;
+    bool has_ext = vku::has_extension(extensions, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+    bool has_khr = vku::has_extension(extensions, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
 
-    if (!vku::has_extension(extensions, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME)) {
+    // Save native driver extension presence
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto& info = m_phys_devices[(uint64_t)(uintptr_t)physicalDevice];
+        info.native_has_ext = has_ext;
+        info.native_has_khr = has_khr;
+    }
+
+    // ALWAYS inject VK_EXT_vertex_attribute_divisor if not natively present
+    if (!has_ext) {
         VkExtensionProperties extProps{};
+        memset(&extProps, 0, sizeof(extProps));
         strncpy(extProps.extensionName, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
         extProps.specVersion = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_SPEC_VERSION;
         extensions.push_back(extProps);
         LOGI("Injected extension: %s (v%u)", VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_SPEC_VERSION);
     }
 
-    if (!vku::has_extension(extensions, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME)) {
+    // ALWAYS inject VK_KHR_vertex_attribute_divisor if not natively present
+    if (!has_khr) {
         VkExtensionProperties khrProps{};
+        memset(&khrProps, 0, sizeof(khrProps));
         strncpy(khrProps.extensionName, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
         khrProps.specVersion = VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_SPEC_VERSION;
         extensions.push_back(khrProps);
@@ -117,13 +157,19 @@ void VertexAttributeDivisorModule::on_pre_get_features2(
     void*& pUserData
 ) {
     pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pFeatures) return;
+    if (!pFeatures) return;
 
-    void* unlinked = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT);
-    if (!unlinked) {
-        unlinked = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR);
+    PhysDeviceInfo info = probe_phys_device(physicalDevice);
+
+    // If native driver does not support either extension natively, unlink divisor feature structs
+    // so the driver does not fail on unrecognized sType
+    if (!info.native_has_ext && !info.native_has_khr) {
+        void* unlinked = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT);
+        if (!unlinked) {
+            unlinked = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR);
+        }
+        pUserData = unlinked;
     }
-    pUserData = unlinked;
 }
 
 void VertexAttributeDivisorModule::on_post_get_features2(
@@ -131,7 +177,7 @@ void VertexAttributeDivisorModule::on_post_get_features2(
     VkPhysicalDeviceFeatures2* pFeatures,
     void* pUserData
 ) {
-    if (!pFeatures || is_phys_device_native(physicalDevice)) return;
+    if (!pFeatures) return;
 
     if (pUserData) {
         auto* feat = vku::relink_pnext<VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT>(
@@ -139,10 +185,25 @@ void VertexAttributeDivisorModule::on_post_get_features2(
         feat->vertexAttributeInstanceRateDivisor = VK_TRUE;
         feat->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
         LOG_OPT_DEBUG("Supplied vertexAttributeInstanceRateDivisor = VK_TRUE, vertexAttributeInstanceRateZeroDivisor = VK_TRUE");
+    } else {
+        auto* featExt = vku::find_pnext_mut<VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT>(
+            pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT);
+        if (featExt) {
+            featExt->vertexAttributeInstanceRateDivisor = VK_TRUE;
+            featExt->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
+            LOG_OPT_DEBUG("Ensured vertexAttributeInstanceRateDivisor = VK_TRUE in EXT features");
+        }
+        auto* featKhr = vku::find_pnext_mut<VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR>(
+            pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR);
+        if (featKhr) {
+            featKhr->vertexAttributeInstanceRateDivisor = VK_TRUE;
+            featKhr->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
+            LOG_OPT_DEBUG("Ensured vertexAttributeInstanceRateDivisor = VK_TRUE in KHR features");
+        }
     }
 
 #ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
-    auto* v14 = vku::find_pnext<VkPhysicalDeviceVulkan14Features>(
+    auto* v14 = vku::find_pnext_mut<VkPhysicalDeviceVulkan14Features>(
         pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES);
     if (v14) {
         v14->vertexAttributeInstanceRateDivisor = VK_TRUE;
@@ -158,13 +219,17 @@ void VertexAttributeDivisorModule::on_pre_get_properties2(
     void*& pUserData
 ) {
     pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pProperties) return;
+    if (!pProperties) return;
 
-    void* unlinked = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT);
-    if (!unlinked) {
-        unlinked = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_KHR);
+    PhysDeviceInfo info = probe_phys_device(physicalDevice);
+
+    if (!info.native_has_ext && !info.native_has_khr) {
+        void* unlinked = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT);
+        if (!unlinked) {
+            unlinked = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_KHR);
+        }
+        pUserData = unlinked;
     }
-    pUserData = unlinked;
 }
 
 void VertexAttributeDivisorModule::on_post_get_properties2(
@@ -172,19 +237,30 @@ void VertexAttributeDivisorModule::on_post_get_properties2(
     VkPhysicalDeviceProperties2* pProperties,
     void* pUserData
 ) {
-    if (!pProperties || is_phys_device_native(physicalDevice)) return;
+    if (!pProperties) return;
 
     if (pUserData) {
         auto* props = vku::relink_pnext<VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT>(
             pProperties->pNext, pUserData);
         props->maxVertexAttribDivisor = UINT32_MAX;
         LOG_OPT_DEBUG("Supplied maxVertexAttribDivisor = UINT32_MAX");
+    } else {
+        auto* extProps = vku::find_pnext_mut<VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT>(
+            pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT);
+        if (extProps && extProps->maxVertexAttribDivisor == 0) {
+            extProps->maxVertexAttribDivisor = UINT32_MAX;
+        }
+        auto* khrProps = vku::find_pnext_mut<VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR>(
+            pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_KHR);
+        if (khrProps && khrProps->maxVertexAttribDivisor == 0) {
+            khrProps->maxVertexAttribDivisor = UINT32_MAX;
+        }
     }
 
 #ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES
-    auto* v14Props = vku::find_pnext<VkPhysicalDeviceVulkan14Properties>(
+    auto* v14Props = vku::find_pnext_mut<VkPhysicalDeviceVulkan14Properties>(
         pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES);
-    if (v14Props) {
+    if (v14Props && v14Props->maxVertexAttribDivisor == 0) {
         v14Props->maxVertexAttribDivisor = UINT32_MAX;
         LOG_OPT_DEBUG("Supplied maxVertexAttribDivisor = UINT32_MAX in VkPhysicalDeviceVulkan14Properties");
     }
@@ -199,30 +275,68 @@ void VertexAttributeDivisorModule::on_pre_create_device(
     void*& pUserData
 ) {
     pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pCreateInfo) return;
+    if (!pCreateInfo) return;
 
-    // 1. Filter out divisor extensions from enabledExtensions if native driver does not support them
-    vku::strip_extension(enabledExtensions, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
-    vku::strip_extension(enabledExtensions, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+    PhysDeviceInfo info = probe_phys_device(physicalDevice);
 
-    // 2. Unlink divisor features struct from pCreateInfo->pNext
-    void* unlinked = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT);
-    if (!unlinked) {
-        unlinked = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR);
+    // 1. Only strip extensions if native driver does not support them!
+    if (!info.native_has_ext) {
+        if (vku::strip_extension(enabledExtensions, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME)) {
+            LOGI("vkCreateDevice: stripped %s (native driver lacks support)", VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+        }
     }
-    pUserData = unlinked;
-    if (pUserData) {
-        LOGI("vkCreateDevice: safely unlinked divisor features struct from pNext");
+    if (!info.native_has_khr) {
+        if (vku::strip_extension(enabledExtensions, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME)) {
+            LOGI("vkCreateDevice: stripped %s (native driver lacks support)", VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+        }
     }
 
-    // 3. Disable divisor features in Vulkan 1.4 features if chained
+    // 2. Features handling:
+    if (!info.native_has_ext && !info.native_has_khr) {
+        void* unlinked = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT);
+        if (!unlinked) {
+            unlinked = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR);
+        }
+        pUserData = unlinked;
+        if (pUserData) {
+            LOGI("vkCreateDevice: safely unlinked divisor features struct from pNext");
+        }
+    } else {
+        // Driver supports extension, but may not support divisor > 1 or zero divisor natively
+        if (!info.native_has_rate_divisor) {
+            auto* extFeat = vku::find_pnext_mut<VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT>(
+                pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT);
+            if (extFeat) {
+                extFeat->vertexAttributeInstanceRateDivisor = VK_FALSE;
+                if (!info.native_has_zero_divisor) {
+                    extFeat->vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
+                }
+                LOGI("vkCreateDevice: disabled unsupported rateDivisor in EXT features for native driver");
+            }
+            auto* khrFeat = vku::find_pnext_mut<VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR>(
+                pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR);
+            if (khrFeat) {
+                khrFeat->vertexAttributeInstanceRateDivisor = VK_FALSE;
+                if (!info.native_has_zero_divisor) {
+                    khrFeat->vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
+                }
+                LOGI("vkCreateDevice: disabled unsupported rateDivisor in KHR features for native driver");
+            }
+        }
+    }
+
+    // 3. Disable divisor features in Vulkan 1.4 features if chained and driver lacks hardware support
 #ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
-    auto* v14 = vku::find_pnext_mut<VkPhysicalDeviceVulkan14Features>(
-        pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES);
-    if (v14) {
-        v14->vertexAttributeInstanceRateDivisor = VK_FALSE;
-        v14->vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
-        LOGI("vkCreateDevice: disabled vertexAttributeInstanceRateDivisor in VkPhysicalDeviceVulkan14Features");
+    if (!info.native_has_rate_divisor) {
+        auto* v14 = vku::find_pnext_mut<VkPhysicalDeviceVulkan14Features>(
+            pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES);
+        if (v14) {
+            v14->vertexAttributeInstanceRateDivisor = VK_FALSE;
+            if (!info.native_has_zero_divisor) {
+                v14->vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
+            }
+            LOGI("vkCreateDevice: disabled vertexAttributeInstanceRateDivisor in VkPhysicalDeviceVulkan14Features");
+        }
     }
 #endif
 }
@@ -234,16 +348,27 @@ void VertexAttributeDivisorModule::on_post_create_device(
     void* pUserData
 ) {
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
-        bool native = is_phys_device_native(physicalDevice);
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_device_native_support[(uint64_t)(uintptr_t)device] = native;
-        m_last_device = device;
+        PhysDeviceInfo info = probe_phys_device(physicalDevice);
+
+        // A device needs emulation if native driver lacks rate divisor (> 1) or zero divisor (== 0),
+        // or lacks the extension entirely
+        bool needs_emu = (!info.native_has_rate_divisor || !info.native_has_zero_divisor ||
+                          (!info.native_has_ext && !info.native_has_khr));
+
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_device_needs_emulation[(uint64_t)(uintptr_t)device] = needs_emu;
+            m_last_device = device;
+        }
+
+        LOGI("Device %p created: divisor emulation %s", device,
+             needs_emu ? "ENABLED (sub-draw batching & stride rewrite)" : "DISABLED (driver native)");
     }
 }
 
 void VertexAttributeDivisorModule::on_destroy_device(VkDevice device) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_device_native_support.erase((uint64_t)(uintptr_t)device);
+    m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
     for (auto it = m_cmd_devices.begin(); it != m_cmd_devices.end(); ) {
         if (it->second == device) {
             m_cmd_states.erase(it->first);

@@ -210,16 +210,23 @@ private:
         VkDeviceSize bound_offsets[MAX_VERTEX_BINDINGS]{};
     };
 
-    bool is_phys_device_native(VkPhysicalDevice physDev);
+    struct PhysDeviceInfo {
+        bool native_has_ext = false;
+        bool native_has_khr = false;
+        bool native_has_rate_divisor = false;
+        bool native_has_zero_divisor = false;
+        bool probed = false;
+    };
+
+    PhysDeviceInfo probe_phys_device(VkPhysicalDevice physDev);
     bool is_device_native(VkDevice device);
-    bool query_native_support(VkPhysicalDevice physDev);
 
     CmdBufferState* get_or_create_cmd_state(VkCommandBuffer cmd);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
 
     std::mutex m_mutex;
-    std::unordered_map<uint64_t, bool> m_phys_native_support;
-    std::unordered_map<uint64_t, bool> m_device_native_support;
+    std::unordered_map<uint64_t, PhysDeviceInfo> m_phys_devices;
+    std::unordered_map<uint64_t, bool> m_device_needs_emulation;
     std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
     std::atomic<VkDevice> m_last_device{VK_NULL_HANDLE};
 
