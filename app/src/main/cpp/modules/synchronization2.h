@@ -82,6 +82,9 @@ private:
     std::mutex m_mutex;
     std::unordered_map<uint64_t, bool> m_phys_native_support;
     std::unordered_map<uint64_t, bool> m_device_needs_emulation;
+
+    std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
+    std::atomic<bool> m_primary_native{false};
 };
 
 #endif // SYNCHRONIZATION2_H

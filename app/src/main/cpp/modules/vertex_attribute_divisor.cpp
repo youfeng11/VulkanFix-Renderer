@@ -104,14 +104,24 @@ VkDevice VertexAttributeDivisorModule::get_device_for_cmd(VkCommandBuffer cmd) {
 }
 
 VertexAttributeDivisorModule::CmdBufferState* VertexAttributeDivisorModule::get_or_create_cmd_state(VkCommandBuffer cmd) {
+    thread_local VkCommandBuffer s_cached_cmd = VK_NULL_HANDLE;
+    thread_local CmdBufferState* s_cached_state = nullptr;
+    if (__builtin_expect(cmd == s_cached_cmd && s_cached_state != nullptr, 1)) {
+        return s_cached_state;
+    }
+
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_cmd_states.find((uint64_t)(uintptr_t)cmd);
     if (it != m_cmd_states.end()) {
-        return it->second.get();
+        s_cached_cmd = cmd;
+        s_cached_state = it->second.get();
+        return s_cached_state;
     }
     auto state = std::make_unique<CmdBufferState>();
     CmdBufferState* ptr = state.get();
     m_cmd_states[(uint64_t)(uintptr_t)cmd] = std::move(state);
+    s_cached_cmd = cmd;
+    s_cached_state = ptr;
     return ptr;
 }
 
@@ -566,17 +576,13 @@ void VertexAttributeDivisorModule::on_cmd_bind_pipeline(
     VkPipelineBindPoint pipelineBindPoint,
     VkPipeline pipeline
 ) {
+    if (!m_has_divisor_pipelines.load(std::memory_order_relaxed)) return;
     if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
 
     CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
     if (!state) return;
 
     state->current_pipeline = pipeline;
-
-    if (!m_has_divisor_pipelines.load(std::memory_order_relaxed)) {
-        state->active_divisor_info = nullptr;
-        return;
-    }
 
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_pipeline_divisors.find((uint64_t)(uintptr_t)pipeline);
@@ -594,6 +600,7 @@ void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers(
     const VkBuffer* pBuffers,
     const VkDeviceSize* pOffsets
 ) {
+    if (!m_has_divisor_pipelines.load(std::memory_order_relaxed)) return;
     if (!pBuffers || !pOffsets || bindingCount == 0) return;
 
     CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
@@ -624,10 +631,9 @@ bool VertexAttributeDivisorModule::on_cmd_draw(
 
     const auto& div_info = *state->active_divisor_info;
     VkDevice device = get_device_for_cmd(commandBuffer);
-    PFN_vkCmdBindVertexBuffers real_bind_vb = (PFN_vkCmdBindVertexBuffers)
-        get_real_proc(get_last_instance(), device, "vkCmdBindVertexBuffers");
-    PFN_vkCmdDraw real_draw = (PFN_vkCmdDraw)
-        get_real_proc(get_last_instance(), device, "vkCmdDraw");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkCmdBindVertexBuffers real_bind_vb = dt.CmdBindVertexBuffers;
+    PFN_vkCmdDraw real_draw = dt.CmdDraw;
     if (!real_bind_vb || !real_draw) return false;
 
     uint32_t inst = firstInstance;
@@ -693,10 +699,9 @@ bool VertexAttributeDivisorModule::on_cmd_draw_indexed(
 
     const auto& div_info = *state->active_divisor_info;
     VkDevice device = get_device_for_cmd(commandBuffer);
-    PFN_vkCmdBindVertexBuffers real_bind_vb = (PFN_vkCmdBindVertexBuffers)
-        get_real_proc(get_last_instance(), device, "vkCmdBindVertexBuffers");
-    PFN_vkCmdDrawIndexed real_draw_indexed = (PFN_vkCmdDrawIndexed)
-        get_real_proc(get_last_instance(), device, "vkCmdDrawIndexed");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkCmdBindVertexBuffers real_bind_vb = dt.CmdBindVertexBuffers;
+    PFN_vkCmdDrawIndexed real_draw_indexed = dt.CmdDrawIndexed;
     if (!real_bind_vb || !real_draw_indexed) return false;
 
     uint32_t inst = firstInstance;

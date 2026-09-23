@@ -170,6 +170,9 @@ bool Synchronization2Module::is_device_native(VkDevice device) {
     if (device == VK_NULL_HANDLE) {
         return false;
     }
+    if (__builtin_expect(device == m_primary_dev.load(std::memory_order_relaxed), 1)) {
+        return m_primary_native.load(std::memory_order_relaxed);
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_device_needs_emulation.find((uint64_t)(uintptr_t)device);
     if (it != m_device_needs_emulation.end()) {
@@ -277,8 +280,12 @@ void Synchronization2Module::on_post_create_device(
 ) {
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
         bool native = is_phys_device_native(physicalDevice);
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_device_needs_emulation[(uint64_t)(uintptr_t)device] = !native;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_device_needs_emulation[(uint64_t)(uintptr_t)device] = !native;
+        }
+        m_primary_dev.store(device, std::memory_order_release);
+        m_primary_native.store(native, std::memory_order_release);
         LOGI("Device %p created: synchronization2 native=%d", device, native);
     }
 }
@@ -286,6 +293,10 @@ void Synchronization2Module::on_post_create_device(
 void Synchronization2Module::on_destroy_device(VkDevice device) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
+    if (m_primary_dev.load(std::memory_order_relaxed) == device) {
+        m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_release);
+        m_primary_native.store(false, std::memory_order_release);
+    }
 }
 
 bool Synchronization2Module::on_cmd_set_event2(
@@ -312,10 +323,9 @@ bool Synchronization2Module::on_cmd_set_event2(
         combinedSrc = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     }
 
-    PFN_vkCmdSetEvent real_fn =
-        (PFN_vkCmdSetEvent) get_real_proc(get_last_instance(), device, "vkCmdSetEvent");
-    if (real_fn) {
-        real_fn(commandBuffer, event, combinedSrc);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdSetEvent) {
+        dt.CmdSetEvent(commandBuffer, event, combinedSrc);
     }
     return true;
 }
@@ -333,10 +343,9 @@ bool Synchronization2Module::on_cmd_reset_event2(
         stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     }
 
-    PFN_vkCmdResetEvent real_fn =
-        (PFN_vkCmdResetEvent) get_real_proc(get_last_instance(), device, "vkCmdResetEvent");
-    if (real_fn) {
-        real_fn(commandBuffer, event, stage);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdResetEvent) {
+        dt.CmdResetEvent(commandBuffer, event, stage);
     }
     return true;
 }
@@ -415,8 +424,8 @@ bool Synchronization2Module::on_cmd_wait_events2(
     if (combinedSrc == 0) combinedSrc = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     if (combinedDst == 0) combinedDst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 
-    PFN_vkCmdWaitEvents real_fn =
-        (PFN_vkCmdWaitEvents) get_real_proc(get_last_instance(), device, "vkCmdWaitEvents");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkCmdWaitEvents real_fn = dt.CmdWaitEvents;
     if (real_fn) {
         real_fn(
             commandBuffer,
@@ -440,36 +449,55 @@ bool Synchronization2Module::on_cmd_pipeline_barrier2(
     const VkDependencyInfo* pDependencyInfo
 ) {
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
-    if (is_device_native(device)) return false;
+    if (is_device_native(device)) {
+        const auto& dt = LayerManager::get().get_dispatch_table(device);
+        if (dt.CmdPipelineBarrier2) {
+            return false;
+        }
+        LOGW("synchronization2: device %p claimed native support but dt.CmdPipelineBarrier2 is null, falling back to emulation", device);
+    }
 
     if (!pDependencyInfo) return true;
 
     VkPipelineStageFlags combinedSrc = 0;
     VkPipelineStageFlags combinedDst = 0;
 
-    std::vector<VkMemoryBarrier> v1MemBarriers;
-    v1MemBarriers.reserve(pDependencyInfo->memoryBarrierCount);
+    constexpr uint32_t SBO_LIMIT = 16;
+
+    VkMemoryBarrier sMemBarriers[SBO_LIMIT];
+    std::vector<VkMemoryBarrier> hMemBarriers;
+    VkMemoryBarrier* v1MemBarriers = sMemBarriers;
+    if (pDependencyInfo->memoryBarrierCount > SBO_LIMIT) {
+        hMemBarriers.resize(pDependencyInfo->memoryBarrierCount);
+        v1MemBarriers = hMemBarriers.data();
+    }
+
     for (uint32_t i = 0; i < pDependencyInfo->memoryBarrierCount; ++i) {
         const auto& b = pDependencyInfo->pMemoryBarriers[i];
         combinedSrc |= stage_flags2_to_stage_flags(b.srcStageMask, false);
         combinedDst |= stage_flags2_to_stage_flags(b.dstStageMask, true);
 
-        VkMemoryBarrier mb{};
+        auto& mb = v1MemBarriers[i];
         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         mb.pNext = nullptr;
         mb.srcAccessMask = access_flags2_to_access_flags(b.srcAccessMask);
         mb.dstAccessMask = access_flags2_to_access_flags(b.dstAccessMask);
-        v1MemBarriers.push_back(mb);
     }
 
-    std::vector<VkBufferMemoryBarrier> v1BufBarriers;
-    v1BufBarriers.reserve(pDependencyInfo->bufferMemoryBarrierCount);
+    VkBufferMemoryBarrier sBufBarriers[SBO_LIMIT];
+    std::vector<VkBufferMemoryBarrier> hBufBarriers;
+    VkBufferMemoryBarrier* v1BufBarriers = sBufBarriers;
+    if (pDependencyInfo->bufferMemoryBarrierCount > SBO_LIMIT) {
+        hBufBarriers.resize(pDependencyInfo->bufferMemoryBarrierCount);
+        v1BufBarriers = hBufBarriers.data();
+    }
+
     for (uint32_t i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; ++i) {
         const auto& b = pDependencyInfo->pBufferMemoryBarriers[i];
         combinedSrc |= stage_flags2_to_stage_flags(b.srcStageMask, false);
         combinedDst |= stage_flags2_to_stage_flags(b.dstStageMask, true);
 
-        VkBufferMemoryBarrier bb{};
+        auto& bb = v1BufBarriers[i];
         bb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
         bb.pNext = nullptr;
         bb.srcAccessMask = access_flags2_to_access_flags(b.srcAccessMask);
@@ -479,17 +507,22 @@ bool Synchronization2Module::on_cmd_pipeline_barrier2(
         bb.buffer = b.buffer;
         bb.offset = b.offset;
         bb.size = b.size;
-        v1BufBarriers.push_back(bb);
     }
 
-    std::vector<VkImageMemoryBarrier> v1ImgBarriers;
-    v1ImgBarriers.reserve(pDependencyInfo->imageMemoryBarrierCount);
+    VkImageMemoryBarrier sImgBarriers[SBO_LIMIT];
+    std::vector<VkImageMemoryBarrier> hImgBarriers;
+    VkImageMemoryBarrier* v1ImgBarriers = sImgBarriers;
+    if (pDependencyInfo->imageMemoryBarrierCount > SBO_LIMIT) {
+        hImgBarriers.resize(pDependencyInfo->imageMemoryBarrierCount);
+        v1ImgBarriers = hImgBarriers.data();
+    }
+
     for (uint32_t i = 0; i < pDependencyInfo->imageMemoryBarrierCount; ++i) {
         const auto& b = pDependencyInfo->pImageMemoryBarriers[i];
         combinedSrc |= stage_flags2_to_stage_flags(b.srcStageMask, false);
         combinedDst |= stage_flags2_to_stage_flags(b.dstStageMask, true);
 
-        VkImageMemoryBarrier ib{};
+        auto& ib = v1ImgBarriers[i];
         ib.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         ib.pNext = nullptr;
         ib.srcAccessMask = access_flags2_to_access_flags(b.srcAccessMask);
@@ -500,26 +533,24 @@ bool Synchronization2Module::on_cmd_pipeline_barrier2(
         ib.dstQueueFamilyIndex = b.dstQueueFamilyIndex;
         ib.image = b.image;
         ib.subresourceRange = b.subresourceRange;
-        v1ImgBarriers.push_back(ib);
     }
 
     if (combinedSrc == 0) combinedSrc = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     if (combinedDst == 0) combinedDst = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 
-    PFN_vkCmdPipelineBarrier real_fn =
-        (PFN_vkCmdPipelineBarrier) get_real_proc(get_last_instance(), device, "vkCmdPipelineBarrier");
-    if (real_fn) {
-        real_fn(
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdPipelineBarrier) {
+        dt.CmdPipelineBarrier(
             commandBuffer,
             combinedSrc,
             combinedDst,
             pDependencyInfo->dependencyFlags,
-            (uint32_t)v1MemBarriers.size(),
-            v1MemBarriers.data(),
-            (uint32_t)v1BufBarriers.size(),
-            v1BufBarriers.data(),
-            (uint32_t)v1ImgBarriers.size(),
-            v1ImgBarriers.data()
+            pDependencyInfo->memoryBarrierCount,
+            v1MemBarriers,
+            pDependencyInfo->bufferMemoryBarrierCount,
+            v1BufBarriers,
+            pDependencyInfo->imageMemoryBarrierCount,
+            v1ImgBarriers
         );
     }
     return true;
@@ -547,10 +578,9 @@ bool Synchronization2Module::on_cmd_write_timestamp2(
         if (bit) singleStage = (VkPipelineStageFlagBits)bit;
     }
 
-    PFN_vkCmdWriteTimestamp real_fn =
-        (PFN_vkCmdWriteTimestamp) get_real_proc(get_last_instance(), device, "vkCmdWriteTimestamp");
-    if (real_fn) {
-        real_fn(commandBuffer, singleStage, queryPool, query);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdWriteTimestamp) {
+        dt.CmdWriteTimestamp(commandBuffer, singleStage, queryPool, query);
     }
     return true;
 }
@@ -563,7 +593,13 @@ bool Synchronization2Module::on_queue_submit2(
     VkResult& outResult
 ) {
     VkDevice device = LayerManager::get().get_device_for_queue(queue);
-    if (is_device_native(device)) return false;
+    if (is_device_native(device)) {
+        const auto& dt = LayerManager::get().get_dispatch_table(device);
+        if (dt.QueueSubmit2) {
+            return false;
+        }
+        LOGW("synchronization2: device %p claimed native support but dt.QueueSubmit2 is null, falling back to emulation", device);
+    }
 
     if (submitCount == 0 || !pSubmits) {
         outResult = LayerManager::get().dispatch_queue_submit(queue, 0, nullptr, fence);

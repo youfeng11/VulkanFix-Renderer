@@ -169,6 +169,8 @@ public:
 
 private:
     std::mutex m_mutex;
+    std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
+    std::atomic<bool> m_primary_native{false};
     std::unordered_map<uint64_t, bool> m_phys_native_support;
     std::unordered_map<uint64_t, uint32_t> m_phys_real_api_version;
     std::unordered_map<uint64_t, bool> m_device_needs_emulation;

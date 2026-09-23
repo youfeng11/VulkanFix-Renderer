@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <vector>
 #include <mutex>
+#include <atomic>
 
 #ifndef VK_KHR_dynamic_rendering
 #define VK_KHR_dynamic_rendering 1
@@ -243,6 +244,8 @@ private:
         VkImage image = VK_NULL_HANDLE;
     };
 
+    ImageViewMeta get_image_view_meta(VkImageView view);
+
     struct PipelineRenderPassKey {
         std::vector<VkFormat> colorFormats;
         VkFormat depthFormat = VK_FORMAT_UNDEFINED;
@@ -338,6 +341,8 @@ private:
     };
 
     std::mutex m_mutex;
+    std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
+    std::atomic<bool> m_primary_native{false};
     std::unordered_map<uint64_t, bool> m_phys_native_support;
     std::unordered_map<uint64_t, bool> m_device_native_support;
     std::unordered_map<uint64_t, VkDevice> m_cmd_devices;

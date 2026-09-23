@@ -143,6 +143,12 @@ bool DynamicRenderingModule::is_phys_device_native(VkPhysicalDevice physDev) {
 }
 
 bool DynamicRenderingModule::is_device_native(VkDevice device) {
+    if (device == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (__builtin_expect(device == m_primary_dev.load(std::memory_order_relaxed), 1)) {
+        return m_primary_native.load(std::memory_order_relaxed);
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_device_native_support.find((uint64_t)(uintptr_t)device);
     if (it != m_device_native_support.end()) {
@@ -152,12 +158,16 @@ bool DynamicRenderingModule::is_device_native(VkDevice device) {
 }
 
 VkDevice DynamicRenderingModule::get_device_for_cmd(VkCommandBuffer cmd) {
+    return LayerManager::get().get_device_for_cmd(cmd);
+}
+
+DynamicRenderingModule::ImageViewMeta DynamicRenderingModule::get_image_view_meta(VkImageView view) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_cmd_devices.find((uint64_t)(uintptr_t)cmd);
-    if (it != m_cmd_devices.end()) {
+    auto it = m_image_views.find((uint64_t)(uintptr_t)view);
+    if (it != m_image_views.end()) {
         return it->second;
     }
-    return LayerManager::get().get_primary_device();
+    return ImageViewMeta{};
 }
 
 VkFormat DynamicRenderingModule::get_image_view_format(VkImageView view) {
@@ -287,10 +297,19 @@ void DynamicRenderingModule::on_post_create_device(
         bool native = is_phys_device_native(physicalDevice);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
+        if (m_primary_dev.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
+            m_primary_native.store(native, std::memory_order_relaxed);
+            m_primary_dev.store(device, std::memory_order_release);
+        }
     }
 }
 
 void DynamicRenderingModule::on_destroy_device(VkDevice device) {
+    if (m_primary_dev.load(std::memory_order_relaxed) == device) {
+        m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_relaxed);
+        m_primary_native.store(false, std::memory_order_relaxed);
+    }
+
     std::lock_guard<std::mutex> lock(m_mutex);
 
     PFN_vkDestroyFramebuffer real_destroy_fb = (PFN_vkDestroyFramebuffer)
@@ -922,11 +941,15 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     VkSubpassContents contents = (pRenderingInfo->flags & VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT_KHR) ?
         VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE;
 
-    PFN_vkCmdBeginRenderPass real_begin_rp = (PFN_vkCmdBeginRenderPass)
-        get_real_proc(get_last_instance(), device, "vkCmdBeginRenderPass");
-    if (!real_begin_rp) return false;
-
-    real_begin_rp(commandBuffer, &beginInfo, contents);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdBeginRenderPass) {
+        dt.CmdBeginRenderPass(commandBuffer, &beginInfo, contents);
+    } else {
+        PFN_vkCmdBeginRenderPass real_begin_rp = (PFN_vkCmdBeginRenderPass)
+            get_real_proc(get_last_instance(), device, "vkCmdBeginRenderPass");
+        if (!real_begin_rp) return false;
+        real_begin_rp(commandBuffer, &beginInfo, contents);
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -945,10 +968,15 @@ bool DynamicRenderingModule::on_cmd_end_rendering(VkCommandBuffer commandBuffer)
     VkDevice device = get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
-    PFN_vkCmdEndRenderPass real_end_rp = (PFN_vkCmdEndRenderPass)
-        get_real_proc(get_last_instance(), device, "vkCmdEndRenderPass");
-    if (real_end_rp) {
-        real_end_rp(commandBuffer);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdEndRenderPass) {
+        dt.CmdEndRenderPass(commandBuffer);
+    } else {
+        PFN_vkCmdEndRenderPass real_end_rp = (PFN_vkCmdEndRenderPass)
+            get_real_proc(get_last_instance(), device, "vkCmdEndRenderPass");
+        if (real_end_rp) {
+            real_end_rp(commandBuffer);
+        }
     }
 
     {

@@ -8,6 +8,75 @@
 #include <atomic>
 #include <unordered_set>
 
+struct DeviceDispatchTable {
+    PFN_vkCmdDraw CmdDraw = nullptr;
+    PFN_vkCmdDrawIndexed CmdDrawIndexed = nullptr;
+    PFN_vkCmdBindPipeline CmdBindPipeline = nullptr;
+    PFN_vkCmdBindVertexBuffers CmdBindVertexBuffers = nullptr;
+    PFN_vkCmdBindVertexBuffers2 CmdBindVertexBuffers2 = nullptr;
+    PFN_vkBeginCommandBuffer BeginCommandBuffer = nullptr;
+    PFN_vkResetCommandBuffer ResetCommandBuffer = nullptr;
+    PFN_vkCmdBeginRenderingKHR CmdBeginRendering = nullptr;
+    PFN_vkCmdEndRenderingKHR CmdEndRendering = nullptr;
+    PFN_vkCmdPipelineBarrier CmdPipelineBarrier = nullptr;
+    PFN_vkCmdPipelineBarrier2KHR CmdPipelineBarrier2 = nullptr;
+    PFN_vkCmdPushDescriptorSetKHR CmdPushDescriptorSetKHR = nullptr;
+    PFN_vkQueueSubmit QueueSubmit = nullptr;
+    PFN_vkQueueSubmit2KHR QueueSubmit2 = nullptr;
+    PFN_vkCmdSetEvent CmdSetEvent = nullptr;
+    PFN_vkCmdResetEvent CmdResetEvent = nullptr;
+    PFN_vkCmdWaitEvents CmdWaitEvents = nullptr;
+    PFN_vkCmdWriteTimestamp CmdWriteTimestamp = nullptr;
+    PFN_vkQueueWaitIdle QueueWaitIdle = nullptr;
+    PFN_vkDeviceWaitIdle DeviceWaitIdle = nullptr;
+    PFN_vkGetDeviceQueue GetDeviceQueue = nullptr;
+    PFN_vkGetDeviceQueue2 GetDeviceQueue2 = nullptr;
+    PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines = nullptr;
+    PFN_vkDestroyPipeline DestroyPipeline = nullptr;
+    PFN_vkCreateDescriptorSetLayout CreateDescriptorSetLayout = nullptr;
+    PFN_vkDestroyDescriptorSetLayout DestroyDescriptorSetLayout = nullptr;
+    PFN_vkCreatePipelineLayout CreatePipelineLayout = nullptr;
+    PFN_vkDestroyPipelineLayout DestroyPipelineLayout = nullptr;
+    PFN_vkAllocateCommandBuffers AllocateCommandBuffers = nullptr;
+    PFN_vkFreeCommandBuffers FreeCommandBuffers = nullptr;
+    PFN_vkCreateImage CreateImage = nullptr;
+    PFN_vkDestroyImage DestroyImage = nullptr;
+    PFN_vkCreateImageView CreateImageView = nullptr;
+    PFN_vkDestroyImageView DestroyImageView = nullptr;
+    PFN_vkCmdBeginRenderPass CmdBeginRenderPass = nullptr;
+    PFN_vkCmdEndRenderPass CmdEndRenderPass = nullptr;
+    PFN_vkCreateRenderPass CreateRenderPass = nullptr;
+    PFN_vkCreateFramebuffer CreateFramebuffer = nullptr;
+    PFN_vkUpdateDescriptorSets UpdateDescriptorSets = nullptr;
+    PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets = nullptr;
+    PFN_vkAllocateDescriptorSets AllocateDescriptorSets = nullptr;
+    PFN_vkFreeDescriptorSets FreeDescriptorSets = nullptr;
+    PFN_vkCreateSemaphore CreateSemaphore = nullptr;
+    PFN_vkDestroySemaphore DestroySemaphore = nullptr;
+    PFN_vkGetSemaphoreCounterValueKHR GetSemaphoreCounterValue = nullptr;
+    PFN_vkWaitSemaphoresKHR WaitSemaphores = nullptr;
+    PFN_vkSignalSemaphoreKHR SignalSemaphore = nullptr;
+    PFN_vkResetQueryPool ResetQueryPool = nullptr;
+    PFN_vkCreateRenderPass2KHR CreateRenderPass2 = nullptr;
+    PFN_vkCmdBeginRenderPass2KHR CmdBeginRenderPass2 = nullptr;
+    PFN_vkCmdNextSubpass2KHR CmdNextSubpass2 = nullptr;
+    PFN_vkCmdEndRenderPass2KHR CmdEndRenderPass2 = nullptr;
+    PFN_vkCmdDrawIndirectCountKHR CmdDrawIndirectCount = nullptr;
+    PFN_vkCmdDrawIndexedIndirectCountKHR CmdDrawIndexedIndirectCount = nullptr;
+    PFN_vkGetBufferDeviceAddressKHR GetBufferDeviceAddress = nullptr;
+    PFN_vkBindBufferMemory2 BindBufferMemory2 = nullptr;
+    PFN_vkBindImageMemory2 BindImageMemory2 = nullptr;
+    PFN_vkGetBufferMemoryRequirements2 GetBufferMemoryRequirements2 = nullptr;
+    PFN_vkGetImageMemoryRequirements2 GetImageMemoryRequirements2 = nullptr;
+    PFN_vkGetImageSparseMemoryRequirements2 GetImageSparseMemoryRequirements2 = nullptr;
+    PFN_vkUpdateDescriptorSetWithTemplate UpdateDescriptorSetWithTemplate = nullptr;
+    PFN_vkGetDescriptorSetLayoutSupport GetDescriptorSetLayoutSupport = nullptr;
+    PFN_vkCmdDispatchBase CmdDispatchBase = nullptr;
+    PFN_vkTrimCommandPool TrimCommandPool = nullptr;
+    PFN_vkCmdSetDeviceMask CmdSetDeviceMask = nullptr;
+    PFN_vkGetDeviceGroupPeerMemoryFeatures GetDeviceGroupPeerMemoryFeatures = nullptr;
+};
+
 class LayerManager {
 public:
     static LayerManager& get();
@@ -212,8 +281,33 @@ public:
         int32_t vertexOffset,
         uint32_t firstInstance);
 
-    VkDevice get_device_for_cmd(VkCommandBuffer cmd);
-    VkDevice get_device_for_queue(VkQueue queue);
+    inline VkDevice get_device_for_cmd(VkCommandBuffer cmd) {
+        if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
+            return m_primary_device.load(std::memory_order_relaxed);
+        }
+        return get_device_for_cmd_slow(cmd);
+    }
+
+    inline VkDevice get_device_for_queue(VkQueue queue) {
+        if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
+            return m_primary_device.load(std::memory_order_relaxed);
+        }
+        return get_device_for_queue_slow(queue);
+    }
+
+    inline const DeviceDispatchTable& get_dispatch_table(VkDevice device) {
+        if (__builtin_expect(device == m_primary_device.load(std::memory_order_relaxed) && m_has_primary_table.load(std::memory_order_relaxed), 1)) {
+            return m_primary_table;
+        }
+        return get_dispatch_table_slow(device);
+    }
+
+    void init_device_dispatch_table(VkDevice device);
+    void remove_device_dispatch_table(VkDevice device);
+
+    VkDevice get_device_for_cmd_slow(VkCommandBuffer cmd);
+    VkDevice get_device_for_queue_slow(VkQueue queue);
+    const DeviceDispatchTable& get_dispatch_table_slow(VkDevice device);
 
     void dispatch_get_device_queue(
         VkDevice device,
@@ -444,6 +538,22 @@ private:
     std::unordered_map<uint64_t, VkDevice> m_queue_devices;
     std::unordered_map<uint64_t, std::pair<VkQueue, uint32_t>> m_device_queues;
     std::atomic<VkDevice> m_last_device{VK_NULL_HANDLE};
+
+    std::atomic<uint32_t> m_device_count{0};
+    std::atomic<VkDevice> m_primary_device{VK_NULL_HANDLE};
+    DeviceDispatchTable m_primary_table{};
+    std::atomic<bool> m_has_primary_table{false};
+
+    std::mutex m_table_mutex;
+    std::unordered_map<uint64_t, DeviceDispatchTable> m_device_tables;
+
+    IVulkanLayerModule* m_divisor_mod = nullptr;
+    IVulkanLayerModule* m_dyn_rendering_mod = nullptr;
+    IVulkanLayerModule* m_sync2_mod = nullptr;
+    IVulkanLayerModule* m_push_desc_mod = nullptr;
+    IVulkanLayerModule* m_vk12_mod = nullptr;
+    IVulkanLayerModule* m_vk11_mod = nullptr;
+    IVulkanLayerModule* m_fill_mode_mod = nullptr;
 };
 
 /**

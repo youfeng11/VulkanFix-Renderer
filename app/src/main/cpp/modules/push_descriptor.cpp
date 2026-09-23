@@ -53,6 +53,12 @@ bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
 }
 
 bool PushDescriptorModule::is_device_native(VkDevice device) {
+    if (device == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (__builtin_expect(device == m_primary_dev.load(std::memory_order_relaxed), 1)) {
+        return m_primary_native.load(std::memory_order_relaxed);
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_device_native_support.find((uint64_t)(uintptr_t)device);
     if (it != m_device_native_support.end()) {
@@ -133,11 +139,19 @@ void PushDescriptorModule::on_post_create_device(
         bool native = is_phys_device_native(physicalDevice);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
+        if (m_primary_dev.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
+            m_primary_native.store(native, std::memory_order_relaxed);
+            m_primary_dev.store(device, std::memory_order_release);
+        }
         LOGI("Device %p created: push descriptor %s", device, native ? "NATIVE" : "EMULATED");
     }
 }
 
 void PushDescriptorModule::on_destroy_device(VkDevice device) {
+    if (m_primary_dev.load(std::memory_order_relaxed) == device) {
+        m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_relaxed);
+        m_primary_native.store(false, std::memory_order_relaxed);
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     m_device_native_support.erase((uint64_t)(uintptr_t)device);
 
@@ -300,12 +314,7 @@ void PushDescriptorModule::on_pre_create_descriptor_update_template(
 }
 
 VkDevice PushDescriptorModule::get_device_for_cmd(VkCommandBuffer cmd) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_cmd_states.find((uint64_t)(uintptr_t)cmd);
-    if (it != m_cmd_states.end() && it->second.device != VK_NULL_HANDLE) {
-        return it->second.device;
-    }
-    return LayerManager::get().get_primary_device();
+    return LayerManager::get().get_device_for_cmd(cmd);
 }
 
 VkDescriptorSetLayout PushDescriptorModule::get_set_layout(VkPipelineLayout layout, uint32_t set) {
@@ -357,8 +366,12 @@ VkDescriptorSet PushDescriptorModule::allocate_push_set(VkDevice device, VkComma
     CmdPushState& state = m_cmd_states[(uint64_t)(uintptr_t)cmd];
     state.device = device;
 
-    PFN_vkAllocateDescriptorSets real_alloc = (PFN_vkAllocateDescriptorSets)
-        get_real_proc(get_last_instance(), device, "vkAllocateDescriptorSets");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkAllocateDescriptorSets real_alloc = dt.AllocateDescriptorSets;
+    if (!real_alloc) {
+        real_alloc = (PFN_vkAllocateDescriptorSets)
+            get_real_proc(get_last_instance(), device, "vkAllocateDescriptorSets");
+    }
     if (!real_alloc) return VK_NULL_HANDLE;
 
     constexpr uint32_t MAX_SETS_PER_POOL = 256;
@@ -440,18 +453,27 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set(
         modWrites[i].dstSet = descSet;
     }
 
-    PFN_vkUpdateDescriptorSets real_update = (PFN_vkUpdateDescriptorSets)
-        get_real_proc(get_last_instance(), device, "vkUpdateDescriptorSets");
-    if (real_update) {
-        real_update(device, descriptorWriteCount, modWrites, 0, NULL);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.UpdateDescriptorSets) {
+        dt.UpdateDescriptorSets(device, descriptorWriteCount, modWrites, 0, NULL);
+    } else {
+        PFN_vkUpdateDescriptorSets real_update = (PFN_vkUpdateDescriptorSets)
+            get_real_proc(get_last_instance(), device, "vkUpdateDescriptorSets");
+        if (real_update) {
+            real_update(device, descriptorWriteCount, modWrites, 0, NULL);
+        }
     }
 
     if (modWrites != stackWrites) free(modWrites);
 
-    PFN_vkCmdBindDescriptorSets real_bind = (PFN_vkCmdBindDescriptorSets)
-        get_real_proc(get_last_instance(), device, "vkCmdBindDescriptorSets");
-    if (real_bind) {
-        real_bind(commandBuffer, pipelineBindPoint, layout, set, 1, &descSet, 0, NULL);
+    if (dt.CmdBindDescriptorSets) {
+        dt.CmdBindDescriptorSets(commandBuffer, pipelineBindPoint, layout, set, 1, &descSet, 0, NULL);
+    } else {
+        PFN_vkCmdBindDescriptorSets real_bind = (PFN_vkCmdBindDescriptorSets)
+            get_real_proc(get_last_instance(), device, "vkCmdBindDescriptorSets");
+        if (real_bind) {
+            real_bind(commandBuffer, pipelineBindPoint, layout, set, 1, &descSet, 0, NULL);
+        }
     }
 
     LOG_OPT_DEBUG("PushDescriptor: emulated vkCmdPushDescriptorSetKHR for cmd %p set %u", commandBuffer, set);
@@ -474,21 +496,29 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set_with_template(
     VkDescriptorSet descSet = allocate_push_set(device, commandBuffer, setLayout);
     if (descSet == VK_NULL_HANDLE) return true;
 
-    PFN_vkUpdateDescriptorSetWithTemplate real_update_template =
-        (PFN_vkUpdateDescriptorSetWithTemplate) get_real_proc(get_last_instance(), device, "vkUpdateDescriptorSetWithTemplate");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkUpdateDescriptorSetWithTemplate real_update_template = dt.UpdateDescriptorSetWithTemplate;
     if (!real_update_template) {
         real_update_template = (PFN_vkUpdateDescriptorSetWithTemplate)
-            get_real_proc(get_last_instance(), device, "vkUpdateDescriptorSetWithTemplateKHR");
+            get_real_proc(get_last_instance(), device, "vkUpdateDescriptorSetWithTemplate");
+        if (!real_update_template) {
+            real_update_template = (PFN_vkUpdateDescriptorSetWithTemplate)
+                get_real_proc(get_last_instance(), device, "vkUpdateDescriptorSetWithTemplateKHR");
+        }
     }
 
     if (real_update_template) {
         real_update_template(device, descSet, descriptorUpdateTemplate, pData);
     }
 
-    PFN_vkCmdBindDescriptorSets real_bind = (PFN_vkCmdBindDescriptorSets)
-        get_real_proc(get_last_instance(), device, "vkCmdBindDescriptorSets");
-    if (real_bind) {
-        real_bind(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, set, 1, &descSet, 0, NULL);
+    if (dt.CmdBindDescriptorSets) {
+        dt.CmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, set, 1, &descSet, 0, NULL);
+    } else {
+        PFN_vkCmdBindDescriptorSets real_bind = (PFN_vkCmdBindDescriptorSets)
+            get_real_proc(get_last_instance(), device, "vkCmdBindDescriptorSets");
+        if (real_bind) {
+            real_bind(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, set, 1, &descSet, 0, NULL);
+        }
     }
 
     LOG_OPT_DEBUG("PushDescriptor: emulated vkCmdPushDescriptorSetWithTemplateKHR for cmd %p set %u", commandBuffer, set);

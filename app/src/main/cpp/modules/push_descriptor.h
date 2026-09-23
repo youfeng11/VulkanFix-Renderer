@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <vector>
 #include <mutex>
+#include <atomic>
 
 #ifndef VK_KHR_push_descriptor
 #define VK_KHR_push_descriptor 1
@@ -161,6 +162,8 @@ private:
     };
 
     std::mutex m_mutex;
+    std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
+    std::atomic<bool> m_primary_native{false};
     std::unordered_map<uint64_t, bool> m_phys_native_support;
     std::unordered_map<uint64_t, bool> m_device_native_support;
     std::unordered_set<uint64_t> m_push_layouts;

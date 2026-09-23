@@ -117,8 +117,10 @@ void* get_real_proc(VkInstance instance, VkDevice device, const char* name) {
             ptr = (void*) g_real_vkGetDeviceProcAddr(device, name);
             if (ptr) return ptr;
         }
-        // Special case: standard queue functions might be queried from instance on some Vulkan 1.0 loaders
-        if (name && (strncmp(name, "vkQueue", 7) == 0)) {
+        // Special case: standard Vulkan 1.0 queue functions might be queried from instance on some Vulkan 1.0 loaders
+        if (name && (strcmp(name, "vkQueueSubmit") == 0 ||
+                     strcmp(name, "vkQueueWaitIdle") == 0 ||
+                     strcmp(name, "vkQueueBindSparse") == 0)) {
             VkInstance inst = (instance != VK_NULL_HANDLE) ? instance : g_last_instance;
             if (inst != VK_NULL_HANDLE && g_real_vkGetInstanceProcAddr) {
                 ptr = (void*) g_real_vkGetInstanceProcAddr(inst, name);

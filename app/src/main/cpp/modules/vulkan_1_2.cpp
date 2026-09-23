@@ -105,6 +105,9 @@ bool Vulkan12Module::is_device_native(VkDevice device) {
     if (device == VK_NULL_HANDLE) {
         return false;
     }
+    if (__builtin_expect(device == m_primary_dev.load(std::memory_order_relaxed), 1)) {
+        return m_primary_native.load(std::memory_order_relaxed);
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_device_needs_emulation.find((uint64_t)(uintptr_t)device);
     if (it != m_device_needs_emulation.end()) {
@@ -486,6 +489,10 @@ void Vulkan12Module::on_post_create_device(
         bool native = is_phys_device_native(physicalDevice);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_device_needs_emulation[(uint64_t)(uintptr_t)device] = !native;
+        if (m_primary_dev.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
+            m_primary_native.store(native, std::memory_order_relaxed);
+            m_primary_dev.store(device, std::memory_order_release);
+        }
         LOGI("Device %p created: Vulkan 1.2 native=%d", device, native);
     }
 
@@ -495,6 +502,10 @@ void Vulkan12Module::on_post_create_device(
 }
 
 void Vulkan12Module::on_destroy_device(VkDevice device) {
+    if (m_primary_dev.load(std::memory_order_relaxed) == device) {
+        m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_relaxed);
+        m_primary_native.store(false, std::memory_order_relaxed);
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
 }
@@ -942,8 +953,11 @@ bool Vulkan12Module::on_reset_query_pool(
 ) {
     if (is_device_native(device)) return false;
 
-    PFN_vkResetQueryPool real_fn =
-        (PFN_vkResetQueryPool) get_real_proc(get_last_instance(), device, "vkResetQueryPool");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkResetQueryPool real_fn = dt.ResetQueryPool;
+    if (!real_fn) {
+        real_fn = (PFN_vkResetQueryPool) get_real_proc(get_last_instance(), device, "vkResetQueryPool");
+    }
     if (!real_fn) {
         real_fn = (PFN_vkResetQueryPool) get_real_proc(get_last_instance(), device, "vkResetQueryPoolEXT");
     }
@@ -1146,13 +1160,15 @@ bool Vulkan12Module::on_cmd_begin_render_pass2(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
-    PFN_vkCmdBeginRenderPass2KHR real_fn =
-        (PFN_vkCmdBeginRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCmdBeginRenderPass2KHR");
-    if (!real_fn) {
-        real_fn = (PFN_vkCmdBeginRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCmdBeginRenderPass2");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdBeginRenderPass2) {
+        dt.CmdBeginRenderPass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+        return true;
     }
-    if (real_fn) {
-        real_fn(commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+
+    if (dt.CmdBeginRenderPass) {
+        VkSubpassContents contents = pSubpassBeginInfo ? pSubpassBeginInfo->contents : VK_SUBPASS_CONTENTS_INLINE;
+        dt.CmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
         return true;
     }
 
@@ -1173,13 +1189,9 @@ bool Vulkan12Module::on_cmd_next_subpass2(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
-    PFN_vkCmdNextSubpass2KHR real_fn =
-        (PFN_vkCmdNextSubpass2KHR) get_real_proc(get_last_instance(), device, "vkCmdNextSubpass2KHR");
-    if (!real_fn) {
-        real_fn = (PFN_vkCmdNextSubpass2KHR) get_real_proc(get_last_instance(), device, "vkCmdNextSubpass2");
-    }
-    if (real_fn) {
-        real_fn(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdNextSubpass2) {
+        dt.CmdNextSubpass2(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo);
         return true;
     }
 
@@ -1199,13 +1211,14 @@ bool Vulkan12Module::on_cmd_end_render_pass2(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
-    PFN_vkCmdEndRenderPass2KHR real_fn =
-        (PFN_vkCmdEndRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCmdEndRenderPass2KHR");
-    if (!real_fn) {
-        real_fn = (PFN_vkCmdEndRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCmdEndRenderPass2");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdEndRenderPass2) {
+        dt.CmdEndRenderPass2(commandBuffer, pSubpassEndInfo);
+        return true;
     }
-    if (real_fn) {
-        real_fn(commandBuffer, pSubpassEndInfo);
+
+    if (dt.CmdEndRenderPass) {
+        dt.CmdEndRenderPass(commandBuffer);
         return true;
     }
 
@@ -1233,16 +1246,9 @@ bool Vulkan12Module::on_cmd_draw_indirect_count(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
-    PFN_vkCmdDrawIndirectCountKHR real_fn =
-        (PFN_vkCmdDrawIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndirectCountKHR");
-    if (!real_fn) {
-        real_fn = (PFN_vkCmdDrawIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndirectCount");
-    }
-    if (!real_fn) {
-        real_fn = (PFN_vkCmdDrawIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndirectCountAMD");
-    }
-    if (real_fn) {
-        real_fn(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdDrawIndirectCount) {
+        dt.CmdDrawIndirectCount(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
         return true;
     }
 
@@ -1269,16 +1275,9 @@ bool Vulkan12Module::on_cmd_draw_indexed_indirect_count(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
-    PFN_vkCmdDrawIndexedIndirectCountKHR real_fn =
-        (PFN_vkCmdDrawIndexedIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndexedIndirectCountKHR");
-    if (!real_fn) {
-        real_fn = (PFN_vkCmdDrawIndexedIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndexedIndirectCount");
-    }
-    if (!real_fn) {
-        real_fn = (PFN_vkCmdDrawIndexedIndirectCountKHR) get_real_proc(get_last_instance(), device, "vkCmdDrawIndexedIndirectCountAMD");
-    }
-    if (real_fn) {
-        real_fn(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdDrawIndexedIndirectCount) {
+        dt.CmdDrawIndexedIndirectCount(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride);
         return true;
     }
 
@@ -1303,6 +1302,12 @@ bool Vulkan12Module::on_get_buffer_device_address(
     VkDeviceAddress& outAddress
 ) {
     if (is_device_native(device)) return false;
+
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.GetBufferDeviceAddress) {
+        outAddress = dt.GetBufferDeviceAddress(device, pInfo);
+        return true;
+    }
 
     PFN_vkGetBufferDeviceAddressKHR real_fn =
         (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddressKHR");
