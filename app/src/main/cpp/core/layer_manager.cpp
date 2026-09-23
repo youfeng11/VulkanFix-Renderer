@@ -46,9 +46,11 @@ void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
     else if (strcmp(name, "VK_KHR_dynamic_rendering") == 0) m_dyn_rendering_mod = module.get();
     else if (strcmp(name, "VK_KHR_synchronization2") == 0) m_sync2_mod = module.get();
     else if (strcmp(name, "VK_KHR_push_descriptor") == 0) m_push_desc_mod = module.get();
-    else if (strcmp(name, "Vulkan12Emulation") == 0) m_vk12_mod = module.get();
-    else if (strcmp(name, "Vulkan11Emulation") == 0) m_vk11_mod = module.get();
     else if (strcmp(name, "VK_FEATURE_fillModeNonSolid") == 0) m_fill_mode_mod = module.get();
+    else if (strcmp(name, "VK_KHR_timeline_semaphore") == 0) m_timeline_mod = module.get();
+    else if (strcmp(name, "VK_KHR_create_renderpass2") == 0) m_renderpass2_mod = module.get();
+    else if (strcmp(name, "VK_KHR_draw_indirect_count") == 0) m_draw_indirect_count_mod = module.get();
+    else if (strcmp(name, "VK_KHR_device_group") == 0) m_device_group_mod = module.get();
     m_modules.push_back(std::move(module));
 }
 
@@ -1452,8 +1454,8 @@ VkResult LayerManager::dispatch_queue_submit(
     VkFence fence
 ) {
     VkResult res = VK_SUCCESS;
-    if (m_vk12_mod && m_vk12_mod->is_enabled()) {
-        if (m_vk12_mod->on_queue_submit(queue, submitCount, pSubmits, fence, res)) {
+    if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+        if (m_timeline_mod->on_queue_submit(queue, submitCount, pSubmits, fence, res)) {
             return res;
         }
     }
@@ -1724,8 +1726,8 @@ void LayerManager::dispatch_cmd_begin_render_pass2(
     const VkRenderPassBeginInfo* pRenderPassBegin,
     const VkSubpassBeginInfo* pSubpassBeginInfo
 ) {
-    if (m_vk12_mod && m_vk12_mod->is_enabled()) {
-        if (m_vk12_mod->on_cmd_begin_render_pass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo)) {
+    if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
+        if (m_renderpass2_mod->on_cmd_begin_render_pass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo)) {
             return;
         }
     }
@@ -1744,8 +1746,8 @@ void LayerManager::dispatch_cmd_next_subpass2(
     const VkSubpassBeginInfo* pSubpassBeginInfo,
     const VkSubpassEndInfo* pSubpassEndInfo
 ) {
-    if (m_vk12_mod && m_vk12_mod->is_enabled()) {
-        if (m_vk12_mod->on_cmd_next_subpass2(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo)) {
+    if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
+        if (m_renderpass2_mod->on_cmd_next_subpass2(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo)) {
             return;
         }
     }
@@ -1760,8 +1762,8 @@ void LayerManager::dispatch_cmd_end_render_pass2(
     VkCommandBuffer commandBuffer,
     const VkSubpassEndInfo* pSubpassEndInfo
 ) {
-    if (m_vk12_mod && m_vk12_mod->is_enabled()) {
-        if (m_vk12_mod->on_cmd_end_render_pass2(commandBuffer, pSubpassEndInfo)) {
+    if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
+        if (m_renderpass2_mod->on_cmd_end_render_pass2(commandBuffer, pSubpassEndInfo)) {
             return;
         }
     }
@@ -1783,8 +1785,8 @@ void LayerManager::dispatch_cmd_draw_indirect_count(
     uint32_t maxDrawCount,
     uint32_t stride
 ) {
-    if (m_vk12_mod && m_vk12_mod->is_enabled()) {
-        if (m_vk12_mod->on_cmd_draw_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride)) {
+    if (m_draw_indirect_count_mod && m_draw_indirect_count_mod->is_enabled()) {
+        if (m_draw_indirect_count_mod->on_cmd_draw_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride)) {
             return;
         }
     }
@@ -1804,8 +1806,8 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect_count(
     uint32_t maxDrawCount,
     uint32_t stride
 ) {
-    if (m_vk12_mod && m_vk12_mod->is_enabled()) {
-        if (m_vk12_mod->on_cmd_draw_indexed_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride)) {
+    if (m_draw_indirect_count_mod && m_draw_indirect_count_mod->is_enabled()) {
+        if (m_draw_indirect_count_mod->on_cmd_draw_indexed_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride)) {
             return;
         }
     }
@@ -2113,8 +2115,8 @@ void LayerManager::dispatch_cmd_dispatch_base(
     uint32_t groupCountY,
     uint32_t groupCountZ
 ) {
-    if (m_vk11_mod && m_vk11_mod->is_enabled()) {
-        if (m_vk11_mod->on_cmd_dispatch_base(
+    if (m_device_group_mod && m_device_group_mod->is_enabled()) {
+        if (m_device_group_mod->on_cmd_dispatch_base(
                 commandBuffer, baseGroupX, baseGroupY, baseGroupZ, groupCountX, groupCountY, groupCountZ)) {
             return;
         }
@@ -2193,8 +2195,8 @@ void LayerManager::dispatch_cmd_set_device_mask(
     VkCommandBuffer commandBuffer,
     uint32_t deviceMask
 ) {
-    if (m_vk11_mod && m_vk11_mod->is_enabled()) {
-        m_vk11_mod->on_cmd_set_device_mask(commandBuffer, deviceMask);
+    if (m_device_group_mod && m_device_group_mod->is_enabled()) {
+        m_device_group_mod->on_cmd_set_device_mask(commandBuffer, deviceMask);
     }
 
     VkDevice device = get_device_for_cmd(commandBuffer);

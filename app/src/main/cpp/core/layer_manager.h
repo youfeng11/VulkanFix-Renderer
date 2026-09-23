@@ -551,9 +551,11 @@ private:
     IVulkanLayerModule* m_dyn_rendering_mod = nullptr;
     IVulkanLayerModule* m_sync2_mod = nullptr;
     IVulkanLayerModule* m_push_desc_mod = nullptr;
-    IVulkanLayerModule* m_vk12_mod = nullptr;
-    IVulkanLayerModule* m_vk11_mod = nullptr;
     IVulkanLayerModule* m_fill_mode_mod = nullptr;
+    IVulkanLayerModule* m_timeline_mod = nullptr;
+    IVulkanLayerModule* m_renderpass2_mod = nullptr;
+    IVulkanLayerModule* m_draw_indirect_count_mod = nullptr;
+    IVulkanLayerModule* m_device_group_mod = nullptr;
 };
 
 /**

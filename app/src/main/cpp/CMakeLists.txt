@@ -32,6 +32,11 @@ target_include_directories(vulkan_fix PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/core
     ${CMAKE_CURRENT_SOURCE_DIR}/modules
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/vulkan_1_0
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/vulkan_1_1
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/vulkan_1_2
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/vulkan_1_3
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/vulkan_1_4
 )
 
 find_library(LOG_LIB log)

@@ -16,8 +16,8 @@
  */
 class ExtensionModuleBase : public IVulkanLayerModule {
 public:
-    explicit ExtensionModuleBase(const char* extensionName, uint32_t specVersion = 1)
-        : m_extension_name(extensionName), m_spec_version(specVersion) {}
+    explicit ExtensionModuleBase(const char* extensionName, uint32_t specVersion = 1, uint32_t promotedVersion = 0)
+        : m_extension_name(extensionName), m_spec_version(specVersion), m_promoted_version(promotedVersion) {}
 
     virtual ~ExtensionModuleBase() = default;
 
@@ -114,6 +114,18 @@ public:
 
 protected:
     virtual bool query_native_support(VkPhysicalDevice physDev) {
+        if (m_promoted_version > 0) {
+            PFN_vkGetPhysicalDeviceProperties real_props =
+                (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+            if (real_props) {
+                VkPhysicalDeviceProperties props{};
+                real_props(physDev, &props);
+                if (props.apiVersion >= m_promoted_version) {
+                    return true;
+                }
+            }
+        }
+
         PFN_vkEnumerateDeviceExtensionProperties real_fn =
             (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
         if (!real_fn) return false;
@@ -141,6 +153,7 @@ protected:
 
     std::string m_extension_name;
     uint32_t m_spec_version;
+    uint32_t m_promoted_version{0};
 
     std::mutex m_ext_mutex;
     std::unordered_map<uint64_t, bool> m_phys_native;
