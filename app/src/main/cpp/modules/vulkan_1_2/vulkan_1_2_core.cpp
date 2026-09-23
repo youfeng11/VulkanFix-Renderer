@@ -191,10 +191,10 @@ void Vulkan12CoreModule::on_post_get_properties2(
 
     bool isNative = is_phys_device_native(physicalDevice);
     if (isNative) {
-        snprintf(driverInfoStr, sizeof(driverInfoStr), "%s(%s), Vulkan %s",
+        snprintf(driverInfoStr, sizeof(driverInfoStr), "%s (%s), Vulkan %s",
                  PROJECT_VERSION_NAME, PROJECT_VERSION_CODE, realVerStr);
     } else {
-        snprintf(driverInfoStr, sizeof(driverInfoStr), "%s(%s), Vulkan %s (Vulkan %s)",
+        snprintf(driverInfoStr, sizeof(driverInfoStr), "%s (%s), Vulkan %s (Vulkan %s)",
                  PROJECT_VERSION_NAME, PROJECT_VERSION_CODE, emuVerStr, realVerStr);
     }
 
