@@ -232,6 +232,11 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     LOAD_PROC_OPT(AcquireNextImage, "vkAcquireNextImageKHR");
     LOAD_PROC_OPT(AcquireNextImage2, "vkAcquireNextImage2KHR");
     LOAD_PROC_OPT(QueuePresent, "vkQueuePresentKHR");
+    LOAD_PROC(CreateFence);
+    LOAD_PROC(DestroyFence);
+    LOAD_PROC(WaitForFences);
+    LOAD_PROC(GetFenceStatus);
+    LOAD_PROC(ResetFences);
 
     #undef LOAD_PROC
     #undef LOAD_PROC_OPT
@@ -1583,6 +1588,11 @@ VkResult LayerManager::dispatch_get_semaphore_counter_value(
 ) {
     VkResult res = VK_SUCCESS;
     bool handled = false;
+    if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+        if (m_timeline_mod->on_get_semaphore_counter_value(device, semaphore, pValue, res)) {
+            return res;
+        }
+    }
     {
         std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
         for (auto& mod : m_modules) {
@@ -1613,6 +1623,11 @@ VkResult LayerManager::dispatch_wait_semaphores(
     uint64_t timeout
 ) {
     VkResult res = VK_SUCCESS;
+    if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+        if (m_timeline_mod->on_wait_semaphores(device, pWaitInfo, timeout, res)) {
+            return res;
+        }
+    }
     bool handled = false;
     {
         std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
@@ -1643,6 +1658,11 @@ VkResult LayerManager::dispatch_signal_semaphore(
     const VkSemaphoreSignalInfo* pSignalInfo
 ) {
     VkResult res = VK_SUCCESS;
+    if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+        if (m_timeline_mod->on_signal_semaphore(device, pSignalInfo, res)) {
+            return res;
+        }
+    }
     bool handled = false;
     {
         std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);

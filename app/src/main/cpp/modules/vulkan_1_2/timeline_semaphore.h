@@ -14,6 +14,9 @@ public:
     TimelineSemaphoreModule();
     ~TimelineSemaphoreModule() override = default;
 
+    bool is_phys_device_native(VkPhysicalDevice physDev) override;
+    bool is_device_native(VkDevice device) override;
+
     void on_pre_get_properties2(
         VkPhysicalDevice physicalDevice,
         VkPhysicalDeviceProperties2* pProperties,
@@ -33,6 +36,21 @@ public:
         VkPhysicalDevice physicalDevice,
         VkPhysicalDeviceFeatures2* pFeatures,
         void* pUserData) override;
+
+    void on_pre_create_device(
+        VkPhysicalDevice physicalDevice,
+        VkDeviceCreateInfo* pCreateInfo,
+        VkPhysicalDeviceFeatures* pEnabledFeatures,
+        std::vector<const char*>& enabledExtensions,
+        void*& pUserData) override;
+
+    void on_post_create_device(
+        VkPhysicalDevice physicalDevice,
+        VkDevice device,
+        VkResult result,
+        void* pUserData) override;
+
+    void on_destroy_device(VkDevice device) override;
 
     void on_pre_create_semaphore(
         VkDevice device,
@@ -79,12 +97,7 @@ public:
     bool is_timeline_semaphore(VkSemaphore semaphore) override;
 
 protected:
-    void on_pre_create_device_custom(
-        VkPhysicalDevice physicalDevice,
-        VkDeviceCreateInfo* pCreateInfo,
-        VkPhysicalDeviceFeatures* pEnabledFeatures,
-        std::vector<const char*>& enabledExtensions,
-        void*& pUserData) override;
+    bool query_native_support(VkPhysicalDevice physDev) override;
 
 private:
     struct FenceHolder {

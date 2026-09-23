@@ -26,7 +26,7 @@ public:
     const char* get_extension_name() const { return m_extension_name.c_str(); }
     uint32_t get_spec_version() const { return m_spec_version; }
 
-    bool is_phys_device_native(VkPhysicalDevice physDev) {
+    virtual bool is_phys_device_native(VkPhysicalDevice physDev) {
         std::lock_guard<std::mutex> lock(m_ext_mutex);
         auto it = m_phys_native.find((uint64_t)(uintptr_t)physDev);
         if (it != m_phys_native.end()) {
@@ -43,7 +43,7 @@ public:
         return native;
     }
 
-    bool is_device_native(VkDevice device) {
+    virtual bool is_device_native(VkDevice device) {
         std::lock_guard<std::mutex> lock(m_ext_mutex);
         auto it = m_device_native.find((uint64_t)(uintptr_t)device);
         if (it != m_device_native.end()) {

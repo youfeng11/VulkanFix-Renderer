@@ -59,16 +59,173 @@ void TimelineSemaphoreModule::on_post_get_features2(
     vku::relink_pnext(pFeatures->pNext, pUserData);
 }
 
-void TimelineSemaphoreModule::on_pre_create_device_custom(
+bool TimelineSemaphoreModule::query_native_support(VkPhysicalDevice physDev) {
+    const char* force_emu = getenv("FORCE_EMULATE_TIMELINE_SEMAPHORE");
+    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
+        LOGI("FORCE_EMULATE_TIMELINE_SEMAPHORE set, enabling emulation for physical device %p", physDev);
+        return false;
+    }
+
+    PFN_vkGetPhysicalDeviceProperties real_props =
+        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+    if (!real_props) return false;
+    VkPhysicalDeviceProperties props{};
+    real_props(physDev, &props);
+
+    PFN_vkGetPhysicalDeviceFeatures2 real_feat2 =
+        (PFN_vkGetPhysicalDeviceFeatures2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2");
+    if (!real_feat2) {
+        real_feat2 = (PFN_vkGetPhysicalDeviceFeatures2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2KHR");
+    }
+
+    if (props.apiVersion >= VK_API_VERSION_1_2 && real_feat2) {
+        VkPhysicalDeviceVulkan12Features v12Feat{};
+        v12Feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        VkPhysicalDeviceFeatures2 f2{};
+        f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        f2.pNext = &v12Feat;
+        real_feat2(physDev, &f2);
+        if (v12Feat.timelineSemaphore) {
+            return true;
+        }
+    }
+
+    PFN_vkEnumerateDeviceExtensionProperties real_enum =
+        (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+    if (real_enum) {
+        uint32_t count = 0;
+        if (real_enum(physDev, NULL, &count, NULL) == VK_SUCCESS && count > 0) {
+            std::vector<VkExtensionProperties> exts(count);
+            if (real_enum(physDev, NULL, &count, exts.data()) == VK_SUCCESS) {
+                bool hasExt = false;
+                for (const auto& e : exts) {
+                    if (strcmp(e.extensionName, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) == 0) {
+                        hasExt = true;
+                        break;
+                    }
+                }
+                if (hasExt && real_feat2) {
+                    VkPhysicalDeviceTimelineSemaphoreFeaturesKHR tsFeat{};
+                    tsFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR;
+                    VkPhysicalDeviceFeatures2 f2{};
+                    f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+                    f2.pNext = &tsFeat;
+                    real_feat2(physDev, &f2);
+                    if (tsFeat.timelineSemaphore) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool TimelineSemaphoreModule::is_phys_device_native(VkPhysicalDevice physDev) {
+    std::lock_guard<std::mutex> lock(m_ext_mutex);
+    auto it = m_phys_native.find((uint64_t)(uintptr_t)physDev);
+    if (it != m_phys_native.end()) {
+        return it->second;
+    }
+    bool native = query_native_support(physDev);
+    m_phys_native[(uint64_t)(uintptr_t)physDev] = native;
+    if (!native) {
+        LOGI("[VK_KHR_timeline_semaphore] Device %p lacks native timelineSemaphore feature support, enabling emulation!", physDev);
+    } else {
+        LOGI("[VK_KHR_timeline_semaphore] Device %p natively supports timelineSemaphore feature", physDev);
+    }
+    return native;
+}
+
+bool TimelineSemaphoreModule::is_device_native(VkDevice device) {
+    if (device == VK_NULL_HANDLE) return false;
+    std::lock_guard<std::mutex> lock(m_ext_mutex);
+    auto it = m_device_native.find((uint64_t)(uintptr_t)device);
+    if (it != m_device_native.end()) {
+        return it->second;
+    }
+    return false;
+}
+
+void TimelineSemaphoreModule::on_pre_create_device(
     VkPhysicalDevice physicalDevice,
     VkDeviceCreateInfo* pCreateInfo,
     VkPhysicalDeviceFeatures* pEnabledFeatures,
     std::vector<const char*>& enabledExtensions,
     void*& pUserData
 ) {
-    if (pCreateInfo) {
-        vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES);
+    pUserData = nullptr;
+    if (!pCreateInfo) return;
+
+    bool physNative = is_phys_device_native(physicalDevice);
+
+    bool appRequestedInExts = false;
+    for (const char* ext : enabledExtensions) {
+        if (strcmp(ext, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) == 0) {
+            appRequestedInExts = true;
+            break;
+        }
     }
+
+    auto* v12Feat = vku::find_pnext_mut<VkPhysicalDeviceVulkan12Features>(
+        pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
+    bool appRequestedInV12 = (v12Feat && v12Feat->timelineSemaphore);
+
+    auto* tsFeat = vku::find_pnext_mut<VkPhysicalDeviceTimelineSemaphoreFeaturesKHR>(
+        pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR);
+    bool appRequestedInTsFeat = (tsFeat && tsFeat->timelineSemaphore);
+
+    PFN_vkGetPhysicalDeviceProperties real_props =
+        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+    uint32_t realApiVer = VK_API_VERSION_1_0;
+    if (real_props) {
+        VkPhysicalDeviceProperties props{};
+        real_props(physicalDevice, &props);
+        realApiVer = props.apiVersion;
+    }
+
+    bool deviceCanBeNative = false;
+    if (physNative) {
+        if (realApiVer >= VK_API_VERSION_1_2 && appRequestedInV12) {
+            deviceCanBeNative = true;
+        } else if (appRequestedInExts && (appRequestedInTsFeat || !tsFeat)) {
+            deviceCanBeNative = true;
+        }
+    }
+
+    if (!deviceCanBeNative) {
+        for (auto it = enabledExtensions.begin(); it != enabledExtensions.end(); ) {
+            if (strcmp(*it, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) == 0) {
+                it = enabledExtensions.erase(it);
+                LOGI("TimelineSemaphore: stripped %s from enabledExtensions", VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+            } else {
+                ++it;
+            }
+        }
+        vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR);
+    }
+
+    pUserData = reinterpret_cast<void*>(static_cast<uintptr_t>(deviceCanBeNative ? 1 : 0));
+}
+
+void TimelineSemaphoreModule::on_post_create_device(
+    VkPhysicalDevice physicalDevice,
+    VkDevice device,
+    VkResult result,
+    void* pUserData
+) {
+    if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
+        bool isNative = (reinterpret_cast<uintptr_t>(pUserData) == 1);
+        std::lock_guard<std::mutex> lock(m_ext_mutex);
+        m_device_native[(uint64_t)(uintptr_t)device] = isNative;
+        LOGI("TimelineSemaphore: device %p native=%d (emulation=%s)",
+             device, isNative ? 1 : 0, isNative ? "OFF" : "ON");
+    }
+}
+
+void TimelineSemaphoreModule::on_destroy_device(VkDevice device) {
+    std::lock_guard<std::mutex> lock(m_ext_mutex);
+    m_device_native.erase((uint64_t)(uintptr_t)device);
 }
 
 void TimelineSemaphoreModule::on_pre_create_semaphore(
@@ -122,20 +279,23 @@ void TimelineSemaphoreModule::on_destroy_semaphore(
 
 TimelineSemaphoreModule::FenceHolder::~FenceHolder() {
     if (isInternal && fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-        PFN_vkDestroyFence real_df =
-            (PFN_vkDestroyFence) get_real_proc(get_last_instance(), device, "vkDestroyFence");
+        const auto& dt = LayerManager::get().get_dispatch_table(device);
+        PFN_vkDestroyFence real_df = dt.DestroyFence;
+        if (!real_df) {
+            real_df = (PFN_vkDestroyFence) get_real_proc(get_last_instance(), device, "vkDestroyFence");
+        }
         if (real_df) real_df(device, fence, nullptr);
     }
 }
 
 void TimelineSemaphoreModule::check_pending_signals_locked(std::shared_ptr<TimelineSemaphoreState>& state) {
     if (!state) return;
-    PFN_vkGetFenceStatus real_gfs = nullptr;
-
     auto it = state->pendingSignals.begin();
     while (it != state->pendingSignals.end()) {
         auto fh = it->fenceHolder;
         if (fh && fh->fence != VK_NULL_HANDLE) {
+            const auto& dt = LayerManager::get().get_dispatch_table(fh->device);
+            PFN_vkGetFenceStatus real_gfs = dt.GetFenceStatus;
             if (!real_gfs) {
                 real_gfs = (PFN_vkGetFenceStatus) get_real_proc(get_last_instance(), fh->device, "vkGetFenceStatus");
             }
@@ -246,8 +406,11 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
     bool waitAny = (pWaitInfo->flags & VK_SEMAPHORE_WAIT_ANY_BIT);
     auto startTime = std::chrono::steady_clock::now();
 
-    PFN_vkWaitForFences real_wff =
-        (PFN_vkWaitForFences) get_real_proc(get_last_instance(), device, "vkWaitForFences");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkWaitForFences real_wff = dt.WaitForFences;
+    if (!real_wff) {
+        real_wff = (PFN_vkWaitForFences) get_real_proc(get_last_instance(), device, "vkWaitForFences");
+    }
 
     while (true) {
         {
@@ -322,8 +485,12 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
             }
         } else {
             std::unique_lock<std::mutex> lock(m_semaphore_mutex);
-            if (states[0]) {
-                states[0]->cv.wait_for(lock, std::chrono::milliseconds(5));
+            std::shared_ptr<TimelineSemaphoreState> waitState = nullptr;
+            for (const auto& s : states) {
+                if (s) { waitState = s; break; }
+            }
+            if (waitState) {
+                waitState->cv.wait_for(lock, std::chrono::milliseconds(5));
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
@@ -369,8 +536,14 @@ bool TimelineSemaphoreModule::on_queue_submit(
     VkDevice device = LayerManager::get().get_device_for_queue(queue);
     if (is_device_native(device)) return false;
 
-    PFN_vkQueueSubmit real_fn =
-        (PFN_vkQueueSubmit) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkQueueSubmit");
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkQueueSubmit real_fn = dt.QueueSubmit;
+    if (!real_fn) {
+        real_fn = (PFN_vkQueueSubmit) get_real_proc(get_last_instance(), device, "vkQueueSubmit");
+    }
+    if (!real_fn) {
+        real_fn = (PFN_vkQueueSubmit) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkQueueSubmit");
+    }
     if (!real_fn) {
         outResult = VK_ERROR_INITIALIZATION_FAILED;
         return true;
@@ -387,9 +560,28 @@ bool TimelineSemaphoreModule::on_queue_submit(
     };
     std::vector<SignalTarget> emulatedSignals;
 
+    // Check if any submits need to wait on emulated timeline semaphores
     for (uint32_t s = 0; s < submitCount; ++s) {
         auto* timelineInfo = vku::find_pnext<VkTimelineSemaphoreSubmitInfo>(
             pSubmits[s].pNext, VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO);
+        if (timelineInfo && timelineInfo->pWaitSemaphoreValues) {
+            for (uint32_t i = 0; i < timelineInfo->waitSemaphoreValueCount; ++i) {
+                if (i < pSubmits[s].waitSemaphoreCount) {
+                    VkSemaphore sem = pSubmits[s].pWaitSemaphores[i];
+                    if (is_timeline_semaphore(sem)) {
+                        uint64_t targetVal = timelineInfo->pWaitSemaphoreValues[i];
+                        VkSemaphoreWaitInfo waitInfo{};
+                        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                        waitInfo.semaphoreCount = 1;
+                        waitInfo.pSemaphores = &sem;
+                        waitInfo.pValues = &targetVal;
+                        VkResult wr = VK_SUCCESS;
+                        on_wait_semaphores(device, &waitInfo, UINT64_MAX, wr);
+                    }
+                }
+            }
+        }
+
         if (timelineInfo && timelineInfo->pSignalSemaphoreValues) {
             for (uint32_t i = 0; i < timelineInfo->signalSemaphoreValueCount; ++i) {
                 if (i < pSubmits[s].signalSemaphoreCount) {
@@ -413,8 +605,10 @@ bool TimelineSemaphoreModule::on_queue_submit(
             fenceHolder->isInternal = false;
         } else {
             VkFence internalFence = VK_NULL_HANDLE;
-            PFN_vkCreateFence real_cf =
-                (PFN_vkCreateFence) get_real_proc(get_last_instance(), device, "vkCreateFence");
+            PFN_vkCreateFence real_cf = dt.CreateFence;
+            if (!real_cf) {
+                real_cf = (PFN_vkCreateFence) get_real_proc(get_last_instance(), device, "vkCreateFence");
+            }
             VkFenceCreateInfo fci{};
             fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
             if (real_cf && real_cf(device, &fci, nullptr, &internalFence) == VK_SUCCESS) {

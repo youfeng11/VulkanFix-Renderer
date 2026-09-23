@@ -81,6 +81,11 @@ struct DeviceDispatchTable {
     PFN_vkAcquireNextImageKHR AcquireNextImage = nullptr;
     PFN_vkAcquireNextImage2KHR AcquireNextImage2 = nullptr;
     PFN_vkQueuePresentKHR QueuePresent = nullptr;
+    PFN_vkCreateFence CreateFence = nullptr;
+    PFN_vkDestroyFence DestroyFence = nullptr;
+    PFN_vkWaitForFences WaitForFences = nullptr;
+    PFN_vkGetFenceStatus GetFenceStatus = nullptr;
+    PFN_vkResetFences ResetFences = nullptr;
 };
 
 class LayerManager {

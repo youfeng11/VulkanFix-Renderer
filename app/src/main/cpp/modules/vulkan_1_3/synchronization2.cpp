@@ -637,7 +637,7 @@ bool Synchronization2Module::on_queue_submit2(
                 if (stage == 0) stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
                 storage.waitDstStageMask.push_back(stage);
                 storage.waitValues.push_back(w.value);
-                if (w.value != 0) storage.hasTimelineValues = true;
+                if (w.value != 0 || LayerManager::get().is_timeline_semaphore(w.semaphore)) storage.hasTimelineValues = true;
             }
         }
 
@@ -655,7 +655,7 @@ bool Synchronization2Module::on_queue_submit2(
                 const auto& sig = sub2.pSignalSemaphoreInfos[i];
                 storage.signalSemaphores.push_back(sig.semaphore);
                 storage.signalValues.push_back(sig.value);
-                if (sig.value != 0) storage.hasTimelineValues = true;
+                if (sig.value != 0 || LayerManager::get().is_timeline_semaphore(sig.semaphore)) storage.hasTimelineValues = true;
             }
         }
 
