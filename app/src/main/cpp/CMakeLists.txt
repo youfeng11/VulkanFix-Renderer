@@ -40,9 +40,11 @@ target_include_directories(vulkan_fix PRIVATE
 )
 
 find_library(LOG_LIB log)
+find_library(ANDROID_LIB android)
 
 target_link_libraries(vulkan_fix PRIVATE
     ${LOG_LIB}
+    ${ANDROID_LIB}
     dl
 )
 

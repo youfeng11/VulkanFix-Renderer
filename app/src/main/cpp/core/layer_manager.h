@@ -75,6 +75,12 @@ struct DeviceDispatchTable {
     PFN_vkTrimCommandPool TrimCommandPool = nullptr;
     PFN_vkCmdSetDeviceMask CmdSetDeviceMask = nullptr;
     PFN_vkGetDeviceGroupPeerMemoryFeatures GetDeviceGroupPeerMemoryFeatures = nullptr;
+    PFN_vkCreateSwapchainKHR CreateSwapchain = nullptr;
+    PFN_vkDestroySwapchainKHR DestroySwapchain = nullptr;
+    PFN_vkGetSwapchainImagesKHR GetSwapchainImages = nullptr;
+    PFN_vkAcquireNextImageKHR AcquireNextImage = nullptr;
+    PFN_vkAcquireNextImage2KHR AcquireNextImage2 = nullptr;
+    PFN_vkQueuePresentKHR QueuePresent = nullptr;
 };
 
 class LayerManager {
@@ -445,6 +451,86 @@ public:
         VkDevice device,
         const VkDeviceMemoryOpaqueCaptureAddressInfo* pInfo);
 
+    // Swapchain and Surface (VK_KHR_swapchain, VK_KHR_surface, VK_KHR_android_surface)
+    VkResult dispatch_create_swapchain(
+        VkDevice device,
+        const VkSwapchainCreateInfoKHR* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkSwapchainKHR* pSwapchain);
+
+    void dispatch_destroy_swapchain(
+        VkDevice device,
+        VkSwapchainKHR swapchain,
+        const VkAllocationCallbacks* pAllocator);
+
+    VkResult dispatch_get_swapchain_images(
+        VkDevice device,
+        VkSwapchainKHR swapchain,
+        uint32_t* pSwapchainImageCount,
+        VkImage* pSwapchainImages);
+
+    VkResult dispatch_acquire_next_image(
+        VkDevice device,
+        VkSwapchainKHR swapchain,
+        uint64_t timeout,
+        VkSemaphore semaphore,
+        VkFence fence,
+        uint32_t* pImageIndex);
+
+    VkResult dispatch_acquire_next_image2(
+        VkDevice device,
+        const VkAcquireNextImageInfoKHR* pAcquireInfo,
+        uint32_t* pImageIndex);
+
+    VkResult dispatch_queue_present(
+        VkQueue queue,
+        const VkPresentInfoKHR* pPresentInfo);
+
+    VkResult dispatch_get_physical_device_surface_support(
+        VkPhysicalDevice physicalDevice,
+        uint32_t queueFamilyIndex,
+        VkSurfaceKHR surface,
+        VkBool32* pSupported);
+
+    VkResult dispatch_get_physical_device_surface_capabilities(
+        VkPhysicalDevice physicalDevice,
+        VkSurfaceKHR surface,
+        VkSurfaceCapabilitiesKHR* pSurfaceCapabilities);
+
+    VkResult dispatch_get_physical_device_surface_capabilities2(
+        VkPhysicalDevice physicalDevice,
+        const VkPhysicalDeviceSurfaceInfo2KHR* pSurfaceInfo,
+        VkSurfaceCapabilities2KHR* pSurfaceCapabilities);
+
+    VkResult dispatch_get_physical_device_surface_formats(
+        VkPhysicalDevice physicalDevice,
+        VkSurfaceKHR surface,
+        uint32_t* pSurfaceFormatCount,
+        VkSurfaceFormatKHR* pSurfaceFormats);
+
+    VkResult dispatch_get_physical_device_surface_formats2(
+        VkPhysicalDevice physicalDevice,
+        const VkPhysicalDeviceSurfaceInfo2KHR* pSurfaceInfo,
+        uint32_t* pSurfaceFormatCount,
+        VkSurfaceFormat2KHR* pSurfaceFormats);
+
+    VkResult dispatch_get_physical_device_surface_present_modes(
+        VkPhysicalDevice physicalDevice,
+        VkSurfaceKHR surface,
+        uint32_t* pPresentModeCount,
+        VkPresentModeKHR* pPresentModes);
+
+    VkResult dispatch_create_android_surface(
+        VkInstance instance,
+        const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkSurfaceKHR* pSurface);
+
+    void dispatch_destroy_surface(
+        VkInstance instance,
+        VkSurfaceKHR surface,
+        const VkAllocationCallbacks* pAllocator);
+
     // Vulkan 1.1 Core / Promoted Features
     VkResult dispatch_bind_buffer_memory2(
         VkDevice device,
@@ -556,6 +642,7 @@ private:
     IVulkanLayerModule* m_renderpass2_mod = nullptr;
     IVulkanLayerModule* m_draw_indirect_count_mod = nullptr;
     IVulkanLayerModule* m_device_group_mod = nullptr;
+    IVulkanLayerModule* m_swapchain_mod = nullptr;
 };
 
 /**

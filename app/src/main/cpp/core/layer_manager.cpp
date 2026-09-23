@@ -51,6 +51,7 @@ void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
     else if (strcmp(name, "VK_KHR_create_renderpass2") == 0) m_renderpass2_mod = module.get();
     else if (strcmp(name, "VK_KHR_draw_indirect_count") == 0) m_draw_indirect_count_mod = module.get();
     else if (strcmp(name, "VK_KHR_device_group") == 0) m_device_group_mod = module.get();
+    else if (strcmp(name, "VK_KHR_swapchain") == 0) m_swapchain_mod = module.get();
     m_modules.push_back(std::move(module));
 }
 
@@ -225,6 +226,12 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     if (!dt.GetDeviceGroupPeerMemoryFeatures) {
         LOAD_PROC_OPT(GetDeviceGroupPeerMemoryFeatures, "vkGetDeviceGroupPeerMemoryFeaturesKHR");
     }
+    LOAD_PROC_OPT(CreateSwapchain, "vkCreateSwapchainKHR");
+    LOAD_PROC_OPT(DestroySwapchain, "vkDestroySwapchainKHR");
+    LOAD_PROC_OPT(GetSwapchainImages, "vkGetSwapchainImagesKHR");
+    LOAD_PROC_OPT(AcquireNextImage, "vkAcquireNextImageKHR");
+    LOAD_PROC_OPT(AcquireNextImage2, "vkAcquireNextImage2KHR");
+    LOAD_PROC_OPT(QueuePresent, "vkQueuePresentKHR");
 
     #undef LOAD_PROC
     #undef LOAD_PROC_OPT
@@ -2236,6 +2243,314 @@ void LayerManager::dispatch_get_device_group_peer_memory_features(
         *pPeerMemoryFeatures = 0;
     }
 }
+
+// ============================================================================
+// Swapchain & Surface Dispatches
+// ============================================================================
+
+VkResult LayerManager::dispatch_create_swapchain(
+    VkDevice device,
+    const VkSwapchainCreateInfoKHR* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSwapchainKHR* pSwapchain
+) {
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_create_swapchain(device, pCreateInfo, pAllocator, pSwapchain, res)) {
+            return res;
+        }
+    }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CreateSwapchain) {
+        return dt.CreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
+    }
+    PFN_vkCreateSwapchainKHR real_fn =
+        (PFN_vkCreateSwapchainKHR) get_real_proc(get_last_instance(), device, "vkCreateSwapchainKHR");
+    if (real_fn) {
+        return real_fn(device, pCreateInfo, pAllocator, pSwapchain);
+    }
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+void LayerManager::dispatch_destroy_swapchain(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    const VkAllocationCallbacks* pAllocator
+) {
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_destroy_swapchain(device, swapchain, pAllocator)) {
+            return;
+        }
+    }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.DestroySwapchain) {
+        dt.DestroySwapchain(device, swapchain, pAllocator);
+        return;
+    }
+    PFN_vkDestroySwapchainKHR real_fn =
+        (PFN_vkDestroySwapchainKHR) get_real_proc(get_last_instance(), device, "vkDestroySwapchainKHR");
+    if (real_fn) {
+        real_fn(device, swapchain, pAllocator);
+    }
+}
+
+VkResult LayerManager::dispatch_get_swapchain_images(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint32_t* pSwapchainImageCount,
+    VkImage* pSwapchainImages
+) {
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_get_swapchain_images(device, swapchain, pSwapchainImageCount, pSwapchainImages, res)) {
+            return res;
+        }
+    }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.GetSwapchainImages) {
+        return dt.GetSwapchainImages(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+    }
+    PFN_vkGetSwapchainImagesKHR real_fn =
+        (PFN_vkGetSwapchainImagesKHR) get_real_proc(get_last_instance(), device, "vkGetSwapchainImagesKHR");
+    if (real_fn) {
+        return real_fn(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+    }
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+VkResult LayerManager::dispatch_acquire_next_image(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint64_t timeout,
+    VkSemaphore semaphore,
+    VkFence fence,
+    uint32_t* pImageIndex
+) {
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_acquire_next_image(device, swapchain, timeout, semaphore, fence, pImageIndex, res)) {
+            return res;
+        }
+    }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.AcquireNextImage) {
+        return dt.AcquireNextImage(device, swapchain, timeout, semaphore, fence, pImageIndex);
+    }
+    PFN_vkAcquireNextImageKHR real_fn =
+        (PFN_vkAcquireNextImageKHR) get_real_proc(get_last_instance(), device, "vkAcquireNextImageKHR");
+    if (real_fn) {
+        return real_fn(device, swapchain, timeout, semaphore, fence, pImageIndex);
+    }
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+VkResult LayerManager::dispatch_acquire_next_image2(
+    VkDevice device,
+    const VkAcquireNextImageInfoKHR* pAcquireInfo,
+    uint32_t* pImageIndex
+) {
+    if (!pAcquireInfo) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_acquire_next_image(device, pAcquireInfo->swapchain, pAcquireInfo->timeout, pAcquireInfo->semaphore, pAcquireInfo->fence, pImageIndex, res)) {
+            return res;
+        }
+    }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.AcquireNextImage2) {
+        return dt.AcquireNextImage2(device, pAcquireInfo, pImageIndex);
+    }
+    PFN_vkAcquireNextImage2KHR real_fn =
+        (PFN_vkAcquireNextImage2KHR) get_real_proc(get_last_instance(), device, "vkAcquireNextImage2KHR");
+    if (real_fn) {
+        return real_fn(device, pAcquireInfo, pImageIndex);
+    }
+    return dispatch_acquire_next_image(device, pAcquireInfo->swapchain, pAcquireInfo->timeout, pAcquireInfo->semaphore, pAcquireInfo->fence, pImageIndex);
+}
+
+VkResult LayerManager::dispatch_queue_present(
+    VkQueue queue,
+    const VkPresentInfoKHR* pPresentInfo
+) {
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_queue_present(queue, pPresentInfo, res)) {
+            return res;
+        }
+    }
+    VkDevice device = get_device_for_queue(queue);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.QueuePresent) {
+        return dt.QueuePresent(queue, pPresentInfo);
+    }
+    PFN_vkQueuePresentKHR real_fn =
+        (PFN_vkQueuePresentKHR) get_real_proc(get_last_instance(), device, "vkQueuePresentKHR");
+    if (real_fn) {
+        return real_fn(queue, pPresentInfo);
+    }
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+VkResult LayerManager::dispatch_get_physical_device_surface_support(
+    VkPhysicalDevice physicalDevice,
+    uint32_t queueFamilyIndex,
+    VkSurfaceKHR surface,
+    VkBool32* pSupported
+) {
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_get_physical_device_surface_support(physicalDevice, queueFamilyIndex, surface, pSupported, res)) {
+            return res;
+        }
+    }
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR real_fn =
+        (PFN_vkGetPhysicalDeviceSurfaceSupportKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceSupportKHR");
+    if (real_fn) {
+        return real_fn(physicalDevice, queueFamilyIndex, surface, pSupported);
+    }
+    if (pSupported) *pSupported = VK_TRUE;
+    return VK_SUCCESS;
+}
+
+VkResult LayerManager::dispatch_get_physical_device_surface_capabilities(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    VkSurfaceCapabilitiesKHR* pSurfaceCapabilities
+) {
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_get_physical_device_surface_capabilities(physicalDevice, surface, pSurfaceCapabilities, res)) {
+            return res;
+        }
+    }
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR real_fn =
+        (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    if (real_fn) {
+        return real_fn(physicalDevice, surface, pSurfaceCapabilities);
+    }
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+VkResult LayerManager::dispatch_get_physical_device_surface_capabilities2(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceSurfaceInfo2KHR* pSurfaceInfo,
+    VkSurfaceCapabilities2KHR* pSurfaceCapabilities
+) {
+    if (!pSurfaceInfo || !pSurfaceCapabilities) return VK_ERROR_INITIALIZATION_FAILED;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR real_fn =
+        (PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceCapabilities2KHR");
+    if (real_fn) {
+        return real_fn(physicalDevice, pSurfaceInfo, pSurfaceCapabilities);
+    }
+    return dispatch_get_physical_device_surface_capabilities(physicalDevice, pSurfaceInfo->surface, &pSurfaceCapabilities->surfaceCapabilities);
+}
+
+VkResult LayerManager::dispatch_get_physical_device_surface_formats(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    uint32_t* pSurfaceFormatCount,
+    VkSurfaceFormatKHR* pSurfaceFormats
+) {
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_get_physical_device_surface_formats(physicalDevice, surface, pSurfaceFormatCount, pSurfaceFormats, res)) {
+            return res;
+        }
+    }
+    PFN_vkGetPhysicalDeviceSurfaceFormatsKHR real_fn =
+        (PFN_vkGetPhysicalDeviceSurfaceFormatsKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceFormatsKHR");
+    if (real_fn) {
+        return real_fn(physicalDevice, surface, pSurfaceFormatCount, pSurfaceFormats);
+    }
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+VkResult LayerManager::dispatch_get_physical_device_surface_formats2(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceSurfaceInfo2KHR* pSurfaceInfo,
+    uint32_t* pSurfaceFormatCount,
+    VkSurfaceFormat2KHR* pSurfaceFormats
+) {
+    if (!pSurfaceInfo) return VK_ERROR_INITIALIZATION_FAILED;
+    PFN_vkGetPhysicalDeviceSurfaceFormats2KHR real_fn =
+        (PFN_vkGetPhysicalDeviceSurfaceFormats2KHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceFormats2KHR");
+    if (real_fn) {
+        return real_fn(physicalDevice, pSurfaceInfo, pSurfaceFormatCount, pSurfaceFormats);
+    }
+    if (!pSurfaceFormats) {
+        return dispatch_get_physical_device_surface_formats(physicalDevice, pSurfaceInfo->surface, pSurfaceFormatCount, nullptr);
+    }
+    uint32_t count = *pSurfaceFormatCount;
+    std::vector<VkSurfaceFormatKHR> formats(count);
+    VkResult r = dispatch_get_physical_device_surface_formats(physicalDevice, pSurfaceInfo->surface, &count, formats.data());
+    if (r == VK_SUCCESS || r == VK_INCOMPLETE) {
+        for (uint32_t i = 0; i < count; ++i) {
+            pSurfaceFormats[i].sType = VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR;
+            pSurfaceFormats[i].pNext = nullptr;
+            pSurfaceFormats[i].surfaceFormat = formats[i];
+        }
+        *pSurfaceFormatCount = count;
+    }
+    return r;
+}
+
+VkResult LayerManager::dispatch_get_physical_device_surface_present_modes(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    uint32_t* pPresentModeCount,
+    VkPresentModeKHR* pPresentModes
+) {
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_get_physical_device_surface_present_modes(physicalDevice, surface, pPresentModeCount, pPresentModes, res)) {
+            return res;
+        }
+    }
+    PFN_vkGetPhysicalDeviceSurfacePresentModesKHR real_fn =
+        (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+    if (real_fn) {
+        return real_fn(physicalDevice, surface, pPresentModeCount, pPresentModes);
+    }
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+VkResult LayerManager::dispatch_create_android_surface(
+    VkInstance instance,
+    const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSurfaceKHR* pSurface
+) {
+    VkResult res = VK_SUCCESS;
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_create_android_surface(instance, pCreateInfo, pAllocator, pSurface, res)) {
+            return res;
+        }
+    }
+    PFN_vkCreateAndroidSurfaceKHR real_fn =
+        (PFN_vkCreateAndroidSurfaceKHR) get_real_proc(instance, VK_NULL_HANDLE, "vkCreateAndroidSurfaceKHR");
+    if (real_fn) {
+        return real_fn(instance, pCreateInfo, pAllocator, pSurface);
+    }
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+void LayerManager::dispatch_destroy_surface(
+    VkInstance instance,
+    VkSurfaceKHR surface,
+    const VkAllocationCallbacks* pAllocator
+) {
+    if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
+        if (m_swapchain_mod->on_destroy_surface(instance, surface, pAllocator)) {
+            return;
+        }
+    }
+    PFN_vkDestroySurfaceKHR real_fn =
+        (PFN_vkDestroySurfaceKHR) get_real_proc(instance, VK_NULL_HANDLE, "vkDestroySurfaceKHR");
+    if (real_fn) {
+        real_fn(instance, surface, pAllocator);
+    }
+}
+
 
 
 

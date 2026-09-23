@@ -2,6 +2,7 @@
 #define VK_COMMON_H
 
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_android.h>
 #include <android/log.h>
 #include <inttypes.h>
 #include <stdlib.h>

@@ -446,6 +446,79 @@ public:
         uint32_t localDeviceIndex,
         uint32_t remoteDeviceIndex,
         VkPeerMemoryFeatureFlags* pPeerMemoryFeatures) { return false; }
+
+    // 21. Swapchain and Surface (VK_KHR_swapchain, VK_KHR_surface, VK_KHR_android_surface):
+    virtual bool on_create_swapchain(
+        VkDevice device,
+        const VkSwapchainCreateInfoKHR* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkSwapchainKHR* pSwapchain,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_destroy_swapchain(
+        VkDevice device,
+        VkSwapchainKHR swapchain,
+        const VkAllocationCallbacks* pAllocator) { return false; }
+
+    virtual bool on_get_swapchain_images(
+        VkDevice device,
+        VkSwapchainKHR swapchain,
+        uint32_t* pSwapchainImageCount,
+        VkImage* pSwapchainImages,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_acquire_next_image(
+        VkDevice device,
+        VkSwapchainKHR swapchain,
+        uint64_t timeout,
+        VkSemaphore semaphore,
+        VkFence fence,
+        uint32_t* pImageIndex,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_queue_present(
+        VkQueue queue,
+        const VkPresentInfoKHR* pPresentInfo,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_get_physical_device_surface_support(
+        VkPhysicalDevice physicalDevice,
+        uint32_t queueFamilyIndex,
+        VkSurfaceKHR surface,
+        VkBool32* pSupported,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_get_physical_device_surface_capabilities(
+        VkPhysicalDevice physicalDevice,
+        VkSurfaceKHR surface,
+        VkSurfaceCapabilitiesKHR* pSurfaceCapabilities,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_get_physical_device_surface_formats(
+        VkPhysicalDevice physicalDevice,
+        VkSurfaceKHR surface,
+        uint32_t* pSurfaceFormatCount,
+        VkSurfaceFormatKHR* pSurfaceFormats,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_get_physical_device_surface_present_modes(
+        VkPhysicalDevice physicalDevice,
+        VkSurfaceKHR surface,
+        uint32_t* pPresentModeCount,
+        VkPresentModeKHR* pPresentModes,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_create_android_surface(
+        VkInstance instance,
+        const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkSurfaceKHR* pSurface,
+        VkResult& outResult) { return false; }
+
+    virtual bool on_destroy_surface(
+        VkInstance instance,
+        VkSurfaceKHR surface,
+        const VkAllocationCallbacks* pAllocator) { return false; }
 };
 
 #endif // LAYER_MODULE_H

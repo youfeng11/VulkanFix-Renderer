@@ -127,7 +127,44 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateInstance(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    VkResult res = real_fn(pCreateInfo, pAllocator, pInstance);
+    if (!pCreateInfo) {
+        return real_fn(pCreateInfo, pAllocator, pInstance);
+    }
+
+    // Check natively supported instance extensions
+    PFN_vkEnumerateInstanceExtensionProperties real_enum =
+        (PFN_vkEnumerateInstanceExtensionProperties) get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties");
+    std::vector<std::string> nativeExts;
+    if (real_enum) {
+        uint32_t count = 0;
+        if (real_enum(NULL, &count, NULL) == VK_SUCCESS && count > 0) {
+            std::vector<VkExtensionProperties> ep(count);
+            if (real_enum(NULL, &count, ep.data()) == VK_SUCCESS) {
+                for (const auto& e : ep) nativeExts.push_back(e.extensionName);
+            }
+        }
+    }
+
+    VkInstanceCreateInfo modCI = *pCreateInfo;
+    std::vector<const char*> enabledExts;
+    if (pCreateInfo->enabledExtensionCount > 0 && pCreateInfo->ppEnabledExtensionNames) {
+        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+            const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
+            bool isNative = false;
+            for (const auto& ne : nativeExts) {
+                if (ne == ext) { isNative = true; break; }
+            }
+            if (isNative) {
+                enabledExts.push_back(ext);
+            } else {
+                LOGI("vkCreateInstance: stripped unsupported instance extension: %s", ext);
+            }
+        }
+        modCI.enabledExtensionCount = (uint32_t)enabledExts.size();
+        modCI.ppEnabledExtensionNames = enabledExts.empty() ? nullptr : enabledExts.data();
+    }
+
+    VkResult res = real_fn(&modCI, pAllocator, pInstance);
     if (res == VK_SUCCESS && pInstance && *pInstance != VK_NULL_HANDLE) {
         set_last_instance(*pInstance);
         LOGI("Created VkInstance %p", *pInstance);
@@ -591,6 +628,22 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     MATCH_FUNC(vkDestroySamplerYcbcrConversion);
     MATCH_FUNC(vkDestroySamplerYcbcrConversionKHR);
 
+    // Swapchain & Surface (VK_KHR_swapchain, VK_KHR_surface, VK_KHR_android_surface)
+    MATCH_FUNC(vkCreateSwapchainKHR);
+    MATCH_FUNC(vkDestroySwapchainKHR);
+    MATCH_FUNC(vkGetSwapchainImagesKHR);
+    MATCH_FUNC(vkAcquireNextImageKHR);
+    MATCH_FUNC(vkAcquireNextImage2KHR);
+    MATCH_FUNC(vkQueuePresentKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceSurfaceSupportKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceSurfaceCapabilities2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceSurfaceFormatsKHR);
+    MATCH_FUNC(vkGetPhysicalDeviceSurfaceFormats2KHR);
+    MATCH_FUNC(vkGetPhysicalDeviceSurfacePresentModesKHR);
+    MATCH_FUNC(vkCreateAndroidSurfaceKHR);
+    MATCH_FUNC(vkDestroySurfaceKHR);
+
     #undef MATCH_FUNC
 
     init_real_vulkan();
@@ -739,6 +792,14 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     MATCH_FUNC(vkDestroySamplerYcbcrConversion);
     MATCH_FUNC(vkDestroySamplerYcbcrConversionKHR);
 
+    // Swapchain (VK_KHR_swapchain)
+    MATCH_FUNC(vkCreateSwapchainKHR);
+    MATCH_FUNC(vkDestroySwapchainKHR);
+    MATCH_FUNC(vkGetSwapchainImagesKHR);
+    MATCH_FUNC(vkAcquireNextImageKHR);
+    MATCH_FUNC(vkAcquireNextImage2KHR);
+    MATCH_FUNC(vkQueuePresentKHR);
+
     #undef MATCH_FUNC
 
     init_real_vulkan();
@@ -790,7 +851,49 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     }
 
 FORWARD_INST(VkResult, vkEnumeratePhysicalDevices, (VkInstance instance, uint32_t* pCount, VkPhysicalDevice* pDevices), (instance, pCount, pDevices))
-FORWARD_INST(VkResult, vkEnumerateInstanceExtensionProperties, (const char* pLayer, uint32_t* pCount, VkExtensionProperties* pProps), (pLayer, pCount, pProps))
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
+    const char* pLayer,
+    uint32_t* pCount,
+    VkExtensionProperties* pProps
+) {
+    init_real_vulkan();
+    PFN_vkEnumerateInstanceExtensionProperties real_fn =
+        (PFN_vkEnumerateInstanceExtensionProperties) get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties");
+
+    std::vector<VkExtensionProperties> exts;
+    if (real_fn) {
+        uint32_t count = 0;
+        if (real_fn(pLayer, &count, NULL) == VK_SUCCESS && count > 0) {
+            exts.resize(count);
+            real_fn(pLayer, &count, exts.data());
+        }
+    }
+
+    auto add_ext = [&](const char* name, uint32_t spec) {
+        for (const auto& e : exts) {
+            if (strcmp(e.extensionName, name) == 0) return;
+        }
+        VkExtensionProperties p{};
+        strncpy(p.extensionName, name, VK_MAX_EXTENSION_NAME_SIZE - 1);
+        p.specVersion = spec;
+        exts.push_back(p);
+    };
+
+    add_ext(VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_SURFACE_SPEC_VERSION);
+    add_ext(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_SPEC_VERSION);
+
+    if (!pProps) {
+        if (pCount) *pCount = (uint32_t)exts.size();
+        return VK_SUCCESS;
+    }
+    if (!pCount) return VK_ERROR_INITIALIZATION_FAILED;
+
+    uint32_t toCopy = std::min(*pCount, (uint32_t)exts.size());
+    memcpy(pProps, exts.data(), toCopy * sizeof(VkExtensionProperties));
+    *pCount = toCopy;
+    return (toCopy < exts.size()) ? VK_INCOMPLETE : VK_SUCCESS;
+}
 FORWARD_INST(VkResult, vkEnumerateInstanceLayerProperties, (uint32_t* pCount, VkLayerProperties* pProps), (pCount, pProps))
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceVersion(
     uint32_t* pApiVersion
@@ -1814,6 +1917,131 @@ VK_LAYER_EXPORT void VKAPI_CALL vkDestroySamplerYcbcrConversionKHR(
     const VkAllocationCallbacks* pAllocator
 ) {
     vkDestroySamplerYcbcrConversion(device, ycbcrConversion, pAllocator);
+}
+
+// ============================================================================
+// Swapchain & Surface (VK_KHR_swapchain, VK_KHR_surface, VK_KHR_android_surface)
+// ============================================================================
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateSwapchainKHR(
+    VkDevice device,
+    const VkSwapchainCreateInfoKHR* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSwapchainKHR* pSwapchain
+) {
+    return LayerManager::get().dispatch_create_swapchain(device, pCreateInfo, pAllocator, pSwapchain);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroySwapchainKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_swapchain(device, swapchain, pAllocator);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetSwapchainImagesKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint32_t* pSwapchainImageCount,
+    VkImage* pSwapchainImages
+) {
+    return LayerManager::get().dispatch_get_swapchain_images(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkAcquireNextImageKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint64_t timeout,
+    VkSemaphore semaphore,
+    VkFence fence,
+    uint32_t* pImageIndex
+) {
+    return LayerManager::get().dispatch_acquire_next_image(device, swapchain, timeout, semaphore, fence, pImageIndex);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkAcquireNextImage2KHR(
+    VkDevice device,
+    const VkAcquireNextImageInfoKHR* pAcquireInfo,
+    uint32_t* pImageIndex
+) {
+    return LayerManager::get().dispatch_acquire_next_image2(device, pAcquireInfo, pImageIndex);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkQueuePresentKHR(
+    VkQueue queue,
+    const VkPresentInfoKHR* pPresentInfo
+) {
+    return LayerManager::get().dispatch_queue_present(queue, pPresentInfo);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
+    VkPhysicalDevice physicalDevice,
+    uint32_t queueFamilyIndex,
+    VkSurfaceKHR surface,
+    VkBool32* pSupported
+) {
+    return LayerManager::get().dispatch_get_physical_device_surface_support(physicalDevice, queueFamilyIndex, surface, pSupported);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    VkSurfaceCapabilitiesKHR* pSurfaceCapabilities
+) {
+    return LayerManager::get().dispatch_get_physical_device_surface_capabilities(physicalDevice, surface, pSurfaceCapabilities);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilities2KHR(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceSurfaceInfo2KHR* pSurfaceInfo,
+    VkSurfaceCapabilities2KHR* pSurfaceCapabilities
+) {
+    return LayerManager::get().dispatch_get_physical_device_surface_capabilities2(physicalDevice, pSurfaceInfo, pSurfaceCapabilities);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    uint32_t* pSurfaceFormatCount,
+    VkSurfaceFormatKHR* pSurfaceFormats
+) {
+    return LayerManager::get().dispatch_get_physical_device_surface_formats(physicalDevice, surface, pSurfaceFormatCount, pSurfaceFormats);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormats2KHR(
+    VkPhysicalDevice physicalDevice,
+    const VkPhysicalDeviceSurfaceInfo2KHR* pSurfaceInfo,
+    uint32_t* pSurfaceFormatCount,
+    VkSurfaceFormat2KHR* pSurfaceFormats
+) {
+    return LayerManager::get().dispatch_get_physical_device_surface_formats2(physicalDevice, pSurfaceInfo, pSurfaceFormatCount, pSurfaceFormats);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    uint32_t* pPresentModeCount,
+    VkPresentModeKHR* pPresentModes
+) {
+    return LayerManager::get().dispatch_get_physical_device_surface_present_modes(physicalDevice, surface, pPresentModeCount, pPresentModes);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateAndroidSurfaceKHR(
+    VkInstance instance,
+    const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSurfaceKHR* pSurface
+) {
+    return LayerManager::get().dispatch_create_android_surface(instance, pCreateInfo, pAllocator, pSurface);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroySurfaceKHR(
+    VkInstance instance,
+    VkSurfaceKHR surface,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_surface(instance, surface, pAllocator);
 }
 
 } // extern "C"
