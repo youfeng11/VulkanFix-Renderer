@@ -48,6 +48,7 @@ void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
     else if (strcmp(name, "VK_KHR_push_descriptor") == 0) m_push_desc_mod = module.get();
     else if (strcmp(name, "VK_FEATURE_fillModeNonSolid") == 0) m_fill_mode_mod = module.get();
     else if (strcmp(name, "VK_FEATURE_multiDrawIndirect") == 0) m_multi_draw_indirect_mod = module.get();
+    else if (strcmp(name, "VK_FEATURE_drawIndirectFirstInstance") == 0) m_draw_indirect_first_instance_mod = module.get();
     else if (strcmp(name, "VK_KHR_timeline_semaphore") == 0) m_timeline_mod = module.get();
     else if (strcmp(name, "VK_KHR_create_renderpass2") == 0) m_renderpass2_mod = module.get();
     else if (strcmp(name, "VK_KHR_draw_indirect_count") == 0) m_draw_indirect_count_mod = module.get();

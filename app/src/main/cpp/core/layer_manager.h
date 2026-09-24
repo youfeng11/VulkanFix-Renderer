@@ -660,6 +660,7 @@ private:
     IVulkanLayerModule* m_push_desc_mod = nullptr;
     IVulkanLayerModule* m_fill_mode_mod = nullptr;
     IVulkanLayerModule* m_multi_draw_indirect_mod = nullptr;
+    IVulkanLayerModule* m_draw_indirect_first_instance_mod = nullptr;
     IVulkanLayerModule* m_timeline_mod = nullptr;
     IVulkanLayerModule* m_renderpass2_mod = nullptr;
     IVulkanLayerModule* m_draw_indirect_count_mod = nullptr;
