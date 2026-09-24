@@ -83,10 +83,22 @@ android {
         }
     }
 
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+        }
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
         }
         configureEach {
             // 新架构渲染器配置 (Vulkan Fix)
