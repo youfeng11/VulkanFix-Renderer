@@ -101,6 +101,7 @@ protected:
 
 private:
     struct FenceHolder {
+        TimelineSemaphoreModule* module{nullptr};
         VkDevice device{VK_NULL_HANDLE};
         VkFence fence{VK_NULL_HANDLE};
         bool isInternal{false};
@@ -114,14 +115,25 @@ private:
 
     struct TimelineSemaphoreState {
         std::atomic<uint64_t> counter{0};
-        std::condition_variable cv;
         std::vector<PendingSignal> pendingSignals;
     };
 
     void check_pending_signals_locked(std::shared_ptr<TimelineSemaphoreState>& state);
 
+    VkFence acquire_internal_fence(VkDevice device);
+    void release_internal_fence(VkDevice device, VkFence fence);
+
     std::mutex m_semaphore_mutex;
+    std::condition_variable m_global_cv;
+    std::atomic<uint32_t> m_active_timeline_count{0};
     std::unordered_map<uint64_t, std::shared_ptr<TimelineSemaphoreState>> m_timeline_semaphores;
+
+    std::mutex m_fence_pool_mutex;
+    struct PooledFence {
+        VkDevice device{VK_NULL_HANDLE};
+        VkFence fence{VK_NULL_HANDLE};
+    };
+    std::vector<PooledFence> m_fence_pool;
 };
 
 #endif // TIMELINE_SEMAPHORE_H

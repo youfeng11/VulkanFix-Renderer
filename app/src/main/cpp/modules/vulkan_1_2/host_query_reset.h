@@ -24,6 +24,8 @@ public:
         uint32_t firstQuery,
         uint32_t queryCount) override;
 
+    void on_destroy_device(VkDevice device) override;
+
 protected:
     void on_pre_create_device_custom(
         VkPhysicalDevice physicalDevice,
@@ -31,6 +33,17 @@ protected:
         VkPhysicalDeviceFeatures* pEnabledFeatures,
         std::vector<const char*>& enabledExtensions,
         void*& pUserData) override;
+
+private:
+    struct DeviceResetContext {
+        VkCommandPool pool{VK_NULL_HANDLE};
+        VkCommandBuffer cmd{VK_NULL_HANDLE};
+        VkQueue queue{VK_NULL_HANDLE};
+        uint32_t queueFamilyIndex{0};
+    };
+
+    std::mutex m_reset_mutex;
+    std::unordered_map<uint64_t, DeviceResetContext> m_device_contexts;
 };
 
 #endif // HOST_QUERY_RESET_H

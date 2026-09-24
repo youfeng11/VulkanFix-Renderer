@@ -188,6 +188,12 @@ bool RenderPass2Module::on_cmd_next_subpass2(
         return true;
     }
 
+    if (dt.CmdNextSubpass) {
+        VkSubpassContents contents = pSubpassBeginInfo ? pSubpassBeginInfo->contents : VK_SUBPASS_CONTENTS_INLINE;
+        dt.CmdNextSubpass(commandBuffer, contents);
+        return true;
+    }
+
     PFN_vkCmdNextSubpass real_next =
         (PFN_vkCmdNextSubpass) get_real_proc(get_last_instance(), device, "vkCmdNextSubpass");
     if (real_next) {

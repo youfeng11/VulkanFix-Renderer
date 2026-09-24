@@ -224,8 +224,23 @@ void TimelineSemaphoreModule::on_post_create_device(
 }
 
 void TimelineSemaphoreModule::on_destroy_device(VkDevice device) {
-    std::lock_guard<std::mutex> lock(m_ext_mutex);
-    m_device_native.erase((uint64_t)(uintptr_t)device);
+    ExtensionModuleBase::on_destroy_device(device);
+    std::lock_guard<std::mutex> lock(m_fence_pool_mutex);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkDestroyFence real_df = dt.DestroyFence;
+    if (!real_df) {
+        real_df = (PFN_vkDestroyFence) get_real_proc(get_last_instance(), device, "vkDestroyFence");
+    }
+    for (auto it = m_fence_pool.begin(); it != m_fence_pool.end(); ) {
+        if (it->device == device) {
+            if (real_df && it->fence != VK_NULL_HANDLE) {
+                real_df(device, it->fence, nullptr);
+            }
+            it = m_fence_pool.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void TimelineSemaphoreModule::on_pre_create_semaphore(
@@ -264,6 +279,7 @@ void TimelineSemaphoreModule::on_post_create_semaphore(
 
         std::lock_guard<std::mutex> lock(m_semaphore_mutex);
         m_timeline_semaphores[(uint64_t)(uintptr_t)semaphore] = state;
+        m_active_timeline_count.fetch_add(1, std::memory_order_relaxed);
         LOG_OPT_DEBUG("TimelineSemaphore: registered emulated timeline semaphore %p with initial value %" PRIu64,
                       VK_HANDLE(semaphore), initVal);
     }
@@ -274,22 +290,68 @@ void TimelineSemaphoreModule::on_destroy_semaphore(
     VkSemaphore semaphore
 ) {
     std::lock_guard<std::mutex> lock(m_semaphore_mutex);
-    m_timeline_semaphores.erase((uint64_t)(uintptr_t)semaphore);
+    if (m_timeline_semaphores.erase((uint64_t)(uintptr_t)semaphore) > 0) {
+        m_active_timeline_count.fetch_sub(1, std::memory_order_relaxed);
+    }
+}
+
+VkFence TimelineSemaphoreModule::acquire_internal_fence(VkDevice device) {
+    {
+        std::lock_guard<std::mutex> lock(m_fence_pool_mutex);
+        for (auto it = m_fence_pool.begin(); it != m_fence_pool.end(); ++it) {
+            if (it->device == device) {
+                VkFence f = it->fence;
+                m_fence_pool.erase(it);
+                return f;
+            }
+        }
+    }
+
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkCreateFence real_cf = dt.CreateFence;
+    if (!real_cf) {
+        real_cf = (PFN_vkCreateFence) get_real_proc(get_last_instance(), device, "vkCreateFence");
+    }
+    VkFence internalFence = VK_NULL_HANDLE;
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (real_cf && real_cf(device, &fci, nullptr, &internalFence) == VK_SUCCESS) {
+        return internalFence;
+    }
+    return VK_NULL_HANDLE;
+}
+
+void TimelineSemaphoreModule::release_internal_fence(VkDevice device, VkFence fence) {
+    if (device == VK_NULL_HANDLE || fence == VK_NULL_HANDLE) return;
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.ResetFences) {
+        dt.ResetFences(device, 1, &fence);
+    } else {
+        PFN_vkResetFences real_rf = (PFN_vkResetFences) get_real_proc(get_last_instance(), device, "vkResetFences");
+        if (real_rf) real_rf(device, 1, &fence);
+    }
+    std::lock_guard<std::mutex> lock(m_fence_pool_mutex);
+    m_fence_pool.push_back({device, fence});
 }
 
 TimelineSemaphoreModule::FenceHolder::~FenceHolder() {
     if (isInternal && fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-        const auto& dt = LayerManager::get().get_dispatch_table(device);
-        PFN_vkDestroyFence real_df = dt.DestroyFence;
-        if (!real_df) {
-            real_df = (PFN_vkDestroyFence) get_real_proc(get_last_instance(), device, "vkDestroyFence");
+        if (module) {
+            module->release_internal_fence(device, fence);
+        } else {
+            const auto& dt = LayerManager::get().get_dispatch_table(device);
+            PFN_vkDestroyFence real_df = dt.DestroyFence;
+            if (!real_df) {
+                real_df = (PFN_vkDestroyFence) get_real_proc(get_last_instance(), device, "vkDestroyFence");
+            }
+            if (real_df) real_df(device, fence, nullptr);
         }
-        if (real_df) real_df(device, fence, nullptr);
     }
 }
 
 void TimelineSemaphoreModule::check_pending_signals_locked(std::shared_ptr<TimelineSemaphoreState>& state) {
     if (!state) return;
+    bool anyUpdated = false;
     auto it = state->pendingSignals.begin();
     while (it != state->pendingSignals.end()) {
         auto fh = it->fenceHolder;
@@ -300,9 +362,9 @@ void TimelineSemaphoreModule::check_pending_signals_locked(std::shared_ptr<Timel
                 real_gfs = (PFN_vkGetFenceStatus) get_real_proc(get_last_instance(), fh->device, "vkGetFenceStatus");
             }
             if (real_gfs && real_gfs(fh->device, fh->fence) == VK_SUCCESS) {
-                if (it->targetValue > state->counter.load()) {
-                    state->counter.store(it->targetValue);
-                    state->cv.notify_all();
+                if (it->targetValue > state->counter.load(std::memory_order_relaxed)) {
+                    state->counter.store(it->targetValue, std::memory_order_relaxed);
+                    anyUpdated = true;
                 }
                 it = state->pendingSignals.erase(it);
                 continue;
@@ -310,40 +372,46 @@ void TimelineSemaphoreModule::check_pending_signals_locked(std::shared_ptr<Timel
         }
         ++it;
     }
+    if (anyUpdated) {
+        m_global_cv.notify_all();
+    }
 }
 
 bool TimelineSemaphoreModule::is_timeline_semaphore(VkSemaphore semaphore) {
     if (semaphore == VK_NULL_HANDLE) return false;
+    if (m_active_timeline_count.load(std::memory_order_relaxed) == 0) return false;
     std::lock_guard<std::mutex> lock(m_semaphore_mutex);
     return m_timeline_semaphores.find((uint64_t)(uintptr_t)semaphore) != m_timeline_semaphores.end();
 }
 
 void TimelineSemaphoreModule::on_queue_wait_idle(VkQueue queue) {
+    if (m_active_timeline_count.load(std::memory_order_relaxed) == 0) return;
     std::lock_guard<std::mutex> lock(m_semaphore_mutex);
     for (auto& pair : m_timeline_semaphores) {
         auto& state = pair.second;
         for (auto& ps : state->pendingSignals) {
-            if (ps.targetValue > state->counter.load()) {
-                state->counter.store(ps.targetValue);
+            if (ps.targetValue > state->counter.load(std::memory_order_relaxed)) {
+                state->counter.store(ps.targetValue, std::memory_order_relaxed);
             }
         }
         state->pendingSignals.clear();
-        state->cv.notify_all();
     }
+    m_global_cv.notify_all();
 }
 
 void TimelineSemaphoreModule::on_device_wait_idle(VkDevice device) {
+    if (m_active_timeline_count.load(std::memory_order_relaxed) == 0) return;
     std::lock_guard<std::mutex> lock(m_semaphore_mutex);
     for (auto& pair : m_timeline_semaphores) {
         auto& state = pair.second;
         for (auto& ps : state->pendingSignals) {
-            if (ps.targetValue > state->counter.load()) {
-                state->counter.store(ps.targetValue);
+            if (ps.targetValue > state->counter.load(std::memory_order_relaxed)) {
+                state->counter.store(ps.targetValue, std::memory_order_relaxed);
             }
         }
         state->pendingSignals.clear();
-        state->cv.notify_all();
     }
+    m_global_cv.notify_all();
 }
 
 bool TimelineSemaphoreModule::on_get_semaphore_counter_value(
@@ -386,6 +454,10 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
         return true;
     }
 
+    if (m_active_timeline_count.load(std::memory_order_relaxed) == 0) {
+        return false;
+    }
+
     std::vector<std::shared_ptr<TimelineSemaphoreState>> states(pWaitInfo->semaphoreCount);
     bool has_emulated = false;
 
@@ -424,7 +496,7 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
 
         bool satisfied = waitAny ? false : true;
         for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
-            uint64_t current = states[i] ? states[i]->counter.load() : pWaitInfo->pValues[i];
+            uint64_t current = states[i] ? states[i]->counter.load(std::memory_order_relaxed) : pWaitInfo->pValues[i];
             bool met = (current >= pWaitInfo->pValues[i]);
             if (waitAny && met) {
                 satisfied = true;
@@ -458,7 +530,7 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
         {
             std::lock_guard<std::mutex> lock(m_semaphore_mutex);
             for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
-                if (states[i] && states[i]->counter.load() < pWaitInfo->pValues[i]) {
+                if (states[i] && states[i]->counter.load(std::memory_order_relaxed) < pWaitInfo->pValues[i]) {
                     for (auto& ps : states[i]->pendingSignals) {
                         if (ps.targetValue >= pWaitInfo->pValues[i]) {
                             fenceToWait = ps.fenceHolder;
@@ -475,7 +547,7 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
         }
 
         if (fenceToWait && fenceToWait->fence != VK_NULL_HANDLE && real_wff) {
-            uint64_t sliceTimeout = std::min<uint64_t>(remainingTimeout, 50000000ULL); // 50ms
+            uint64_t sliceTimeout = std::min<uint64_t>(remainingTimeout, 20000000ULL); // 20ms
             VkResult wr = real_wff(fenceToWait->device, 1, &fenceToWait->fence, VK_TRUE, sliceTimeout);
             if (wr == VK_SUCCESS || wr == VK_TIMEOUT) {
                 continue;
@@ -485,15 +557,9 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
             }
         } else {
             std::unique_lock<std::mutex> lock(m_semaphore_mutex);
-            std::shared_ptr<TimelineSemaphoreState> waitState = nullptr;
-            for (const auto& s : states) {
-                if (s) { waitState = s; break; }
-            }
-            if (waitState) {
-                waitState->cv.wait_for(lock, std::chrono::milliseconds(5));
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
+            uint64_t waitSliceMs = std::min<uint64_t>(remainingTimeout / 1000000ULL, 2ULL);
+            if (waitSliceMs == 0 && remainingTimeout > 0) waitSliceMs = 1;
+            m_global_cv.wait_for(lock, std::chrono::milliseconds(waitSliceMs));
         }
     }
 }
@@ -508,6 +574,10 @@ bool TimelineSemaphoreModule::on_signal_semaphore(
         return true;
     }
 
+    if (m_active_timeline_count.load(std::memory_order_relaxed) == 0) {
+        return false;
+    }
+
     std::shared_ptr<TimelineSemaphoreState> state;
     {
         std::lock_guard<std::mutex> lock(m_semaphore_mutex);
@@ -518,8 +588,8 @@ bool TimelineSemaphoreModule::on_signal_semaphore(
     }
 
     if (state) {
-        state->counter.store(pSignalInfo->value);
-        state->cv.notify_all();
+        state->counter.store(pSignalInfo->value, std::memory_order_relaxed);
+        m_global_cv.notify_all();
         outResult = VK_SUCCESS;
         return true;
     }
@@ -536,6 +606,43 @@ bool TimelineSemaphoreModule::on_queue_submit(
     VkDevice device = LayerManager::get().get_device_for_queue(queue);
     if (is_device_native(device)) return false;
 
+    if (submitCount == 0 || !pSubmits) return false;
+
+    uint32_t activeCount = m_active_timeline_count.load(std::memory_order_relaxed);
+    bool has_timeline = false;
+    for (uint32_t s = 0; s < submitCount; ++s) {
+        if (vku::find_pnext<VkTimelineSemaphoreSubmitInfo>(
+                pSubmits[s].pNext, VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO) != nullptr) {
+            has_timeline = true;
+            break;
+        }
+        if (activeCount > 0) {
+            const auto& orig = pSubmits[s];
+            if (orig.pWaitSemaphores) {
+                for (uint32_t i = 0; i < orig.waitSemaphoreCount; ++i) {
+                    if (is_timeline_semaphore(orig.pWaitSemaphores[i])) {
+                        has_timeline = true;
+                        break;
+                    }
+                }
+            }
+            if (has_timeline) break;
+            if (orig.pSignalSemaphores) {
+                for (uint32_t i = 0; i < orig.signalSemaphoreCount; ++i) {
+                    if (is_timeline_semaphore(orig.pSignalSemaphores[i])) {
+                        has_timeline = true;
+                        break;
+                    }
+                }
+            }
+            if (has_timeline) break;
+        }
+    }
+
+    if (!has_timeline) {
+        return false;
+    }
+
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     PFN_vkQueueSubmit real_fn = dt.QueueSubmit;
     if (!real_fn) {
@@ -546,11 +653,6 @@ bool TimelineSemaphoreModule::on_queue_submit(
     }
     if (!real_fn) {
         outResult = VK_ERROR_INITIALIZATION_FAILED;
-        return true;
-    }
-
-    if (submitCount == 0 || !pSubmits) {
-        outResult = real_fn(queue, submitCount, pSubmits, fence);
         return true;
     }
 
@@ -600,19 +702,15 @@ bool TimelineSemaphoreModule::on_queue_submit(
     if (!emulatedSignals.empty()) {
         if (fence != VK_NULL_HANDLE) {
             fenceHolder = std::make_shared<FenceHolder>();
+            fenceHolder->module = this;
             fenceHolder->device = device;
             fenceHolder->fence = fence;
             fenceHolder->isInternal = false;
         } else {
-            VkFence internalFence = VK_NULL_HANDLE;
-            PFN_vkCreateFence real_cf = dt.CreateFence;
-            if (!real_cf) {
-                real_cf = (PFN_vkCreateFence) get_real_proc(get_last_instance(), device, "vkCreateFence");
-            }
-            VkFenceCreateInfo fci{};
-            fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-            if (real_cf && real_cf(device, &fci, nullptr, &internalFence) == VK_SUCCESS) {
+            VkFence internalFence = acquire_internal_fence(device);
+            if (internalFence != VK_NULL_HANDLE) {
                 fenceHolder = std::make_shared<FenceHolder>();
+                fenceHolder->module = this;
                 fenceHolder->device = device;
                 fenceHolder->fence = internalFence;
                 fenceHolder->isInternal = true;
@@ -668,18 +766,22 @@ bool TimelineSemaphoreModule::on_queue_submit(
     if (outResult == VK_SUCCESS) {
         if (!emulatedSignals.empty()) {
             std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+            bool updated = false;
             for (const auto& sig : emulatedSignals) {
                 auto it = m_timeline_semaphores.find((uint64_t)(uintptr_t)sig.semaphore);
                 if (it != m_timeline_semaphores.end()) {
                     if (fenceHolder && fenceHolder->fence != VK_NULL_HANDLE) {
                         it->second->pendingSignals.push_back({sig.targetValue, fenceHolder});
                     } else {
-                        if (sig.targetValue > it->second->counter.load()) {
-                            it->second->counter.store(sig.targetValue);
-                            it->second->cv.notify_all();
+                        if (sig.targetValue > it->second->counter.load(std::memory_order_relaxed)) {
+                            it->second->counter.store(sig.targetValue, std::memory_order_relaxed);
+                            updated = true;
                         }
                     }
                 }
+            }
+            if (updated) {
+                m_global_cv.notify_all();
             }
         }
     }

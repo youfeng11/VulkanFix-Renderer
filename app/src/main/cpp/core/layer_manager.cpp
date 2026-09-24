@@ -55,6 +55,8 @@ void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
     else if (strcmp(name, "VK_KHR_draw_indirect_count") == 0) m_draw_indirect_count_mod = module.get();
     else if (strcmp(name, "VK_KHR_device_group") == 0) m_device_group_mod = module.get();
     else if (strcmp(name, "VK_KHR_swapchain") == 0) m_swapchain_mod = module.get();
+    else if (strcmp(name, "VK_KHR_buffer_device_address") == 0) m_bda_mod = module.get();
+    else if (strcmp(name, "VK_EXT_host_query_reset") == 0) m_host_query_reset_mod = module.get();
     m_modules.push_back(std::move(module));
 }
 
@@ -127,6 +129,7 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     LOAD_PROC(CreateSampler);
     LOAD_PROC(DestroySampler);
     LOAD_PROC(CmdBeginRenderPass);
+    LOAD_PROC(CmdNextSubpass);
     LOAD_PROC(CmdEndRenderPass);
     LOAD_PROC(CreateRenderPass);
     LOAD_PROC(CreateFramebuffer);
@@ -244,6 +247,8 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     LOAD_PROC(WaitForFences);
     LOAD_PROC(GetFenceStatus);
     LOAD_PROC(ResetFences);
+    LOAD_PROC(CmdResetQueryPool);
+    LOAD_PROC(DestroyCommandPool);
 
     #undef LOAD_PROC
     #undef LOAD_PROC_OPT
@@ -1619,11 +1624,8 @@ VkResult LayerManager::dispatch_device_wait_idle(VkDevice device) {
 
 bool LayerManager::is_timeline_semaphore(VkSemaphore semaphore) {
     if (semaphore == VK_NULL_HANDLE) return false;
-    std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
-    for (auto& mod : m_modules) {
-        if (mod->is_enabled() && mod->is_timeline_semaphore(semaphore)) {
-            return true;
-        }
+    if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+        return m_timeline_mod->is_timeline_semaphore(semaphore);
     }
     return false;
 }
@@ -1691,34 +1693,24 @@ VkResult LayerManager::dispatch_get_semaphore_counter_value(
     uint64_t* pValue
 ) {
     VkResult res = VK_SUCCESS;
-    bool handled = false;
     if (m_timeline_mod && m_timeline_mod->is_enabled()) {
         if (m_timeline_mod->on_get_semaphore_counter_value(device, semaphore, pValue, res)) {
             return res;
         }
     }
-    {
-        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_get_semaphore_counter_value(device, semaphore, pValue, res)) {
-                handled = true;
-                break;
-            }
-        }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.GetSemaphoreCounterValue) {
+        return dt.GetSemaphoreCounterValue(device, semaphore, pValue);
     }
-    if (!handled) {
-        PFN_vkGetSemaphoreCounterValueKHR real_fn =
-            (PFN_vkGetSemaphoreCounterValueKHR) get_real_proc(get_last_instance(), device, "vkGetSemaphoreCounterValueKHR");
-        if (!real_fn) {
-            real_fn = (PFN_vkGetSemaphoreCounterValueKHR) get_real_proc(get_last_instance(), device, "vkGetSemaphoreCounterValue");
-        }
-        if (real_fn) {
-            res = real_fn(device, semaphore, pValue);
-        } else {
-            res = VK_ERROR_INITIALIZATION_FAILED;
-        }
+    PFN_vkGetSemaphoreCounterValueKHR real_fn =
+        (PFN_vkGetSemaphoreCounterValueKHR) get_real_proc(get_last_instance(), device, "vkGetSemaphoreCounterValueKHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetSemaphoreCounterValueKHR) get_real_proc(get_last_instance(), device, "vkGetSemaphoreCounterValue");
     }
-    return res;
+    if (real_fn) {
+        return real_fn(device, semaphore, pValue);
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VkResult LayerManager::dispatch_wait_semaphores(
@@ -1732,29 +1724,19 @@ VkResult LayerManager::dispatch_wait_semaphores(
             return res;
         }
     }
-    bool handled = false;
-    {
-        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_wait_semaphores(device, pWaitInfo, timeout, res)) {
-                handled = true;
-                break;
-            }
-        }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.WaitSemaphores) {
+        return dt.WaitSemaphores(device, pWaitInfo, timeout);
     }
-    if (!handled) {
-        PFN_vkWaitSemaphoresKHR real_fn =
-            (PFN_vkWaitSemaphoresKHR) get_real_proc(get_last_instance(), device, "vkWaitSemaphoresKHR");
-        if (!real_fn) {
-            real_fn = (PFN_vkWaitSemaphoresKHR) get_real_proc(get_last_instance(), device, "vkWaitSemaphores");
-        }
-        if (real_fn) {
-            res = real_fn(device, pWaitInfo, timeout);
-        } else {
-            res = VK_ERROR_INITIALIZATION_FAILED;
-        }
+    PFN_vkWaitSemaphoresKHR real_fn =
+        (PFN_vkWaitSemaphoresKHR) get_real_proc(get_last_instance(), device, "vkWaitSemaphoresKHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkWaitSemaphoresKHR) get_real_proc(get_last_instance(), device, "vkWaitSemaphores");
     }
-    return res;
+    if (real_fn) {
+        return real_fn(device, pWaitInfo, timeout);
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
 }
 
 VkResult LayerManager::dispatch_signal_semaphore(
@@ -1767,29 +1749,19 @@ VkResult LayerManager::dispatch_signal_semaphore(
             return res;
         }
     }
-    bool handled = false;
-    {
-        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_signal_semaphore(device, pSignalInfo, res)) {
-                handled = true;
-                break;
-            }
-        }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.SignalSemaphore) {
+        return dt.SignalSemaphore(device, pSignalInfo);
     }
-    if (!handled) {
-        PFN_vkSignalSemaphoreKHR real_fn =
-            (PFN_vkSignalSemaphoreKHR) get_real_proc(get_last_instance(), device, "vkSignalSemaphoreKHR");
-        if (!real_fn) {
-            real_fn = (PFN_vkSignalSemaphoreKHR) get_real_proc(get_last_instance(), device, "vkSignalSemaphore");
-        }
-        if (real_fn) {
-            res = real_fn(device, pSignalInfo);
-        } else {
-            res = VK_ERROR_INITIALIZATION_FAILED;
-        }
+    PFN_vkSignalSemaphoreKHR real_fn =
+        (PFN_vkSignalSemaphoreKHR) get_real_proc(get_last_instance(), device, "vkSignalSemaphoreKHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkSignalSemaphoreKHR) get_real_proc(get_last_instance(), device, "vkSignalSemaphore");
     }
-    return res;
+    if (real_fn) {
+        return real_fn(device, pSignalInfo);
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
 }
 
 void LayerManager::dispatch_reset_query_pool(
@@ -1798,25 +1770,23 @@ void LayerManager::dispatch_reset_query_pool(
     uint32_t firstQuery,
     uint32_t queryCount
 ) {
-    bool handled = false;
-    {
-        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_reset_query_pool(device, queryPool, firstQuery, queryCount)) {
-                handled = true;
-                break;
-            }
+    if (m_host_query_reset_mod && m_host_query_reset_mod->is_enabled()) {
+        if (m_host_query_reset_mod->on_reset_query_pool(device, queryPool, firstQuery, queryCount)) {
+            return;
         }
     }
-    if (!handled) {
-        PFN_vkResetQueryPool real_fn =
-            (PFN_vkResetQueryPool) get_real_proc(get_last_instance(), device, "vkResetQueryPool");
-        if (!real_fn) {
-            real_fn = (PFN_vkResetQueryPool) get_real_proc(get_last_instance(), device, "vkResetQueryPoolEXT");
-        }
-        if (real_fn) {
-            real_fn(device, queryPool, firstQuery, queryCount);
-        }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.ResetQueryPool) {
+        dt.ResetQueryPool(device, queryPool, firstQuery, queryCount);
+        return;
+    }
+    PFN_vkResetQueryPool real_fn =
+        (PFN_vkResetQueryPool) get_real_proc(get_last_instance(), device, "vkResetQueryPool");
+    if (!real_fn) {
+        real_fn = (PFN_vkResetQueryPool) get_real_proc(get_last_instance(), device, "vkResetQueryPoolEXT");
+    }
+    if (real_fn) {
+        real_fn(device, queryPool, firstQuery, queryCount);
     }
 }
 
@@ -1827,29 +1797,24 @@ VkResult LayerManager::dispatch_create_render_pass2(
     VkRenderPass* pRenderPass
 ) {
     VkResult res = VK_SUCCESS;
-    bool handled = false;
-    {
-        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_create_render_pass2(device, pCreateInfo, pAllocator, pRenderPass, res)) {
-                handled = true;
-                break;
-            }
+    if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
+        if (m_renderpass2_mod->on_create_render_pass2(device, pCreateInfo, pAllocator, pRenderPass, res)) {
+            return res;
         }
     }
-    if (!handled) {
-        PFN_vkCreateRenderPass2KHR real_fn =
-            (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2KHR");
-        if (!real_fn) {
-            real_fn = (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2");
-        }
-        if (real_fn) {
-            res = real_fn(device, pCreateInfo, pAllocator, pRenderPass);
-        } else {
-            res = VK_ERROR_INITIALIZATION_FAILED;
-        }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CreateRenderPass2) {
+        return dt.CreateRenderPass2(device, pCreateInfo, pAllocator, pRenderPass);
     }
-    return res;
+    PFN_vkCreateRenderPass2KHR real_fn =
+        (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2KHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2");
+    }
+    if (real_fn) {
+        return real_fn(device, pCreateInfo, pAllocator, pRenderPass);
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
 }
 
 void LayerManager::dispatch_cmd_begin_render_pass2(
@@ -1886,6 +1851,9 @@ void LayerManager::dispatch_cmd_next_subpass2(
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdNextSubpass2) {
         dt.CmdNextSubpass2(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo);
+    } else if (dt.CmdNextSubpass) {
+        VkSubpassContents contents = pSubpassBeginInfo ? pSubpassBeginInfo->contents : VK_SUBPASS_CONTENTS_INLINE;
+        dt.CmdNextSubpass(commandBuffer, contents);
     }
 }
 
@@ -1954,28 +1922,25 @@ VkDeviceAddress LayerManager::dispatch_get_buffer_device_address(
     const VkBufferDeviceAddressInfo* pInfo
 ) {
     VkDeviceAddress addr = 0;
-    bool handled = false;
-    {
-        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_get_buffer_device_address(device, pInfo, addr)) {
-                handled = true;
-                break;
-            }
+    if (m_bda_mod && m_bda_mod->is_enabled()) {
+        if (m_bda_mod->on_get_buffer_device_address(device, pInfo, addr)) {
+            return addr;
         }
     }
-    if (!handled) {
-        PFN_vkGetBufferDeviceAddressKHR real_fn =
-            (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddressKHR");
-        if (!real_fn) {
-            real_fn = (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddress");
-        }
-        if (!real_fn) {
-            real_fn = (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddressEXT");
-        }
-        if (real_fn) {
-            addr = real_fn(device, pInfo);
-        }
+    const auto& dt = get_dispatch_table(device);
+    if (dt.GetBufferDeviceAddress) {
+        return dt.GetBufferDeviceAddress(device, pInfo);
+    }
+    PFN_vkGetBufferDeviceAddressKHR real_fn =
+        (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddressKHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddress");
+    }
+    if (!real_fn) {
+        real_fn = (PFN_vkGetBufferDeviceAddressKHR) get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddressEXT");
+    }
+    if (real_fn) {
+        addr = real_fn(device, pInfo);
     }
     return addr;
 }

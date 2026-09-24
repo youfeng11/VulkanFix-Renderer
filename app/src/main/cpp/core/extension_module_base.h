@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
 #include <vector>
 #include <cstring>
 
@@ -44,9 +45,15 @@ public:
     }
 
     virtual bool is_device_native(VkDevice device) {
+        if (device == VK_NULL_HANDLE) return false;
+        if (device == m_cached_device.load(std::memory_order_relaxed)) {
+            return m_cached_device_native.load(std::memory_order_relaxed);
+        }
         std::lock_guard<std::mutex> lock(m_ext_mutex);
         auto it = m_device_native.find((uint64_t)(uintptr_t)device);
         if (it != m_device_native.end()) {
+            m_cached_device.store(device, std::memory_order_relaxed);
+            m_cached_device_native.store(it->second, std::memory_order_relaxed);
             return it->second;
         }
         return false;
@@ -104,12 +111,17 @@ public:
             bool native = is_phys_device_native(physicalDevice);
             std::lock_guard<std::mutex> lock(m_ext_mutex);
             m_device_native[(uint64_t)(uintptr_t)device] = native;
+            m_cached_device.store(device, std::memory_order_relaxed);
+            m_cached_device_native.store(native, std::memory_order_relaxed);
         }
     }
 
     void on_destroy_device(VkDevice device) override {
         std::lock_guard<std::mutex> lock(m_ext_mutex);
         m_device_native.erase((uint64_t)(uintptr_t)device);
+        if (m_cached_device.load(std::memory_order_relaxed) == device) {
+            m_cached_device.store(VK_NULL_HANDLE, std::memory_order_relaxed);
+        }
     }
 
 protected:
@@ -158,6 +170,9 @@ protected:
     std::mutex m_ext_mutex;
     std::unordered_map<uint64_t, bool> m_phys_native;
     std::unordered_map<uint64_t, bool> m_device_native;
+
+    std::atomic<VkDevice> m_cached_device{VK_NULL_HANDLE};
+    std::atomic<bool> m_cached_device_native{false};
 };
 
 #endif // EXTENSION_MODULE_BASE_H

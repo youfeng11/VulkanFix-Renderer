@@ -48,6 +48,7 @@ struct DeviceDispatchTable {
     PFN_vkCreateSampler CreateSampler = nullptr;
     PFN_vkDestroySampler DestroySampler = nullptr;
     PFN_vkCmdBeginRenderPass CmdBeginRenderPass = nullptr;
+    PFN_vkCmdNextSubpass CmdNextSubpass = nullptr;
     PFN_vkCmdEndRenderPass CmdEndRenderPass = nullptr;
     PFN_vkCreateRenderPass CreateRenderPass = nullptr;
     PFN_vkCreateFramebuffer CreateFramebuffer = nullptr;
@@ -90,6 +91,8 @@ struct DeviceDispatchTable {
     PFN_vkWaitForFences WaitForFences = nullptr;
     PFN_vkGetFenceStatus GetFenceStatus = nullptr;
     PFN_vkResetFences ResetFences = nullptr;
+    PFN_vkCmdResetQueryPool CmdResetQueryPool = nullptr;
+    PFN_vkDestroyCommandPool DestroyCommandPool = nullptr;
 };
 
 class LayerManager {
@@ -680,6 +683,8 @@ private:
     IVulkanLayerModule* m_draw_indirect_count_mod = nullptr;
     IVulkanLayerModule* m_device_group_mod = nullptr;
     IVulkanLayerModule* m_swapchain_mod = nullptr;
+    IVulkanLayerModule* m_bda_mod = nullptr;
+    IVulkanLayerModule* m_host_query_reset_mod = nullptr;
 };
 
 /**
