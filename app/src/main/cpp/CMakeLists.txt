@@ -9,7 +9,23 @@ if(NOT DEFINED PROJECT_VERSION_NAME)
     set(PROJECT_VERSION_NAME "1.0")
 endif()
 if(NOT DEFINED PROJECT_VERSION_CODE)
-    set(PROJECT_VERSION_CODE "1")
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE GIT_COMMIT_COUNT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(GIT_COMMIT_COUNT MATCHES "^[0-9]+$")
+            set(PROJECT_VERSION_CODE "${GIT_COMMIT_COUNT}")
+        else()
+            set(PROJECT_VERSION_CODE "1")
+        endif()
+    else()
+        set(PROJECT_VERSION_CODE "1")
+    endif()
 endif()
 
 add_compile_definitions(

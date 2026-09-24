@@ -13,6 +13,21 @@ plugins {
     id("kotlinx-serialization")
 }
 
+fun getGitCommitCount(): Int {
+    return try {
+        val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
+            .directory(rootDir)
+            .redirectOutput(ProcessBuilder.Redirect.PIPE)
+            .redirectError(ProcessBuilder.Redirect.PIPE)
+            .start()
+        val count = process.inputStream.bufferedReader().use { it.readText().trim() }
+        process.waitFor()
+        count.toIntOrNull() ?: 1
+    } catch (_: Exception) {
+        1
+    }
+}
+
 android {
     namespace = "com.launchers_plugin.renderer"
     compileSdk = 34
@@ -22,7 +37,7 @@ android {
         applicationId = "com.youfeng.plugin.vulkanfix"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
+        versionCode = getGitCommitCount()
         versionName = "0.2.0"
 
         ndk {
