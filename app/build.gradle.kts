@@ -15,6 +15,17 @@ plugins {
 
 fun getGitCommitCount(): Int {
     return try {
+        val shallowFile = File(rootDir, ".git/shallow")
+        if (shallowFile.exists()) {
+            try {
+                ProcessBuilder("git", "fetch", "--unshallow")
+                    .directory(rootDir)
+                    .redirectOutput(ProcessBuilder.Redirect.PIPE)
+                    .redirectError(ProcessBuilder.Redirect.PIPE)
+                    .start()
+                    .waitFor()
+            } catch (_: Exception) {}
+        }
         val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
             .directory(rootDir)
             .redirectOutput(ProcessBuilder.Redirect.PIPE)
