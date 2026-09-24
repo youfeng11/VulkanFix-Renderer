@@ -45,6 +45,8 @@ struct DeviceDispatchTable {
     PFN_vkDestroyImage DestroyImage = nullptr;
     PFN_vkCreateImageView CreateImageView = nullptr;
     PFN_vkDestroyImageView DestroyImageView = nullptr;
+    PFN_vkCreateSampler CreateSampler = nullptr;
+    PFN_vkDestroySampler DestroySampler = nullptr;
     PFN_vkCmdBeginRenderPass CmdBeginRenderPass = nullptr;
     PFN_vkCmdEndRenderPass CmdEndRenderPass = nullptr;
     PFN_vkCreateRenderPass CreateRenderPass = nullptr;
@@ -239,6 +241,17 @@ public:
     void dispatch_destroy_image_view(
         VkDevice device,
         VkImageView imageView,
+        const VkAllocationCallbacks* pAllocator);
+
+    VkResult dispatch_create_sampler(
+        VkDevice device,
+        const VkSamplerCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkSampler* pSampler);
+
+    void dispatch_destroy_sampler(
+        VkDevice device,
+        VkSampler sampler,
         const VkAllocationCallbacks* pAllocator);
 
     void dispatch_cmd_begin_rendering(
@@ -661,6 +674,7 @@ private:
     IVulkanLayerModule* m_fill_mode_mod = nullptr;
     IVulkanLayerModule* m_multi_draw_indirect_mod = nullptr;
     IVulkanLayerModule* m_draw_indirect_first_instance_mod = nullptr;
+    IVulkanLayerModule* m_sampler_anisotropy_mod = nullptr;
     IVulkanLayerModule* m_timeline_mod = nullptr;
     IVulkanLayerModule* m_renderpass2_mod = nullptr;
     IVulkanLayerModule* m_draw_indirect_count_mod = nullptr;

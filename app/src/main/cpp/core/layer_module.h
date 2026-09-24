@@ -255,6 +255,21 @@ public:
         VkDevice device,
         VkImageView imageView) {}
 
+    // 12.1. Samplers:
+    virtual void on_pre_create_sampler(
+        VkDevice device,
+        VkSamplerCreateInfo& createInfo) {}
+
+    virtual void on_post_create_sampler(
+        VkDevice device,
+        const VkSamplerCreateInfo* pCreateInfo,
+        VkResult result,
+        VkSampler sampler) {}
+
+    virtual void on_destroy_sampler(
+        VkDevice device,
+        VkSampler sampler) {}
+
     // 13. Dynamic Rendering:
     virtual bool on_cmd_begin_rendering(
         VkCommandBuffer commandBuffer,

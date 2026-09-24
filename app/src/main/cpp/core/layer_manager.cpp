@@ -49,6 +49,7 @@ void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
     else if (strcmp(name, "VK_FEATURE_fillModeNonSolid") == 0) m_fill_mode_mod = module.get();
     else if (strcmp(name, "VK_FEATURE_multiDrawIndirect") == 0) m_multi_draw_indirect_mod = module.get();
     else if (strcmp(name, "VK_FEATURE_drawIndirectFirstInstance") == 0) m_draw_indirect_first_instance_mod = module.get();
+    else if (strcmp(name, "VK_FEATURE_samplerAnisotropy") == 0) m_sampler_anisotropy_mod = module.get();
     else if (strcmp(name, "VK_KHR_timeline_semaphore") == 0) m_timeline_mod = module.get();
     else if (strcmp(name, "VK_KHR_create_renderpass2") == 0) m_renderpass2_mod = module.get();
     else if (strcmp(name, "VK_KHR_draw_indirect_count") == 0) m_draw_indirect_count_mod = module.get();
@@ -123,6 +124,8 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     LOAD_PROC(DestroyImage);
     LOAD_PROC(CreateImageView);
     LOAD_PROC(DestroyImageView);
+    LOAD_PROC(CreateSampler);
+    LOAD_PROC(DestroySampler);
     LOAD_PROC(CmdBeginRenderPass);
     LOAD_PROC(CmdEndRenderPass);
     LOAD_PROC(CreateRenderPass);
@@ -1112,6 +1115,62 @@ void LayerManager::dispatch_destroy_image_view(
         (PFN_vkDestroyImageView) get_real_proc(get_last_instance(), device, "vkDestroyImageView");
     if (real_fn) {
         real_fn(device, imageView, pAllocator);
+    }
+}
+
+VkResult LayerManager::dispatch_create_sampler(
+    VkDevice device,
+    const VkSamplerCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSampler* pSampler
+) {
+    PFN_vkCreateSampler real_fn =
+        (PFN_vkCreateSampler) get_real_proc(get_last_instance(), device, "vkCreateSampler");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    if (!pCreateInfo) return real_fn(device, pCreateInfo, pAllocator, pSampler);
+
+    VkSamplerCreateInfo modInfo = *pCreateInfo;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_pre_create_sampler(device, modInfo);
+            }
+        }
+    }
+
+    VkResult res = real_fn(device, &modInfo, pAllocator, pSampler);
+    if (res == VK_SUCCESS && pSampler && *pSampler != VK_NULL_HANDLE) {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_post_create_sampler(device, pCreateInfo, res, *pSampler);
+            }
+        }
+    }
+    return res;
+}
+
+void LayerManager::dispatch_destroy_sampler(
+    VkDevice device,
+    VkSampler sampler,
+    const VkAllocationCallbacks* pAllocator
+) {
+    if (sampler == VK_NULL_HANDLE) return;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_destroy_sampler(device, sampler);
+            }
+        }
+    }
+
+    PFN_vkDestroySampler real_fn =
+        (PFN_vkDestroySampler) get_real_proc(get_last_instance(), device, "vkDestroySampler");
+    if (real_fn) {
+        real_fn(device, sampler, pAllocator);
     }
 }
 

@@ -448,6 +448,23 @@ VK_LAYER_EXPORT void VKAPI_CALL vkDestroyImageView(
     LayerManager::get().dispatch_destroy_image_view(device, imageView, pAllocator);
 }
 
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateSampler(
+    VkDevice device,
+    const VkSamplerCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSampler* pSampler
+) {
+    return LayerManager::get().dispatch_create_sampler(device, pCreateInfo, pAllocator, pSampler);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroySampler(
+    VkDevice device,
+    VkSampler sampler,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_sampler(device, sampler, pAllocator);
+}
+
 VK_LAYER_EXPORT void VKAPI_CALL vkCmdBeginRendering(
     VkCommandBuffer commandBuffer,
     const VkRenderingInfo* pRenderingInfo
@@ -520,6 +537,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     MATCH_FUNC(vkDestroyImage);
     MATCH_FUNC(vkCreateImageView);
     MATCH_FUNC(vkDestroyImageView);
+    MATCH_FUNC(vkCreateSampler);
+    MATCH_FUNC(vkDestroySampler);
     MATCH_FUNC(vkCmdBeginRendering);
     MATCH_FUNC(vkCmdBeginRenderingKHR);
     MATCH_FUNC(vkCmdEndRendering);
@@ -688,6 +707,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     MATCH_FUNC(vkDestroyImage);
     MATCH_FUNC(vkCreateImageView);
     MATCH_FUNC(vkDestroyImageView);
+    MATCH_FUNC(vkCreateSampler);
+    MATCH_FUNC(vkDestroySampler);
     MATCH_FUNC(vkCmdBeginRendering);
     MATCH_FUNC(vkCmdBeginRenderingKHR);
     MATCH_FUNC(vkCmdEndRendering);
