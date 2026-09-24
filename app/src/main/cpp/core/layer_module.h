@@ -181,6 +181,20 @@ public:
         int32_t vertexOffset,
         uint32_t firstInstance) { return false; }
 
+    virtual bool on_cmd_draw_indirect(
+        VkCommandBuffer commandBuffer,
+        VkBuffer buffer,
+        VkDeviceSize offset,
+        uint32_t drawCount,
+        uint32_t stride) { return false; }
+
+    virtual bool on_cmd_draw_indexed_indirect(
+        VkCommandBuffer commandBuffer,
+        VkBuffer buffer,
+        VkDeviceSize offset,
+        uint32_t drawCount,
+        uint32_t stride) { return false; }
+
     // 10. Descriptor Update Template:
     virtual void on_pre_create_descriptor_update_template(
         VkDevice device,

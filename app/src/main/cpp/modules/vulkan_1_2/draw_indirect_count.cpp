@@ -30,11 +30,7 @@ bool DrawIndirectCountModule::on_cmd_draw_indirect_count(
     if (maxDrawCount == 0) return true;
     if (stride == 0) stride = sizeof(VkDrawIndirectCommand);
 
-    PFN_vkCmdDrawIndirect real_draw =
-        (PFN_vkCmdDrawIndirect) get_real_proc(get_last_instance(), device, "vkCmdDrawIndirect");
-    if (real_draw) {
-        real_draw(commandBuffer, buffer, offset, maxDrawCount, stride);
-    }
+    LayerManager::get().dispatch_cmd_draw_indirect(commandBuffer, buffer, offset, maxDrawCount, stride);
     return true;
 }
 
@@ -59,10 +55,6 @@ bool DrawIndirectCountModule::on_cmd_draw_indexed_indirect_count(
     if (maxDrawCount == 0) return true;
     if (stride == 0) stride = sizeof(VkDrawIndexedIndirectCommand);
 
-    PFN_vkCmdDrawIndexedIndirect real_draw =
-        (PFN_vkCmdDrawIndexedIndirect) get_real_proc(get_last_instance(), device, "vkCmdDrawIndexedIndirect");
-    if (real_draw) {
-        real_draw(commandBuffer, buffer, offset, maxDrawCount, stride);
-    }
+    LayerManager::get().dispatch_cmd_draw_indexed_indirect(commandBuffer, buffer, offset, maxDrawCount, stride);
     return true;
 }

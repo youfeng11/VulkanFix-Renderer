@@ -531,6 +531,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     MATCH_FUNC(vkCmdBindVertexBuffers2EXT);
     MATCH_FUNC(vkCmdDraw);
     MATCH_FUNC(vkCmdDrawIndexed);
+    MATCH_FUNC(vkCmdDrawIndirect);
+    MATCH_FUNC(vkCmdDrawIndexedIndirect);
     MATCH_FUNC(vkGetDeviceQueue);
     MATCH_FUNC(vkGetDeviceQueue2);
     MATCH_FUNC(vkCmdSetEvent2);
@@ -697,6 +699,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     MATCH_FUNC(vkCmdBindVertexBuffers2EXT);
     MATCH_FUNC(vkCmdDraw);
     MATCH_FUNC(vkCmdDrawIndexed);
+    MATCH_FUNC(vkCmdDrawIndirect);
+    MATCH_FUNC(vkCmdDrawIndexedIndirect);
     MATCH_FUNC(vkGetDeviceQueue);
     MATCH_FUNC(vkGetDeviceQueue2);
     MATCH_FUNC(vkCmdSetEvent2);
@@ -1036,6 +1040,26 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndexed(
     uint32_t firstInstance
 ) {
     LayerManager::get().dispatch_cmd_draw_indexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndirect(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    uint32_t drawCount,
+    uint32_t stride
+) {
+    LayerManager::get().dispatch_cmd_draw_indirect(commandBuffer, buffer, offset, drawCount, stride);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndexedIndirect(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    uint32_t drawCount,
+    uint32_t stride
+) {
+    LayerManager::get().dispatch_cmd_draw_indexed_indirect(commandBuffer, buffer, offset, drawCount, stride);
 }
 
 VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetEvent2(

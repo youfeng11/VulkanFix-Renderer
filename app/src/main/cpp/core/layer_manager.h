@@ -11,6 +11,8 @@
 struct DeviceDispatchTable {
     PFN_vkCmdDraw CmdDraw = nullptr;
     PFN_vkCmdDrawIndexed CmdDrawIndexed = nullptr;
+    PFN_vkCmdDrawIndirect CmdDrawIndirect = nullptr;
+    PFN_vkCmdDrawIndexedIndirect CmdDrawIndexedIndirect = nullptr;
     PFN_vkCmdBindPipeline CmdBindPipeline = nullptr;
     PFN_vkCmdBindVertexBuffers CmdBindVertexBuffers = nullptr;
     PFN_vkCmdBindVertexBuffers2 CmdBindVertexBuffers2 = nullptr;
@@ -291,6 +293,20 @@ public:
         uint32_t firstIndex,
         int32_t vertexOffset,
         uint32_t firstInstance);
+
+    void dispatch_cmd_draw_indirect(
+        VkCommandBuffer commandBuffer,
+        VkBuffer buffer,
+        VkDeviceSize offset,
+        uint32_t drawCount,
+        uint32_t stride);
+
+    void dispatch_cmd_draw_indexed_indirect(
+        VkCommandBuffer commandBuffer,
+        VkBuffer buffer,
+        VkDeviceSize offset,
+        uint32_t drawCount,
+        uint32_t stride);
 
     inline VkDevice get_device_for_cmd(VkCommandBuffer cmd) {
         if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
@@ -643,6 +659,7 @@ private:
     IVulkanLayerModule* m_sync2_mod = nullptr;
     IVulkanLayerModule* m_push_desc_mod = nullptr;
     IVulkanLayerModule* m_fill_mode_mod = nullptr;
+    IVulkanLayerModule* m_multi_draw_indirect_mod = nullptr;
     IVulkanLayerModule* m_timeline_mod = nullptr;
     IVulkanLayerModule* m_renderpass2_mod = nullptr;
     IVulkanLayerModule* m_draw_indirect_count_mod = nullptr;

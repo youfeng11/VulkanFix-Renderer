@@ -47,6 +47,7 @@ void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
     else if (strcmp(name, "VK_KHR_synchronization2") == 0) m_sync2_mod = module.get();
     else if (strcmp(name, "VK_KHR_push_descriptor") == 0) m_push_desc_mod = module.get();
     else if (strcmp(name, "VK_FEATURE_fillModeNonSolid") == 0) m_fill_mode_mod = module.get();
+    else if (strcmp(name, "VK_FEATURE_multiDrawIndirect") == 0) m_multi_draw_indirect_mod = module.get();
     else if (strcmp(name, "VK_KHR_timeline_semaphore") == 0) m_timeline_mod = module.get();
     else if (strcmp(name, "VK_KHR_create_renderpass2") == 0) m_renderpass2_mod = module.get();
     else if (strcmp(name, "VK_KHR_draw_indirect_count") == 0) m_draw_indirect_count_mod = module.get();
@@ -67,6 +68,8 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
 
     LOAD_PROC(CmdDraw);
     LOAD_PROC(CmdDrawIndexed);
+    LOAD_PROC(CmdDrawIndirect);
+    LOAD_PROC(CmdDrawIndexedIndirect);
     LOAD_PROC(CmdBindPipeline);
     LOAD_PROC(CmdBindVertexBuffers);
     LOAD_PROC(CmdBindVertexBuffers2);
@@ -1259,6 +1262,47 @@ void LayerManager::dispatch_cmd_draw_indexed(
         dt.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
     }
 }
+
+void LayerManager::dispatch_cmd_draw_indirect(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    uint32_t drawCount,
+    uint32_t stride
+) {
+    if (m_multi_draw_indirect_mod && m_multi_draw_indirect_mod->is_enabled()) {
+        if (m_multi_draw_indirect_mod->on_cmd_draw_indirect(commandBuffer, buffer, offset, drawCount, stride)) {
+            return;
+        }
+    }
+
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdDrawIndirect) {
+        dt.CmdDrawIndirect(commandBuffer, buffer, offset, drawCount, stride);
+    }
+}
+
+void LayerManager::dispatch_cmd_draw_indexed_indirect(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    uint32_t drawCount,
+    uint32_t stride
+) {
+    if (m_multi_draw_indirect_mod && m_multi_draw_indirect_mod->is_enabled()) {
+        if (m_multi_draw_indirect_mod->on_cmd_draw_indexed_indirect(commandBuffer, buffer, offset, drawCount, stride)) {
+            return;
+        }
+    }
+
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdDrawIndexedIndirect) {
+        dt.CmdDrawIndexedIndirect(commandBuffer, buffer, offset, drawCount, stride);
+    }
+}
+
 
 
 
