@@ -638,7 +638,13 @@ public:
 
     // Custom procedure address registry (allows modules to dynamically export Vulkan entry points)
     void register_custom_proc(const char* name, PFN_vkVoidFunction proc);
-    PFN_vkVoidFunction get_custom_proc(const char* name);
+    PFN_vkVoidFunction get_custom_proc_slow(const char* name);
+    inline PFN_vkVoidFunction get_custom_proc(const char* name) {
+        if (__builtin_expect(!m_has_custom_procs.load(std::memory_order_relaxed), 1)) {
+            return nullptr;
+        }
+        return get_custom_proc_slow(name);
+    }
 
 private:
     LayerManager() = default;
@@ -650,6 +656,7 @@ private:
     std::recursive_mutex m_modules_mutex;
 
     std::mutex m_proc_mutex;
+    std::atomic<bool> m_has_custom_procs{false};
     std::unordered_map<std::string, PFN_vkVoidFunction> m_custom_procs;
 
     std::mutex m_state_mutex;

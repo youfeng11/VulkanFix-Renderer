@@ -430,7 +430,21 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set(
     VkDevice device = get_device_for_cmd(commandBuffer);
     if (device == VK_NULL_HANDLE || is_device_native(device)) return false;
 
-    VkDescriptorSetLayout setLayout = get_set_layout(layout, set);
+    thread_local VkPipelineLayout s_last_layout = VK_NULL_HANDLE;
+    thread_local uint32_t s_last_set = 0;
+    thread_local VkDescriptorSetLayout s_last_set_layout = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+    if (__builtin_expect(layout == s_last_layout && set == s_last_set && s_last_set_layout != VK_NULL_HANDLE, 1)) {
+        setLayout = s_last_set_layout;
+    } else {
+        setLayout = get_set_layout(layout, set);
+        if (setLayout != VK_NULL_HANDLE) {
+            s_last_layout = layout;
+            s_last_set = set;
+            s_last_set_layout = setLayout;
+        }
+    }
     if (setLayout == VK_NULL_HANDLE) {
         LOGE("PushDescriptor: no descriptor set layout registered for pipeline layout %p set %u", (void*)(uintptr_t)layout, set);
         return false;
@@ -490,7 +504,21 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set_with_template(
     VkDevice device = get_device_for_cmd(commandBuffer);
     if (device == VK_NULL_HANDLE || is_device_native(device)) return false;
 
-    VkDescriptorSetLayout setLayout = get_set_layout(layout, set);
+    thread_local VkPipelineLayout s_last_layout = VK_NULL_HANDLE;
+    thread_local uint32_t s_last_set = 0;
+    thread_local VkDescriptorSetLayout s_last_set_layout = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+    if (__builtin_expect(layout == s_last_layout && set == s_last_set && s_last_set_layout != VK_NULL_HANDLE, 1)) {
+        setLayout = s_last_set_layout;
+    } else {
+        setLayout = get_set_layout(layout, set);
+        if (setLayout != VK_NULL_HANDLE) {
+            s_last_layout = layout;
+            s_last_set = set;
+            s_last_set_layout = setLayout;
+        }
+    }
     if (setLayout == VK_NULL_HANDLE) return false;
 
     VkDescriptorSet descSet = allocate_push_set(device, commandBuffer, setLayout);

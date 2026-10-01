@@ -495,6 +495,229 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdEndRenderingKHR(
 // Dispatchers: vkGetInstanceProcAddr & vkGetDeviceProcAddr
 // ============================================================================
 
+// ============================================================================
+// Dispatchers: vkGetInstanceProcAddr & vkGetDeviceProcAddr
+// ============================================================================
+
+static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_device_only) {
+    if (!pName || pName[0] != 'v' || pName[1] != 'k') return NULL;
+
+    #define MATCH(name) if (strcmp(pName, #name) == 0) return (PFN_vkVoidFunction) name
+
+    switch (pName[2]) {
+    case 'C': {
+        if (pName[3] == 'm' && pName[4] == 'd') { // vkCmd... (Highest frequency hot path)
+            MATCH(vkCmdDrawIndexed);
+            MATCH(vkCmdDraw);
+            MATCH(vkCmdBindPipeline);
+            MATCH(vkCmdBindVertexBuffers);
+            MATCH(vkCmdBindVertexBuffers2);
+            MATCH(vkCmdBindVertexBuffers2EXT);
+            MATCH(vkCmdPushDescriptorSetKHR);
+            MATCH(vkCmdPushDescriptorSetWithTemplateKHR);
+            MATCH(vkCmdBeginRendering);
+            MATCH(vkCmdBeginRenderingKHR);
+            MATCH(vkCmdEndRendering);
+            MATCH(vkCmdEndRenderingKHR);
+            MATCH(vkCmdPipelineBarrier2);
+            MATCH(vkCmdPipelineBarrier2KHR);
+            MATCH(vkCmdDrawIndexedIndirect);
+            MATCH(vkCmdDrawIndirect);
+            MATCH(vkCmdDrawIndexedIndirectCount);
+            MATCH(vkCmdDrawIndexedIndirectCountKHR);
+            MATCH(vkCmdDrawIndexedIndirectCountAMD);
+            MATCH(vkCmdDrawIndirectCount);
+            MATCH(vkCmdDrawIndirectCountKHR);
+            MATCH(vkCmdDrawIndirectCountAMD);
+            MATCH(vkCmdSetEvent2);
+            MATCH(vkCmdSetEvent2KHR);
+            MATCH(vkCmdResetEvent2);
+            MATCH(vkCmdResetEvent2KHR);
+            MATCH(vkCmdWaitEvents2);
+            MATCH(vkCmdWaitEvents2KHR);
+            MATCH(vkCmdWriteTimestamp2);
+            MATCH(vkCmdWriteTimestamp2KHR);
+            MATCH(vkCmdBeginRenderPass2);
+            MATCH(vkCmdBeginRenderPass2KHR);
+            MATCH(vkCmdNextSubpass2);
+            MATCH(vkCmdNextSubpass2KHR);
+            MATCH(vkCmdEndRenderPass2);
+            MATCH(vkCmdEndRenderPass2KHR);
+            MATCH(vkCmdDispatchBase);
+            MATCH(vkCmdDispatchBaseKHR);
+            MATCH(vkCmdSetDeviceMask);
+            MATCH(vkCmdSetDeviceMaskKHR);
+            return NULL;
+        }
+        // vkCreate...
+        if (!is_device_only) {
+            MATCH(vkCreateInstance);
+            MATCH(vkCreateDevice);
+            MATCH(vkCreateAndroidSurfaceKHR);
+        }
+        MATCH(vkCreateGraphicsPipelines);
+        MATCH(vkCreateDescriptorSetLayout);
+        MATCH(vkCreatePipelineLayout);
+        MATCH(vkCreateDescriptorUpdateTemplate);
+        MATCH(vkCreateDescriptorUpdateTemplateKHR);
+        MATCH(vkCreateImage);
+        MATCH(vkCreateImageView);
+        MATCH(vkCreateSampler);
+        MATCH(vkCreateSemaphore);
+        MATCH(vkCreateRenderPass2);
+        MATCH(vkCreateRenderPass2KHR);
+        MATCH(vkCreateSamplerYcbcrConversion);
+        MATCH(vkCreateSamplerYcbcrConversionKHR);
+        MATCH(vkCreateSwapchainKHR);
+        return NULL;
+    }
+    case 'D': {
+        MATCH(vkDestroyPipeline);
+        MATCH(vkDestroyDescriptorSetLayout);
+        MATCH(vkDestroyPipelineLayout);
+        MATCH(vkDestroyDescriptorUpdateTemplate);
+        MATCH(vkDestroyDescriptorUpdateTemplateKHR);
+        MATCH(vkDestroyImage);
+        MATCH(vkDestroyImageView);
+        MATCH(vkDestroySampler);
+        MATCH(vkDestroySemaphore);
+        MATCH(vkDestroySamplerYcbcrConversion);
+        MATCH(vkDestroySamplerYcbcrConversionKHR);
+        MATCH(vkDestroySwapchainKHR);
+        MATCH(vkDestroyDevice);
+        if (!is_device_only) {
+            MATCH(vkDestroyInstance);
+            MATCH(vkDestroySurfaceKHR);
+        }
+        MATCH(vkDeviceWaitIdle);
+        return NULL;
+    }
+    case 'G': {
+        MATCH(vkGetDeviceProcAddr);
+        if (!is_device_only) {
+            MATCH(vkGetInstanceProcAddr);
+            MATCH(vkGetPhysicalDeviceFeatures);
+            MATCH(vkGetPhysicalDeviceFeatures2);
+            MATCH(vkGetPhysicalDeviceFeatures2KHR);
+            MATCH(vkGetPhysicalDeviceProperties);
+            MATCH(vkGetPhysicalDeviceProperties2);
+            MATCH(vkGetPhysicalDeviceProperties2KHR);
+            MATCH(vkGetPhysicalDeviceSurfaceSupportKHR);
+            MATCH(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
+            MATCH(vkGetPhysicalDeviceSurfaceCapabilities2KHR);
+            MATCH(vkGetPhysicalDeviceSurfaceFormatsKHR);
+            MATCH(vkGetPhysicalDeviceSurfaceFormats2KHR);
+            MATCH(vkGetPhysicalDeviceSurfacePresentModesKHR);
+        }
+        MATCH(vkGetDeviceQueue);
+        MATCH(vkGetDeviceQueue2);
+        MATCH(vkGetSemaphoreCounterValue);
+        MATCH(vkGetSemaphoreCounterValueKHR);
+        MATCH(vkGetBufferDeviceAddress);
+        MATCH(vkGetBufferDeviceAddressKHR);
+        MATCH(vkGetBufferDeviceAddressEXT);
+        MATCH(vkGetBufferOpaqueCaptureAddress);
+        MATCH(vkGetBufferOpaqueCaptureAddressKHR);
+        MATCH(vkGetDeviceMemoryOpaqueCaptureAddress);
+        MATCH(vkGetDeviceMemoryOpaqueCaptureAddressKHR);
+        MATCH(vkGetBufferMemoryRequirements2);
+        MATCH(vkGetBufferMemoryRequirements2KHR);
+        MATCH(vkGetImageMemoryRequirements2);
+        MATCH(vkGetImageMemoryRequirements2KHR);
+        MATCH(vkGetImageSparseMemoryRequirements2);
+        MATCH(vkGetImageSparseMemoryRequirements2KHR);
+        MATCH(vkGetDescriptorSetLayoutSupport);
+        MATCH(vkGetDescriptorSetLayoutSupportKHR);
+        MATCH(vkGetDeviceGroupPeerMemoryFeatures);
+        MATCH(vkGetDeviceGroupPeerMemoryFeaturesKHR);
+        MATCH(vkGetPhysicalDeviceFormatProperties2);
+        MATCH(vkGetPhysicalDeviceFormatProperties2KHR);
+        MATCH(vkGetPhysicalDeviceImageFormatProperties2);
+        MATCH(vkGetPhysicalDeviceImageFormatProperties2KHR);
+        MATCH(vkGetPhysicalDeviceQueueFamilyProperties2);
+        MATCH(vkGetPhysicalDeviceQueueFamilyProperties2KHR);
+        MATCH(vkGetPhysicalDeviceMemoryProperties2);
+        MATCH(vkGetPhysicalDeviceMemoryProperties2KHR);
+        MATCH(vkGetPhysicalDeviceSparseImageFormatProperties2);
+        MATCH(vkGetPhysicalDeviceSparseImageFormatProperties2KHR);
+        MATCH(vkGetPhysicalDeviceExternalBufferProperties);
+        MATCH(vkGetPhysicalDeviceExternalBufferPropertiesKHR);
+        MATCH(vkGetPhysicalDeviceExternalFenceProperties);
+        MATCH(vkGetPhysicalDeviceExternalFencePropertiesKHR);
+        MATCH(vkGetPhysicalDeviceExternalSemaphoreProperties);
+        MATCH(vkGetPhysicalDeviceExternalSemaphorePropertiesKHR);
+        MATCH(vkGetSwapchainImagesKHR);
+        return NULL;
+    }
+    case 'Q': {
+        MATCH(vkQueueSubmit);
+        MATCH(vkQueueSubmit2);
+        MATCH(vkQueueSubmit2KHR);
+        MATCH(vkQueueWaitIdle);
+        MATCH(vkQueuePresentKHR);
+        return NULL;
+    }
+    case 'A': {
+        MATCH(vkAllocateCommandBuffers);
+        MATCH(vkAcquireNextImageKHR);
+        MATCH(vkAcquireNextImage2KHR);
+        return NULL;
+    }
+    case 'B': {
+        MATCH(vkBeginCommandBuffer);
+        MATCH(vkBindBufferMemory2);
+        MATCH(vkBindBufferMemory2KHR);
+        MATCH(vkBindImageMemory2);
+        MATCH(vkBindImageMemory2KHR);
+        return NULL;
+    }
+    case 'F': {
+        MATCH(vkFreeCommandBuffers);
+        return NULL;
+    }
+    case 'R': {
+        MATCH(vkResetCommandBuffer);
+        MATCH(vkResetQueryPool);
+        MATCH(vkResetQueryPoolEXT);
+        return NULL;
+    }
+    case 'S': {
+        MATCH(vkSignalSemaphore);
+        MATCH(vkSignalSemaphoreKHR);
+        return NULL;
+    }
+    case 'W': {
+        MATCH(vkWaitSemaphores);
+        MATCH(vkWaitSemaphoresKHR);
+        return NULL;
+    }
+    case 'U': {
+        MATCH(vkUpdateDescriptorSetWithTemplate);
+        MATCH(vkUpdateDescriptorSetWithTemplateKHR);
+        return NULL;
+    }
+    case 'T': {
+        MATCH(vkTrimCommandPool);
+        MATCH(vkTrimCommandPoolKHR);
+        return NULL;
+    }
+    case 'E': {
+        if (!is_device_only) {
+            MATCH(vkEnumerateDeviceExtensionProperties);
+            MATCH(vkEnumerateInstanceVersion);
+        }
+        MATCH(vkEnumeratePhysicalDeviceGroups);
+        MATCH(vkEnumeratePhysicalDeviceGroupsKHR);
+        return NULL;
+    }
+    default:
+        break;
+    }
+
+    #undef MATCH
+    return NULL;
+}
+
 VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     VkInstance instance,
     const char* pName
@@ -504,168 +727,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     PFN_vkVoidFunction custom_proc = LayerManager::get().get_custom_proc(pName);
     if (custom_proc) return custom_proc;
 
-    #define MATCH_FUNC(name) if (strcmp(pName, #name) == 0) return (PFN_vkVoidFunction) name
-
-    MATCH_FUNC(vkGetInstanceProcAddr);
-    MATCH_FUNC(vkGetDeviceProcAddr);
-    MATCH_FUNC(vkCreateInstance);
-    MATCH_FUNC(vkDestroyInstance);
-    MATCH_FUNC(vkCreateDevice);
-    MATCH_FUNC(vkDestroyDevice);
-    MATCH_FUNC(vkEnumerateDeviceExtensionProperties);
-    MATCH_FUNC(vkGetPhysicalDeviceFeatures);
-    MATCH_FUNC(vkGetPhysicalDeviceFeatures2);
-    MATCH_FUNC(vkGetPhysicalDeviceFeatures2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceProperties2KHR);
-    MATCH_FUNC(vkCreateGraphicsPipelines);
-    MATCH_FUNC(vkCreateDescriptorSetLayout);
-    MATCH_FUNC(vkDestroyDescriptorSetLayout);
-    MATCH_FUNC(vkCreatePipelineLayout);
-    MATCH_FUNC(vkDestroyPipelineLayout);
-    MATCH_FUNC(vkAllocateCommandBuffers);
-    MATCH_FUNC(vkFreeCommandBuffers);
-    MATCH_FUNC(vkBeginCommandBuffer);
-    MATCH_FUNC(vkResetCommandBuffer);
-    MATCH_FUNC(vkCreateDescriptorUpdateTemplate);
-    MATCH_FUNC(vkCreateDescriptorUpdateTemplateKHR);
-    MATCH_FUNC(vkDestroyDescriptorUpdateTemplate);
-    MATCH_FUNC(vkDestroyDescriptorUpdateTemplateKHR);
-    MATCH_FUNC(vkCmdPushDescriptorSetKHR);
-    MATCH_FUNC(vkCmdPushDescriptorSetWithTemplateKHR);
-    MATCH_FUNC(vkCreateImage);
-    MATCH_FUNC(vkDestroyImage);
-    MATCH_FUNC(vkCreateImageView);
-    MATCH_FUNC(vkDestroyImageView);
-    MATCH_FUNC(vkCreateSampler);
-    MATCH_FUNC(vkDestroySampler);
-    MATCH_FUNC(vkCmdBeginRendering);
-    MATCH_FUNC(vkCmdBeginRenderingKHR);
-    MATCH_FUNC(vkCmdEndRendering);
-    MATCH_FUNC(vkCmdEndRenderingKHR);
-    MATCH_FUNC(vkDestroyPipeline);
-    MATCH_FUNC(vkCmdBindPipeline);
-    MATCH_FUNC(vkCmdBindVertexBuffers);
-    MATCH_FUNC(vkCmdBindVertexBuffers2);
-    MATCH_FUNC(vkCmdBindVertexBuffers2EXT);
-    MATCH_FUNC(vkCmdDraw);
-    MATCH_FUNC(vkCmdDrawIndexed);
-    MATCH_FUNC(vkCmdDrawIndirect);
-    MATCH_FUNC(vkCmdDrawIndexedIndirect);
-    MATCH_FUNC(vkGetDeviceQueue);
-    MATCH_FUNC(vkGetDeviceQueue2);
-    MATCH_FUNC(vkCmdSetEvent2);
-    MATCH_FUNC(vkCmdSetEvent2KHR);
-    MATCH_FUNC(vkCmdResetEvent2);
-    MATCH_FUNC(vkCmdResetEvent2KHR);
-    MATCH_FUNC(vkCmdWaitEvents2);
-    MATCH_FUNC(vkCmdWaitEvents2KHR);
-    MATCH_FUNC(vkCmdPipelineBarrier2);
-    MATCH_FUNC(vkCmdPipelineBarrier2KHR);
-    MATCH_FUNC(vkCmdWriteTimestamp2);
-    MATCH_FUNC(vkCmdWriteTimestamp2KHR);
-    MATCH_FUNC(vkQueueSubmit2);
-    MATCH_FUNC(vkQueueSubmit2KHR);
-    MATCH_FUNC(vkEnumerateInstanceVersion);
-    MATCH_FUNC(vkGetPhysicalDeviceProperties);
-    MATCH_FUNC(vkQueueSubmit);
-    MATCH_FUNC(vkQueueWaitIdle);
-    MATCH_FUNC(vkDeviceWaitIdle);
-    MATCH_FUNC(vkCreateSemaphore);
-    MATCH_FUNC(vkDestroySemaphore);
-    MATCH_FUNC(vkGetSemaphoreCounterValue);
-    MATCH_FUNC(vkGetSemaphoreCounterValueKHR);
-    MATCH_FUNC(vkWaitSemaphores);
-    MATCH_FUNC(vkWaitSemaphoresKHR);
-    MATCH_FUNC(vkSignalSemaphore);
-    MATCH_FUNC(vkSignalSemaphoreKHR);
-    MATCH_FUNC(vkResetQueryPool);
-    MATCH_FUNC(vkResetQueryPoolEXT);
-    MATCH_FUNC(vkCreateRenderPass2);
-    MATCH_FUNC(vkCreateRenderPass2KHR);
-    MATCH_FUNC(vkCmdBeginRenderPass2);
-    MATCH_FUNC(vkCmdBeginRenderPass2KHR);
-    MATCH_FUNC(vkCmdNextSubpass2);
-    MATCH_FUNC(vkCmdNextSubpass2KHR);
-    MATCH_FUNC(vkCmdEndRenderPass2);
-    MATCH_FUNC(vkCmdEndRenderPass2KHR);
-    MATCH_FUNC(vkCmdDrawIndirectCount);
-    MATCH_FUNC(vkCmdDrawIndirectCountKHR);
-    MATCH_FUNC(vkCmdDrawIndirectCountAMD);
-    MATCH_FUNC(vkCmdDrawIndexedIndirectCount);
-    MATCH_FUNC(vkCmdDrawIndexedIndirectCountKHR);
-    MATCH_FUNC(vkCmdDrawIndexedIndirectCountAMD);
-    MATCH_FUNC(vkGetBufferDeviceAddress);
-    MATCH_FUNC(vkGetBufferDeviceAddressKHR);
-    MATCH_FUNC(vkGetBufferDeviceAddressEXT);
-    MATCH_FUNC(vkGetBufferOpaqueCaptureAddress);
-    MATCH_FUNC(vkGetBufferOpaqueCaptureAddressKHR);
-    MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddress);
-    MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddressKHR);
-
-    // Vulkan 1.1 Core / Promoted Entry Points
-    MATCH_FUNC(vkBindBufferMemory2);
-    MATCH_FUNC(vkBindBufferMemory2KHR);
-    MATCH_FUNC(vkBindImageMemory2);
-    MATCH_FUNC(vkBindImageMemory2KHR);
-    MATCH_FUNC(vkGetBufferMemoryRequirements2);
-    MATCH_FUNC(vkGetBufferMemoryRequirements2KHR);
-    MATCH_FUNC(vkGetImageMemoryRequirements2);
-    MATCH_FUNC(vkGetImageMemoryRequirements2KHR);
-    MATCH_FUNC(vkGetImageSparseMemoryRequirements2);
-    MATCH_FUNC(vkGetImageSparseMemoryRequirements2KHR);
-    MATCH_FUNC(vkUpdateDescriptorSetWithTemplate);
-    MATCH_FUNC(vkUpdateDescriptorSetWithTemplateKHR);
-    MATCH_FUNC(vkGetDescriptorSetLayoutSupport);
-    MATCH_FUNC(vkGetDescriptorSetLayoutSupportKHR);
-    MATCH_FUNC(vkTrimCommandPool);
-    MATCH_FUNC(vkTrimCommandPoolKHR);
-    MATCH_FUNC(vkCmdDispatchBase);
-    MATCH_FUNC(vkCmdDispatchBaseKHR);
-    MATCH_FUNC(vkCmdSetDeviceMask);
-    MATCH_FUNC(vkCmdSetDeviceMaskKHR);
-    MATCH_FUNC(vkGetDeviceGroupPeerMemoryFeatures);
-    MATCH_FUNC(vkGetDeviceGroupPeerMemoryFeaturesKHR);
-    MATCH_FUNC(vkEnumeratePhysicalDeviceGroups);
-    MATCH_FUNC(vkEnumeratePhysicalDeviceGroupsKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceFormatProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceFormatProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceImageFormatProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceImageFormatProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceQueueFamilyProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceQueueFamilyProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceMemoryProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceMemoryProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceSparseImageFormatProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceSparseImageFormatProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalBufferProperties);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalBufferPropertiesKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalFenceProperties);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalFencePropertiesKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalSemaphoreProperties);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalSemaphorePropertiesKHR);
-    MATCH_FUNC(vkCreateSamplerYcbcrConversion);
-    MATCH_FUNC(vkCreateSamplerYcbcrConversionKHR);
-    MATCH_FUNC(vkDestroySamplerYcbcrConversion);
-    MATCH_FUNC(vkDestroySamplerYcbcrConversionKHR);
-
-    // Swapchain & Surface (VK_KHR_swapchain, VK_KHR_surface, VK_KHR_android_surface)
-    MATCH_FUNC(vkCreateSwapchainKHR);
-    MATCH_FUNC(vkDestroySwapchainKHR);
-    MATCH_FUNC(vkGetSwapchainImagesKHR);
-    MATCH_FUNC(vkAcquireNextImageKHR);
-    MATCH_FUNC(vkAcquireNextImage2KHR);
-    MATCH_FUNC(vkQueuePresentKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceSurfaceSupportKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceSurfaceCapabilities2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceSurfaceFormatsKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceSurfaceFormats2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceSurfacePresentModesKHR);
-    MATCH_FUNC(vkCreateAndroidSurfaceKHR);
-    MATCH_FUNC(vkDestroySurfaceKHR);
-
-    #undef MATCH_FUNC
+    PFN_vkVoidFunction matched = lookup_layer_proc(pName, false);
+    if (matched) return matched;
 
     init_real_vulkan();
     PFN_vkGetInstanceProcAddr real_gipa = get_real_instance_proc_addr();
@@ -684,148 +747,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     PFN_vkVoidFunction custom_proc = LayerManager::get().get_custom_proc(pName);
     if (custom_proc) return custom_proc;
 
-    #define MATCH_FUNC(name) if (strcmp(pName, #name) == 0) return (PFN_vkVoidFunction) name
-
-    MATCH_FUNC(vkGetDeviceProcAddr);
-    MATCH_FUNC(vkDestroyDevice);
-    MATCH_FUNC(vkCreateGraphicsPipelines);
-    MATCH_FUNC(vkCreateDescriptorSetLayout);
-    MATCH_FUNC(vkDestroyDescriptorSetLayout);
-    MATCH_FUNC(vkCreatePipelineLayout);
-    MATCH_FUNC(vkDestroyPipelineLayout);
-    MATCH_FUNC(vkAllocateCommandBuffers);
-    MATCH_FUNC(vkFreeCommandBuffers);
-    MATCH_FUNC(vkBeginCommandBuffer);
-    MATCH_FUNC(vkResetCommandBuffer);
-    MATCH_FUNC(vkCreateDescriptorUpdateTemplate);
-    MATCH_FUNC(vkCreateDescriptorUpdateTemplateKHR);
-    MATCH_FUNC(vkDestroyDescriptorUpdateTemplate);
-    MATCH_FUNC(vkDestroyDescriptorUpdateTemplateKHR);
-    MATCH_FUNC(vkCmdPushDescriptorSetKHR);
-    MATCH_FUNC(vkCmdPushDescriptorSetWithTemplateKHR);
-    MATCH_FUNC(vkCreateImage);
-    MATCH_FUNC(vkDestroyImage);
-    MATCH_FUNC(vkCreateImageView);
-    MATCH_FUNC(vkDestroyImageView);
-    MATCH_FUNC(vkCreateSampler);
-    MATCH_FUNC(vkDestroySampler);
-    MATCH_FUNC(vkCmdBeginRendering);
-    MATCH_FUNC(vkCmdBeginRenderingKHR);
-    MATCH_FUNC(vkCmdEndRendering);
-    MATCH_FUNC(vkCmdEndRenderingKHR);
-    MATCH_FUNC(vkDestroyPipeline);
-    MATCH_FUNC(vkCmdBindPipeline);
-    MATCH_FUNC(vkCmdBindVertexBuffers);
-    MATCH_FUNC(vkCmdBindVertexBuffers2);
-    MATCH_FUNC(vkCmdBindVertexBuffers2EXT);
-    MATCH_FUNC(vkCmdDraw);
-    MATCH_FUNC(vkCmdDrawIndexed);
-    MATCH_FUNC(vkCmdDrawIndirect);
-    MATCH_FUNC(vkCmdDrawIndexedIndirect);
-    MATCH_FUNC(vkGetDeviceQueue);
-    MATCH_FUNC(vkGetDeviceQueue2);
-    MATCH_FUNC(vkCmdSetEvent2);
-    MATCH_FUNC(vkCmdSetEvent2KHR);
-    MATCH_FUNC(vkCmdResetEvent2);
-    MATCH_FUNC(vkCmdResetEvent2KHR);
-    MATCH_FUNC(vkCmdWaitEvents2);
-    MATCH_FUNC(vkCmdWaitEvents2KHR);
-    MATCH_FUNC(vkCmdPipelineBarrier2);
-    MATCH_FUNC(vkCmdPipelineBarrier2KHR);
-    MATCH_FUNC(vkCmdWriteTimestamp2);
-    MATCH_FUNC(vkCmdWriteTimestamp2KHR);
-    MATCH_FUNC(vkQueueSubmit2);
-    MATCH_FUNC(vkQueueSubmit2KHR);
-    MATCH_FUNC(vkQueueSubmit);
-    MATCH_FUNC(vkQueueWaitIdle);
-    MATCH_FUNC(vkDeviceWaitIdle);
-    MATCH_FUNC(vkCreateSemaphore);
-    MATCH_FUNC(vkDestroySemaphore);
-    MATCH_FUNC(vkGetSemaphoreCounterValue);
-    MATCH_FUNC(vkGetSemaphoreCounterValueKHR);
-    MATCH_FUNC(vkWaitSemaphores);
-    MATCH_FUNC(vkWaitSemaphoresKHR);
-    MATCH_FUNC(vkSignalSemaphore);
-    MATCH_FUNC(vkSignalSemaphoreKHR);
-    MATCH_FUNC(vkResetQueryPool);
-    MATCH_FUNC(vkResetQueryPoolEXT);
-    MATCH_FUNC(vkCreateRenderPass2);
-    MATCH_FUNC(vkCreateRenderPass2KHR);
-    MATCH_FUNC(vkCmdBeginRenderPass2);
-    MATCH_FUNC(vkCmdBeginRenderPass2KHR);
-    MATCH_FUNC(vkCmdNextSubpass2);
-    MATCH_FUNC(vkCmdNextSubpass2KHR);
-    MATCH_FUNC(vkCmdEndRenderPass2);
-    MATCH_FUNC(vkCmdEndRenderPass2KHR);
-    MATCH_FUNC(vkCmdDrawIndirectCount);
-    MATCH_FUNC(vkCmdDrawIndirectCountKHR);
-    MATCH_FUNC(vkCmdDrawIndirectCountAMD);
-    MATCH_FUNC(vkCmdDrawIndexedIndirectCount);
-    MATCH_FUNC(vkCmdDrawIndexedIndirectCountKHR);
-    MATCH_FUNC(vkCmdDrawIndexedIndirectCountAMD);
-    MATCH_FUNC(vkGetBufferDeviceAddress);
-    MATCH_FUNC(vkGetBufferDeviceAddressKHR);
-    MATCH_FUNC(vkGetBufferDeviceAddressEXT);
-    MATCH_FUNC(vkGetBufferOpaqueCaptureAddress);
-    MATCH_FUNC(vkGetBufferOpaqueCaptureAddressKHR);
-    MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddress);
-    MATCH_FUNC(vkGetDeviceMemoryOpaqueCaptureAddressKHR);
-
-    // Vulkan 1.1 Core / Promoted Entry Points
-    MATCH_FUNC(vkBindBufferMemory2);
-    MATCH_FUNC(vkBindBufferMemory2KHR);
-    MATCH_FUNC(vkBindImageMemory2);
-    MATCH_FUNC(vkBindImageMemory2KHR);
-    MATCH_FUNC(vkGetBufferMemoryRequirements2);
-    MATCH_FUNC(vkGetBufferMemoryRequirements2KHR);
-    MATCH_FUNC(vkGetImageMemoryRequirements2);
-    MATCH_FUNC(vkGetImageMemoryRequirements2KHR);
-    MATCH_FUNC(vkGetImageSparseMemoryRequirements2);
-    MATCH_FUNC(vkGetImageSparseMemoryRequirements2KHR);
-    MATCH_FUNC(vkUpdateDescriptorSetWithTemplate);
-    MATCH_FUNC(vkUpdateDescriptorSetWithTemplateKHR);
-    MATCH_FUNC(vkGetDescriptorSetLayoutSupport);
-    MATCH_FUNC(vkGetDescriptorSetLayoutSupportKHR);
-    MATCH_FUNC(vkTrimCommandPool);
-    MATCH_FUNC(vkTrimCommandPoolKHR);
-    MATCH_FUNC(vkCmdDispatchBase);
-    MATCH_FUNC(vkCmdDispatchBaseKHR);
-    MATCH_FUNC(vkCmdSetDeviceMask);
-    MATCH_FUNC(vkCmdSetDeviceMaskKHR);
-    MATCH_FUNC(vkGetDeviceGroupPeerMemoryFeatures);
-    MATCH_FUNC(vkGetDeviceGroupPeerMemoryFeaturesKHR);
-    MATCH_FUNC(vkEnumeratePhysicalDeviceGroups);
-    MATCH_FUNC(vkEnumeratePhysicalDeviceGroupsKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceFormatProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceFormatProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceImageFormatProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceImageFormatProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceQueueFamilyProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceQueueFamilyProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceMemoryProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceMemoryProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceSparseImageFormatProperties2);
-    MATCH_FUNC(vkGetPhysicalDeviceSparseImageFormatProperties2KHR);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalBufferProperties);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalBufferPropertiesKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalFenceProperties);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalFencePropertiesKHR);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalSemaphoreProperties);
-    MATCH_FUNC(vkGetPhysicalDeviceExternalSemaphorePropertiesKHR);
-    MATCH_FUNC(vkCreateSamplerYcbcrConversion);
-    MATCH_FUNC(vkCreateSamplerYcbcrConversionKHR);
-    MATCH_FUNC(vkDestroySamplerYcbcrConversion);
-    MATCH_FUNC(vkDestroySamplerYcbcrConversionKHR);
-
-    // Swapchain (VK_KHR_swapchain)
-    MATCH_FUNC(vkCreateSwapchainKHR);
-    MATCH_FUNC(vkDestroySwapchainKHR);
-    MATCH_FUNC(vkGetSwapchainImagesKHR);
-    MATCH_FUNC(vkAcquireNextImageKHR);
-    MATCH_FUNC(vkAcquireNextImage2KHR);
-    MATCH_FUNC(vkQueuePresentKHR);
-
-    #undef MATCH_FUNC
+    PFN_vkVoidFunction matched = lookup_layer_proc(pName, true);
+    if (matched) return matched;
 
     init_real_vulkan();
     PFN_vkGetDeviceProcAddr real_gdpa = get_real_device_proc_addr();
@@ -841,37 +764,49 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
 }
 
 // ============================================================================
-// Standard Vulkan 1.0 Forwarding Stubs
+// Standard Vulkan 1.0 Forwarding Stubs (with static lazy pointer caching)
 // ============================================================================
 
 #define FORWARD_INST(ret, name, args, params) \
     VK_LAYER_EXPORT ret VKAPI_CALL name args { \
         typedef ret (VKAPI_PTR *fn_t) args; \
-        fn_t fn = (fn_t) get_real_proc(get_last_instance(), VK_NULL_HANDLE, #name); \
-        if (fn) return fn params; \
+        static fn_t s_cached_##name = nullptr; \
+        if (__builtin_expect(!s_cached_##name, 0)) { \
+            s_cached_##name = (fn_t) get_real_proc(get_last_instance(), VK_NULL_HANDLE, #name); \
+        } \
+        if (__builtin_expect(s_cached_##name != nullptr, 1)) return s_cached_##name params; \
         return (ret)0; \
     }
 
 #define FORWARD_DEV(ret, name, dev_arg, args, params) \
     VK_LAYER_EXPORT ret VKAPI_CALL name args { \
         typedef ret (VKAPI_PTR *fn_t) args; \
-        fn_t fn = (fn_t) get_real_proc(get_last_instance(), dev_arg, #name); \
-        if (fn) return fn params; \
+        static fn_t s_cached_##name = nullptr; \
+        if (__builtin_expect(!s_cached_##name, 0)) { \
+            s_cached_##name = (fn_t) get_real_proc(get_last_instance(), dev_arg, #name); \
+        } \
+        if (__builtin_expect(s_cached_##name != nullptr, 1)) return s_cached_##name params; \
         return (ret)0; \
     }
 
 #define FORWARD_DEV_VOID(name, dev_arg, args, params) \
     VK_LAYER_EXPORT void VKAPI_CALL name args { \
         typedef void (VKAPI_PTR *fn_t) args; \
-        fn_t fn = (fn_t) get_real_proc(get_last_instance(), dev_arg, #name); \
-        if (fn) fn params; \
+        static fn_t s_cached_##name = nullptr; \
+        if (__builtin_expect(!s_cached_##name, 0)) { \
+            s_cached_##name = (fn_t) get_real_proc(get_last_instance(), dev_arg, #name); \
+        } \
+        if (__builtin_expect(s_cached_##name != nullptr, 1)) s_cached_##name params; \
     }
 
 #define FORWARD_QUEUE(ret, name, args, params) \
     VK_LAYER_EXPORT ret VKAPI_CALL name args { \
         typedef ret (VKAPI_PTR *fn_t) args; \
-        fn_t fn = (fn_t) get_real_proc(get_last_instance(), VK_NULL_HANDLE, #name); \
-        if (fn) return fn params; \
+        static fn_t s_cached_##name = nullptr; \
+        if (__builtin_expect(!s_cached_##name, 0)) { \
+            s_cached_##name = (fn_t) get_real_proc(get_last_instance(), VK_NULL_HANDLE, #name); \
+        } \
+        if (__builtin_expect(s_cached_##name != nullptr, 1)) return s_cached_##name params; \
         return (ret)0; \
     }
 

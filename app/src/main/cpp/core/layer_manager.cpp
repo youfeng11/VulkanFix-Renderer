@@ -25,10 +25,11 @@ void LayerManager::register_custom_proc(const char* name, PFN_vkVoidFunction pro
     if (!name || !proc) return;
     std::lock_guard<std::mutex> lock(m_proc_mutex);
     m_custom_procs[name] = proc;
+    m_has_custom_procs.store(true, std::memory_order_release);
     LOGI("LayerManager: registered custom proc '%s' -> %p", name, (void*)proc);
 }
 
-PFN_vkVoidFunction LayerManager::get_custom_proc(const char* name) {
+PFN_vkVoidFunction LayerManager::get_custom_proc_slow(const char* name) {
     if (!name) return NULL;
     std::lock_guard<std::mutex> lock(m_proc_mutex);
     auto it = m_custom_procs.find(name);

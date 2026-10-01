@@ -673,21 +673,62 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     VkDevice device = get_device_for_cmd(commandBuffer);
     if (is_device_native(device) || !pRenderingInfo) return false;
 
+    const uint32_t colorCount = pRenderingInfo->colorAttachmentCount;
+    const uint32_t maxAttCount = colorCount * 2 + 1;
+
     DynamicRenderPassKey rpKey;
+    rpKey.colorAttachments.reserve(colorCount);
+
     std::vector<VkAttachmentDescription> attachments;
+    attachments.reserve(maxAttCount);
+
     std::vector<VkAttachmentReference> colorRefs;
+    colorRefs.reserve(colorCount);
+
     std::vector<VkAttachmentReference> resolveRefs;
     VkAttachmentReference depthRef{};
+
     std::vector<VkImageView> fbViews;
+    fbViews.reserve(maxAttCount);
+
     std::vector<VkClearValue> clearValues;
+    clearValues.reserve(maxAttCount);
+
+    VkImageView dsView = VK_NULL_HANDLE;
+    if (pRenderingInfo->pDepthAttachment && pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
+        dsView = pRenderingInfo->pDepthAttachment->imageView;
+    } else if (pRenderingInfo->pStencilAttachment && pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
+        dsView = pRenderingInfo->pStencilAttachment->imageView;
+    }
+
+    bool has_resolves = false;
+    for (uint32_t i = 0; i < colorCount; ++i) {
+        if (pRenderingInfo->pColorAttachments[i].resolveImageView != VK_NULL_HANDLE) {
+            has_resolves = true;
+            break;
+        }
+    }
+    if (has_resolves) {
+        rpKey.resolveAttachments.reserve(colorCount);
+        resolveRefs.reserve(colorCount);
+    }
+
+    // Acquire lock once for view metadata and cache lookups
+    std::unique_lock<std::mutex> lock(m_mutex);
 
     // 1. Color Attachments
-    for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; ++i) {
+    for (uint32_t i = 0; i < colorCount; ++i) {
         const auto& att = pRenderingInfo->pColorAttachments[i];
         if (att.imageView != VK_NULL_HANDLE) {
+            auto it = m_image_views.find((uint64_t)(uintptr_t)att.imageView);
+            VkFormat fmt = (it != m_image_views.end() && it->second.format != VK_FORMAT_UNDEFINED) ?
+                           it->second.format : VK_FORMAT_R8G8B8A8_UNORM;
+            VkSampleCountFlagBits samples = (it != m_image_views.end()) ?
+                                           it->second.samples : VK_SAMPLE_COUNT_1_BIT;
+
             DynamicRenderPassKey::AttachmentDesc aDesc;
-            aDesc.format = get_image_view_format(att.imageView);
-            aDesc.samples = get_image_view_samples(att.imageView);
+            aDesc.format = fmt;
+            aDesc.samples = samples;
             aDesc.loadOp = att.loadOp;
             aDesc.storeOp = att.storeOp;
             aDesc.initialLayout = sanitize_color_layout(att.imageLayout);
@@ -726,18 +767,14 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     }
 
     // 2. Depth/Stencil Attachment
-    VkImageView dsView = VK_NULL_HANDLE;
-    if (pRenderingInfo->pDepthAttachment && pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
-        dsView = pRenderingInfo->pDepthAttachment->imageView;
-    } else if (pRenderingInfo->pStencilAttachment && pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
-        dsView = pRenderingInfo->pStencilAttachment->imageView;
-    }
-
     if (dsView != VK_NULL_HANDLE) {
         rpKey.has_depth_stencil = true;
         DynamicRenderPassKey::AttachmentDesc& dsDesc = rpKey.depthStencilAttachment;
-        dsDesc.format = get_image_view_format(dsView);
-        dsDesc.samples = get_image_view_samples(dsView);
+        auto it = m_image_views.find((uint64_t)(uintptr_t)dsView);
+        dsDesc.format = (it != m_image_views.end() && it->second.format != VK_FORMAT_UNDEFINED) ?
+                        it->second.format : VK_FORMAT_R8G8B8A8_UNORM;
+        dsDesc.samples = (it != m_image_views.end()) ?
+                         it->second.samples : VK_SAMPLE_COUNT_1_BIT;
 
         if (pRenderingInfo->pDepthAttachment && pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
             dsDesc.loadOp = pRenderingInfo->pDepthAttachment->loadOp;
@@ -783,20 +820,16 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     }
 
     // 3. Resolve Attachments
-    bool has_resolves = false;
-    for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; ++i) {
-        if (pRenderingInfo->pColorAttachments[i].resolveImageView != VK_NULL_HANDLE) {
-            has_resolves = true;
-            break;
-        }
-    }
-
     if (has_resolves) {
-        for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; ++i) {
+        for (uint32_t i = 0; i < colorCount; ++i) {
             const auto& att = pRenderingInfo->pColorAttachments[i];
             if (att.resolveImageView != VK_NULL_HANDLE) {
+                auto it = m_image_views.find((uint64_t)(uintptr_t)att.resolveImageView);
+                VkFormat fmt = (it != m_image_views.end() && it->second.format != VK_FORMAT_UNDEFINED) ?
+                               it->second.format : VK_FORMAT_R8G8B8A8_UNORM;
+
                 DynamicRenderPassKey::AttachmentDesc rDesc;
-                rDesc.format = get_image_view_format(att.resolveImageView);
+                rDesc.format = fmt;
                 rDesc.samples = VK_SAMPLE_COUNT_1_BIT;
                 rDesc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 rDesc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -832,15 +865,82 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         }
     }
 
-    // 4. Retrieve or Create Dynamic RenderPass
+    // Framebuffer dimensions calculation
+    uint32_t fb_w = pRenderingInfo->renderArea.offset.x + pRenderingInfo->renderArea.extent.width;
+    uint32_t fb_h = pRenderingInfo->renderArea.offset.y + pRenderingInfo->renderArea.extent.height;
+    if (fb_w == 0 || fb_h == 0) {
+        for (VkImageView v : fbViews) {
+            auto it = m_image_views.find((uint64_t)(uintptr_t)v);
+            if (it != m_image_views.end()) {
+                fb_w = std::max(fb_w, it->second.extent.width);
+                fb_h = std::max(fb_h, it->second.extent.height);
+            }
+        }
+        if (fb_w == 0) fb_w = 1;
+        if (fb_h == 0) fb_h = 1;
+    }
+    uint32_t fb_layers = (pRenderingInfo->layerCount > 0) ? pRenderingInfo->layerCount : 1;
+
+    // 4. Cache Lookup
     VkRenderPass renderPass = VK_NULL_HANDLE;
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_dynamic_rp_cache.find(rpKey);
-        if (it != m_dynamic_rp_cache.end()) {
-            renderPass = it->second;
+    auto rpIt = m_dynamic_rp_cache.find(rpKey);
+    if (rpIt != m_dynamic_rp_cache.end()) {
+        renderPass = rpIt->second;
+    }
+
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    FramebufferKey fbKey;
+    if (renderPass != VK_NULL_HANDLE) {
+        fbKey.renderPass = renderPass;
+        fbKey.views = fbViews;
+        fbKey.width = fb_w;
+        fbKey.height = fb_h;
+        fbKey.layers = fb_layers;
+
+        auto fbIt = m_framebuffer_cache.find(fbKey);
+        if (fbIt != m_framebuffer_cache.end()) {
+            framebuffer = fbIt->second;
         }
     }
+
+    // Fast-path: both renderPass and framebuffer already cached (common runtime hot path)
+    if (__builtin_expect(renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE, 1)) {
+        CmdRenderingState& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
+        state.device = device;
+        state.is_rendering = true;
+        state.activeRenderPass = renderPass;
+        state.activeFramebuffer = framebuffer;
+
+        // Release lock before issuing Vulkan driver command
+        lock.unlock();
+
+        VkRenderPassBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        beginInfo.renderPass = renderPass;
+        beginInfo.framebuffer = framebuffer;
+        beginInfo.renderArea = pRenderingInfo->renderArea;
+        beginInfo.clearValueCount = (uint32_t) clearValues.size();
+        beginInfo.pClearValues = clearValues.empty() ? NULL : clearValues.data();
+
+        VkSubpassContents contents = (pRenderingInfo->flags & VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT_KHR) ?
+            VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE;
+
+        const auto& dt = LayerManager::get().get_dispatch_table(device);
+        if (dt.CmdBeginRenderPass) {
+            dt.CmdBeginRenderPass(commandBuffer, &beginInfo, contents);
+        } else {
+            PFN_vkCmdBeginRenderPass real_begin_rp = (PFN_vkCmdBeginRenderPass)
+                get_real_proc(get_last_instance(), device, "vkCmdBeginRenderPass");
+            if (!real_begin_rp) return false;
+            real_begin_rp(commandBuffer, &beginInfo, contents);
+        }
+
+        LOG_OPT_DEBUG("DynamicRendering: emulated vkCmdBeginRenderingKHR for cmd %p (fast path)", commandBuffer);
+        return true;
+    }
+
+    // Cold path: unlock before calling Vulkan driver creation APIs
+    lock.unlock();
 
     if (renderPass == VK_NULL_HANDLE) {
         VkSubpassDescription subpass{};
@@ -867,66 +967,53 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             return false;
         }
 
-        std::lock_guard<std::mutex> lock(m_mutex);
+        lock.lock();
         m_dynamic_rp_cache[rpKey] = renderPass;
         m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(renderPass);
+        lock.unlock();
         LOG_OPT_DEBUG("DynamicRendering: created dynamic renderPass %p", (void*)(uintptr_t)renderPass);
     }
 
-    // 5. Framebuffer Lookup / Creation
-    uint32_t fb_w = pRenderingInfo->renderArea.offset.x + pRenderingInfo->renderArea.extent.width;
-    uint32_t fb_h = pRenderingInfo->renderArea.offset.y + pRenderingInfo->renderArea.extent.height;
-    if (fb_w == 0 || fb_h == 0) {
-        for (VkImageView v : fbViews) {
-            VkExtent2D ext = get_image_view_extent(v);
-            fb_w = std::max(fb_w, ext.width);
-            fb_h = std::max(fb_h, ext.height);
-        }
-        if (fb_w == 0) fb_w = 1;
-        if (fb_h == 0) fb_h = 1;
-    }
-    uint32_t fb_layers = (pRenderingInfo->layerCount > 0) ? pRenderingInfo->layerCount : 1;
+    if (framebuffer == VK_NULL_HANDLE) {
+        fbKey.renderPass = renderPass;
+        fbKey.views = fbViews;
+        fbKey.width = fb_w;
+        fbKey.height = fb_h;
+        fbKey.layers = fb_layers;
 
-    FramebufferKey fbKey;
-    fbKey.renderPass = renderPass;
-    fbKey.views = fbViews;
-    fbKey.width = fb_w;
-    fbKey.height = fb_h;
-    fbKey.layers = fb_layers;
-
-    VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        lock.lock();
         auto it = m_framebuffer_cache.find(fbKey);
         if (it != m_framebuffer_cache.end()) {
             framebuffer = it->second;
         }
-    }
+        lock.unlock();
 
-    if (framebuffer == VK_NULL_HANDLE) {
-        VkFramebufferCreateInfo fbInfo{};
-        fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fbInfo.renderPass = renderPass;
-        fbInfo.attachmentCount = (uint32_t) fbViews.size();
-        fbInfo.pAttachments = fbViews.empty() ? NULL : fbViews.data();
-        fbInfo.width = fb_w;
-        fbInfo.height = fb_h;
-        fbInfo.layers = fb_layers;
+        if (framebuffer == VK_NULL_HANDLE) {
+            VkFramebufferCreateInfo fbInfo{};
+            fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            fbInfo.renderPass = renderPass;
+            fbInfo.attachmentCount = (uint32_t) fbViews.size();
+            fbInfo.pAttachments = fbViews.empty() ? NULL : fbViews.data();
+            fbInfo.width = fb_w;
+            fbInfo.height = fb_h;
+            fbInfo.layers = fb_layers;
 
-        PFN_vkCreateFramebuffer real_create_fb = (PFN_vkCreateFramebuffer)
-            get_real_proc(get_last_instance(), device, "vkCreateFramebuffer");
-        if (!real_create_fb) return false;
+            PFN_vkCreateFramebuffer real_create_fb = (PFN_vkCreateFramebuffer)
+                get_real_proc(get_last_instance(), device, "vkCreateFramebuffer");
+            if (!real_create_fb) return false;
 
-        VkResult res = real_create_fb(device, &fbInfo, NULL, &framebuffer);
-        if (res != VK_SUCCESS || framebuffer == VK_NULL_HANDLE) {
-            LOGE("DynamicRendering: failed to create framebuffer: %d", res);
-            return false;
+            VkResult res = real_create_fb(device, &fbInfo, NULL, &framebuffer);
+            if (res != VK_SUCCESS || framebuffer == VK_NULL_HANDLE) {
+                LOGE("DynamicRendering: failed to create framebuffer: %d", res);
+                return false;
+            }
+
+            lock.lock();
+            m_framebuffer_cache[fbKey] = framebuffer;
+            m_device_resources[(uint64_t)(uintptr_t)device].framebuffers.push_back(framebuffer);
+            lock.unlock();
+            LOG_OPT_DEBUG("DynamicRendering: created framebuffer %p (%ux%u)", (void*)(uintptr_t)framebuffer, fb_w, fb_h);
         }
-
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_framebuffer_cache[fbKey] = framebuffer;
-        m_device_resources[(uint64_t)(uintptr_t)device].framebuffers.push_back(framebuffer);
-        LOG_OPT_DEBUG("DynamicRendering: created framebuffer %p (%ux%u)", (void*)(uintptr_t)framebuffer, fb_w, fb_h);
     }
 
     // 6. Begin RenderPass
@@ -952,7 +1039,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> finalLock(m_mutex);
         CmdRenderingState& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
         state.device = device;
         state.is_rendering = true;

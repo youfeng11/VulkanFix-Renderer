@@ -584,6 +584,13 @@ void VertexAttributeDivisorModule::on_cmd_bind_pipeline(
 
     state->current_pipeline = pipeline;
 
+    thread_local VkPipeline s_last_pipeline = VK_NULL_HANDLE;
+    thread_local std::shared_ptr<PipelineDivisorInfo> s_last_divisor_info = nullptr;
+    if (__builtin_expect(pipeline == s_last_pipeline, 1)) {
+        state->active_divisor_info = s_last_divisor_info;
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_pipeline_divisors.find((uint64_t)(uintptr_t)pipeline);
     if (it != m_pipeline_divisors.end()) {
@@ -591,6 +598,8 @@ void VertexAttributeDivisorModule::on_cmd_bind_pipeline(
     } else {
         state->active_divisor_info = nullptr;
     }
+    s_last_pipeline = pipeline;
+    s_last_divisor_info = state->active_divisor_info;
 }
 
 void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers(

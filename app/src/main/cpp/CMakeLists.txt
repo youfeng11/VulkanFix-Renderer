@@ -65,7 +65,23 @@ target_link_libraries(vulkan_fix PRIVATE
 )
 
 set_target_properties(vulkan_fix PROPERTIES
-    C_VISIBILITY_PRESET default
-    CXX_VISIBILITY_PRESET default
-    VISIBILITY_INLINES_HIDDEN OFF
+    C_VISIBILITY_PRESET hidden
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
+target_compile_options(vulkan_fix PRIVATE
+    $<$<CONFIG:Release>:
+        -O3
+        -fomit-frame-pointer
+        -ffunction-sections
+        -fdata-sections
+    >
+)
+
+target_link_options(vulkan_fix PRIVATE
+    $<$<CONFIG:Release>:
+        -Wl,--gc-sections
+        -Wl,-Bsymbolic
+    >
 )
