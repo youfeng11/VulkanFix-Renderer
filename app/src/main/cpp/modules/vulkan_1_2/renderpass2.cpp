@@ -60,6 +60,16 @@ bool RenderPass2Module::on_create_render_pass2(
         dst.stencilStoreOp = src.stencilStoreOp;
         dst.initialLayout = sanitize_layout(src.initialLayout);
         dst.finalLayout = sanitize_layout(src.finalLayout);
+
+        // TBDR optimization: Prevent loading uninitialized DDR data into on-chip Tile memory
+        if (dst.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+            if (dst.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
+                dst.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            }
+            if (dst.stencilLoadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
+                dst.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            }
+        }
     }
 
     std::vector<std::vector<VkAttachmentReference>> inputRefs(pCreateInfo->subpassCount);

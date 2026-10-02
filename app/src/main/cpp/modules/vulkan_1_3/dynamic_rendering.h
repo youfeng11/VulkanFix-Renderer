@@ -235,6 +235,7 @@ private:
         VkFormat format = VK_FORMAT_UNDEFINED;
         VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
         VkExtent3D extent = {0, 0, 0};
+        VkImageUsageFlags usage = 0;
     };
 
     struct ImageViewMeta {
@@ -242,6 +243,7 @@ private:
         VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
         VkExtent2D extent = {0, 0};
         VkImage image = VK_NULL_HANDLE;
+        VkImageUsageFlags usage = 0;
     };
 
     ImageViewMeta get_image_view_meta(VkImageView view);

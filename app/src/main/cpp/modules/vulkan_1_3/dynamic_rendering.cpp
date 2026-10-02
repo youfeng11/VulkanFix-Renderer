@@ -97,6 +97,19 @@ static VkImageLayout sanitize_depth_layout(VkImageLayout layout) {
     return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 }
 
+static bool is_tbdr_opt_enabled() {
+    const char* env = getenv("VULKAN_FIX_OPTIMIZE_TBDR");
+    if (env && (strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0)) {
+        return false;
+    }
+    return true;
+}
+
+static bool is_aggressive_depth_store_opt() {
+    const char* env = getenv("FORCE_OPTIMIZE_DEPTH_STORE");
+    return env && (strcmp(env, "1") == 0 || strcasecmp(env, "true") == 0);
+}
+
 DynamicRenderingModule::DynamicRenderingModule() {
     LOGI("Initialized Vulkan VK_KHR_dynamic_rendering emulation module");
 }
@@ -600,6 +613,7 @@ void DynamicRenderingModule::on_post_create_image(
         meta.format = pCreateInfo->format;
         meta.samples = pCreateInfo->samples;
         meta.extent = pCreateInfo->extent;
+        meta.usage = pCreateInfo->usage;
         m_images[(uint64_t)(uintptr_t)image] = meta;
     }
 }
@@ -625,12 +639,14 @@ void DynamicRenderingModule::on_post_create_image_view(
         meta.image = pCreateInfo->image;
         meta.samples = VK_SAMPLE_COUNT_1_BIT;
         meta.extent = {0, 0};
+        meta.usage = 0;
 
         auto it = m_images.find((uint64_t)(uintptr_t)pCreateInfo->image);
         if (it != m_images.end()) {
             meta.samples = it->second.samples;
             meta.extent.width = it->second.extent.width;
             meta.extent.height = it->second.extent.height;
+            meta.usage = it->second.usage;
         }
 
         m_image_views[(uint64_t)(uintptr_t)imageView] = meta;
@@ -734,6 +750,13 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             aDesc.initialLayout = sanitize_color_layout(att.imageLayout);
             aDesc.finalLayout = aDesc.initialLayout;
             aDesc.refLayout = aDesc.initialLayout;
+
+            // TBDR optimization: Prevent loading uninitialized DDR data into Tile memory
+            if (is_tbdr_opt_enabled() && aDesc.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                if (aDesc.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
+                    aDesc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                }
+            }
             rpKey.colorAttachments.push_back(aDesc);
 
             VkAttachmentDescription vkDesc{};
@@ -788,6 +811,36 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                 dsDesc.initialLayout = sanitize_depth_layout(pRenderingInfo->pStencilAttachment->imageLayout);
             }
         }
+
+        // TBDR mobile optimizations for depth/stencil attachments:
+        if (is_tbdr_opt_enabled()) {
+            // 1. Prevent loading undefined contents from DDR into on-chip Tile memory
+            if (dsDesc.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                if (dsDesc.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
+                    dsDesc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                }
+                if (dsDesc.stencilLoadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
+                    dsDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                }
+            }
+
+            // 2. Intelligent DONT_CARE storeOp conversion:
+            // Check if image usage indicates it is transient or will never be sampled/copied
+            VkImageUsageFlags dsUsage = (it != m_image_views.end()) ? it->second.usage : 0;
+            bool isTransient = (dsUsage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT) != 0;
+            bool cannotBeSampled = (dsUsage != 0) &&
+                ((dsUsage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT)) == 0);
+
+            if (isTransient || cannotBeSampled || is_aggressive_depth_store_opt()) {
+                if (dsDesc.storeOp == VK_ATTACHMENT_STORE_OP_STORE) {
+                    dsDesc.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                }
+                if (dsDesc.stencilStoreOp == VK_ATTACHMENT_STORE_OP_STORE) {
+                    dsDesc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                }
+            }
+        }
+
         dsDesc.finalLayout = dsDesc.initialLayout;
         dsDesc.refLayout = dsDesc.initialLayout;
 
