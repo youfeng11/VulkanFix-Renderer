@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <vector>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 
 #ifndef VK_KHR_dynamic_rendering
@@ -342,7 +343,8 @@ private:
         std::vector<VkFramebuffer> framebuffers;
     };
 
-    std::mutex m_mutex;
+    mutable std::shared_mutex m_rw_mutex;
+    std::mutex m_cmd_mutex;
     std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
     std::atomic<bool> m_primary_native{false};
     std::unordered_map<uint64_t, bool> m_phys_native_support;

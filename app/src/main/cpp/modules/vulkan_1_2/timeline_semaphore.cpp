@@ -122,12 +122,15 @@ bool TimelineSemaphoreModule::query_native_support(VkPhysicalDevice physDev) {
 }
 
 bool TimelineSemaphoreModule::is_phys_device_native(VkPhysicalDevice physDev) {
-    std::lock_guard<std::mutex> lock(m_ext_mutex);
-    auto it = m_phys_native.find((uint64_t)(uintptr_t)physDev);
-    if (it != m_phys_native.end()) {
-        return it->second;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_ext_mutex);
+        auto it = m_phys_native.find((uint64_t)(uintptr_t)physDev);
+        if (it != m_phys_native.end()) {
+            return it->second;
+        }
     }
     bool native = query_native_support(physDev);
+    std::unique_lock<std::shared_mutex> lock(m_ext_mutex);
     m_phys_native[(uint64_t)(uintptr_t)physDev] = native;
     if (!native) {
         LOGI("[VK_KHR_timeline_semaphore] Device %p lacks native timelineSemaphore feature support, enabling emulation!", physDev);
@@ -139,7 +142,7 @@ bool TimelineSemaphoreModule::is_phys_device_native(VkPhysicalDevice physDev) {
 
 bool TimelineSemaphoreModule::is_device_native(VkDevice device) {
     if (device == VK_NULL_HANDLE) return false;
-    std::lock_guard<std::mutex> lock(m_ext_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_ext_mutex);
     auto it = m_device_native.find((uint64_t)(uintptr_t)device);
     if (it != m_device_native.end()) {
         return it->second;
@@ -216,7 +219,7 @@ void TimelineSemaphoreModule::on_post_create_device(
 ) {
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
         bool isNative = (reinterpret_cast<uintptr_t>(pUserData) == 1);
-        std::lock_guard<std::mutex> lock(m_ext_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_ext_mutex);
         m_device_native[(uint64_t)(uintptr_t)device] = isNative;
         LOGI("TimelineSemaphore: device %p native=%d (emulation=%s)",
              device, isNative ? 1 : 0, isNative ? "OFF" : "ON");
@@ -277,7 +280,7 @@ void TimelineSemaphoreModule::on_post_create_semaphore(
         auto state = std::make_shared<TimelineSemaphoreState>();
         state->counter.store(initVal);
 
-        std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_table_rw_mutex);
         m_timeline_semaphores[(uint64_t)(uintptr_t)semaphore] = state;
         m_active_timeline_count.fetch_add(1, std::memory_order_relaxed);
         LOG_OPT_DEBUG("TimelineSemaphore: registered emulated timeline semaphore %p with initial value %" PRIu64,
@@ -289,7 +292,7 @@ void TimelineSemaphoreModule::on_destroy_semaphore(
     VkDevice device,
     VkSemaphore semaphore
 ) {
-    std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_table_rw_mutex);
     if (m_timeline_semaphores.erase((uint64_t)(uintptr_t)semaphore) > 0) {
         m_active_timeline_count.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -349,8 +352,9 @@ TimelineSemaphoreModule::FenceHolder::~FenceHolder() {
     }
 }
 
-void TimelineSemaphoreModule::check_pending_signals_locked(std::shared_ptr<TimelineSemaphoreState>& state) {
+void TimelineSemaphoreModule::check_pending_signals(std::shared_ptr<TimelineSemaphoreState>& state) {
     if (!state) return;
+    std::lock_guard<std::mutex> sLock(state->state_mutex);
     bool anyUpdated = false;
     auto it = state->pendingSignals.begin();
     while (it != state->pendingSignals.end()) {
@@ -380,15 +384,16 @@ void TimelineSemaphoreModule::check_pending_signals_locked(std::shared_ptr<Timel
 bool TimelineSemaphoreModule::is_timeline_semaphore(VkSemaphore semaphore) {
     if (semaphore == VK_NULL_HANDLE) return false;
     if (m_active_timeline_count.load(std::memory_order_relaxed) == 0) return false;
-    std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
     return m_timeline_semaphores.find((uint64_t)(uintptr_t)semaphore) != m_timeline_semaphores.end();
 }
 
 void TimelineSemaphoreModule::on_queue_wait_idle(VkQueue queue) {
     if (m_active_timeline_count.load(std::memory_order_relaxed) == 0) return;
-    std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
     for (auto& pair : m_timeline_semaphores) {
         auto& state = pair.second;
+        std::lock_guard<std::mutex> sLock(state->state_mutex);
         for (auto& ps : state->pendingSignals) {
             if (ps.targetValue > state->counter.load(std::memory_order_relaxed)) {
                 state->counter.store(ps.targetValue, std::memory_order_relaxed);
@@ -401,9 +406,10 @@ void TimelineSemaphoreModule::on_queue_wait_idle(VkQueue queue) {
 
 void TimelineSemaphoreModule::on_device_wait_idle(VkDevice device) {
     if (m_active_timeline_count.load(std::memory_order_relaxed) == 0) return;
-    std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
     for (auto& pair : m_timeline_semaphores) {
         auto& state = pair.second;
+        std::lock_guard<std::mutex> sLock(state->state_mutex);
         for (auto& ps : state->pendingSignals) {
             if (ps.targetValue > state->counter.load(std::memory_order_relaxed)) {
                 state->counter.store(ps.targetValue, std::memory_order_relaxed);
@@ -427,15 +433,15 @@ bool TimelineSemaphoreModule::on_get_semaphore_counter_value(
 
     std::shared_ptr<TimelineSemaphoreState> state;
     {
-        std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
         auto it = m_timeline_semaphores.find((uint64_t)(uintptr_t)semaphore);
         if (it != m_timeline_semaphores.end()) {
             state = it->second;
-            check_pending_signals_locked(state);
         }
     }
 
     if (state) {
+        check_pending_signals(state);
         *pValue = state->counter.load();
         outResult = VK_SUCCESS;
         return true;
@@ -462,18 +468,23 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
     bool has_emulated = false;
 
     {
-        std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
         for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
             auto it = m_timeline_semaphores.find((uint64_t)(uintptr_t)pWaitInfo->pSemaphores[i]);
             if (it != m_timeline_semaphores.end()) {
                 states[i] = it->second;
                 has_emulated = true;
-                check_pending_signals_locked(states[i]);
             }
         }
     }
 
     if (!has_emulated) return false;
+
+    for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
+        if (states[i]) {
+            check_pending_signals(states[i]);
+        }
+    }
 
     bool waitAny = (pWaitInfo->flags & VK_SEMAPHORE_WAIT_ANY_BIT);
     auto startTime = std::chrono::steady_clock::now();
@@ -485,12 +496,9 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
     }
 
     while (true) {
-        {
-            std::lock_guard<std::mutex> lock(m_semaphore_mutex);
-            for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
-                if (states[i]) {
-                    check_pending_signals_locked(states[i]);
-                }
+        for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
+            if (states[i]) {
+                check_pending_signals(states[i]);
             }
         }
 
@@ -527,21 +535,19 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
         uint64_t remainingTimeout = (timeout == UINT64_MAX) ? UINT64_MAX : (timeout - elapsedNs);
 
         std::shared_ptr<FenceHolder> fenceToWait = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(m_semaphore_mutex);
-            for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
-                if (states[i] && states[i]->counter.load(std::memory_order_relaxed) < pWaitInfo->pValues[i]) {
-                    for (auto& ps : states[i]->pendingSignals) {
-                        if (ps.targetValue >= pWaitInfo->pValues[i]) {
-                            fenceToWait = ps.fenceHolder;
-                            break;
-                        }
-                    }
-                    if (fenceToWait) break;
-                    if (!states[i]->pendingSignals.empty()) {
-                        fenceToWait = states[i]->pendingSignals.back().fenceHolder;
+        for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; ++i) {
+            if (states[i] && states[i]->counter.load(std::memory_order_relaxed) < pWaitInfo->pValues[i]) {
+                std::lock_guard<std::mutex> sLock(states[i]->state_mutex);
+                for (auto& ps : states[i]->pendingSignals) {
+                    if (ps.targetValue >= pWaitInfo->pValues[i]) {
+                        fenceToWait = ps.fenceHolder;
                         break;
                     }
+                }
+                if (fenceToWait) break;
+                if (!states[i]->pendingSignals.empty()) {
+                    fenceToWait = states[i]->pendingSignals.back().fenceHolder;
+                    break;
                 }
             }
         }
@@ -556,7 +562,7 @@ bool TimelineSemaphoreModule::on_wait_semaphores(
                 return true;
             }
         } else {
-            std::unique_lock<std::mutex> lock(m_semaphore_mutex);
+            std::unique_lock<std::mutex> lock(m_wait_mutex);
             uint64_t waitSliceMs = std::min<uint64_t>(remainingTimeout / 1000000ULL, 2ULL);
             if (waitSliceMs == 0 && remainingTimeout > 0) waitSliceMs = 1;
             m_global_cv.wait_for(lock, std::chrono::milliseconds(waitSliceMs));
@@ -580,7 +586,7 @@ bool TimelineSemaphoreModule::on_signal_semaphore(
 
     std::shared_ptr<TimelineSemaphoreState> state;
     {
-        std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
         auto it = m_timeline_semaphores.find((uint64_t)(uintptr_t)pSignalInfo->semaphore);
         if (it != m_timeline_semaphores.end()) {
             state = it->second;
@@ -588,7 +594,7 @@ bool TimelineSemaphoreModule::on_signal_semaphore(
     }
 
     if (state) {
-        state->counter.store(pSignalInfo->value, std::memory_order_relaxed);
+        state->counter.store(pSignalInfo->value, std::memory_order_release);
         m_global_cv.notify_all();
         outResult = VK_SUCCESS;
         return true;
@@ -765,16 +771,18 @@ bool TimelineSemaphoreModule::on_queue_submit(
     outResult = real_fn(queue, submitCount, cleanSubmits.data(), fenceToSubmit);
     if (outResult == VK_SUCCESS) {
         if (!emulatedSignals.empty()) {
-            std::lock_guard<std::mutex> lock(m_semaphore_mutex);
+            std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
             bool updated = false;
             for (const auto& sig : emulatedSignals) {
                 auto it = m_timeline_semaphores.find((uint64_t)(uintptr_t)sig.semaphore);
                 if (it != m_timeline_semaphores.end()) {
+                    auto& state = it->second;
+                    std::lock_guard<std::mutex> sLock(state->state_mutex);
                     if (fenceHolder && fenceHolder->fence != VK_NULL_HANDLE) {
-                        it->second->pendingSignals.push_back({sig.targetValue, fenceHolder});
+                        state->pendingSignals.push_back({sig.targetValue, fenceHolder});
                     } else {
-                        if (sig.targetValue > it->second->counter.load(std::memory_order_relaxed)) {
-                            it->second->counter.store(sig.targetValue, std::memory_order_relaxed);
+                        if (sig.targetValue > state->counter.load(std::memory_order_relaxed)) {
+                            state->counter.store(sig.targetValue, std::memory_order_relaxed);
                             updated = true;
                         }
                     }

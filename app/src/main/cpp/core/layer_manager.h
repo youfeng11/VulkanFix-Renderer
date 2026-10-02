@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 #include <unordered_set>
 
@@ -108,7 +109,7 @@ public:
         if (__builtin_expect(device == m_primary_emulated_device.load(std::memory_order_relaxed), 1)) {
             return true;
         }
-        std::lock_guard<std::mutex> lock(m_state_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_state_rw_mutex);
         return m_emulated_devices.find((uint64_t)(uintptr_t)device) != m_emulated_devices.end();
     }
 
@@ -655,15 +656,15 @@ private:
     std::vector<std::unique_ptr<IVulkanLayerModule>> m_modules;
     std::recursive_mutex m_modules_mutex;
 
-    std::mutex m_proc_mutex;
+    std::shared_mutex m_proc_rw_mutex;
     std::atomic<bool> m_has_custom_procs{false};
     std::unordered_map<std::string, PFN_vkVoidFunction> m_custom_procs;
 
-    std::mutex m_state_mutex;
+    std::shared_mutex m_state_rw_mutex;
     std::unordered_set<uint64_t> m_emulated_devices;
     std::atomic<VkDevice> m_primary_emulated_device{VK_NULL_HANDLE};
 
-    std::mutex m_cmd_device_mutex;
+    std::shared_mutex m_cmd_device_rw_mutex;
     std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
     std::unordered_map<uint64_t, VkDevice> m_queue_devices;
     std::unordered_map<uint64_t, std::pair<VkQueue, uint32_t>> m_device_queues;
@@ -674,7 +675,7 @@ private:
     DeviceDispatchTable m_primary_table{};
     std::atomic<bool> m_has_primary_table{false};
 
-    std::mutex m_table_mutex;
+    std::shared_mutex m_table_rw_mutex;
     std::unordered_map<uint64_t, DeviceDispatchTable> m_device_tables;
 
     IVulkanLayerModule* m_divisor_mod = nullptr;

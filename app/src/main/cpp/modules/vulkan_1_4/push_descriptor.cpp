@@ -12,15 +12,18 @@ PushDescriptorModule::PushDescriptorModule() {
 }
 
 bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_phys_native_support.find((uint64_t)(uintptr_t)physDev);
-    if (it != m_phys_native_support.end()) {
-        return it->second;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+        auto it = m_phys_native_support.find((uint64_t)(uintptr_t)physDev);
+        if (it != m_phys_native_support.end()) {
+            return it->second;
+        }
     }
 
     const char* force_emu = getenv("FORCE_EMULATE_PUSH_DESCRIPTOR");
     if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
         LOGI("FORCE_EMULATE_PUSH_DESCRIPTOR set, enabling emulation for physical device %p", physDev);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
         return false;
     }
@@ -43,7 +46,10 @@ bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
         }
     }
 
-    m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
+    {
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
+    }
     if (!native) {
         LOGI("Physical device %p lacks native VK_KHR_push_descriptor, enabling emulation layer!", physDev);
     } else {
@@ -59,7 +65,7 @@ bool PushDescriptorModule::is_device_native(VkDevice device) {
     if (__builtin_expect(device == m_primary_dev.load(std::memory_order_relaxed), 1)) {
         return m_primary_native.load(std::memory_order_relaxed);
     }
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_device_native_support.find((uint64_t)(uintptr_t)device);
     if (it != m_device_native_support.end()) {
         return it->second;
@@ -137,7 +143,7 @@ void PushDescriptorModule::on_post_create_device(
 ) {
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
         bool native = is_phys_device_native(physicalDevice);
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
         if (m_primary_dev.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
             m_primary_native.store(native, std::memory_order_relaxed);
@@ -152,7 +158,8 @@ void PushDescriptorModule::on_destroy_device(VkDevice device) {
         m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_relaxed);
         m_primary_native.store(false, std::memory_order_relaxed);
     }
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> rw_lock(m_rw_mutex);
+    std::lock_guard<std::mutex> cmd_lock(m_cmd_mutex);
     m_device_native_support.erase((uint64_t)(uintptr_t)device);
 
     PFN_vkDestroyDescriptorPool real_destroy_pool = (PFN_vkDestroyDescriptorPool)
@@ -196,7 +203,7 @@ void PushDescriptorModule::on_post_create_descriptor_set_layout(
 
     if (result == VK_SUCCESS && pCreateInfo && setLayout != VK_NULL_HANDLE) {
         if (pCreateInfo->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR) {
-            std::lock_guard<std::mutex> lock(m_mutex);
+            std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
             m_push_layouts.insert((uint64_t)(uintptr_t)setLayout);
             LOGI("PushDescriptor: registered push descriptor layout %p", (void*)(uintptr_t)setLayout);
         }
@@ -207,7 +214,7 @@ void PushDescriptorModule::on_destroy_descriptor_set_layout(
     VkDevice device,
     VkDescriptorSetLayout setLayout
 ) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_push_layouts.erase((uint64_t)(uintptr_t)setLayout);
 }
 
@@ -218,7 +225,7 @@ void PushDescriptorModule::on_post_create_pipeline_layout(
     VkPipelineLayout pipelineLayout
 ) {
     if (result == VK_SUCCESS && pCreateInfo && pipelineLayout != VK_NULL_HANDLE) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         std::vector<VkDescriptorSetLayout> layouts;
         if (pCreateInfo->setLayoutCount > 0 && pCreateInfo->pSetLayouts != NULL) {
             layouts.assign(pCreateInfo->pSetLayouts, pCreateInfo->pSetLayouts + pCreateInfo->setLayoutCount);
@@ -231,7 +238,7 @@ void PushDescriptorModule::on_destroy_pipeline_layout(
     VkDevice device,
     VkPipelineLayout pipelineLayout
 ) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_pipeline_layouts.erase((uint64_t)(uintptr_t)pipelineLayout);
 }
 
@@ -242,7 +249,7 @@ void PushDescriptorModule::on_post_allocate_command_buffers(
     VkCommandBuffer* pCommandBuffers
 ) {
     if (result == VK_SUCCESS && pAllocateInfo && pCommandBuffers) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> lock(m_cmd_mutex);
         for (uint32_t i = 0; i < pAllocateInfo->commandBufferCount; ++i) {
             m_cmd_states[(uint64_t)(uintptr_t)pCommandBuffers[i]].device = device;
         }
@@ -254,7 +261,7 @@ void PushDescriptorModule::on_free_command_buffers(
     uint32_t count,
     const VkCommandBuffer* pCommandBuffers
 ) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     PFN_vkDestroyDescriptorPool real_destroy_pool = (PFN_vkDestroyDescriptorPool)
         get_real_proc(get_last_instance(), device, "vkDestroyDescriptorPool");
 
@@ -286,7 +293,7 @@ void PushDescriptorModule::on_reset_command_buffer(
 }
 
 void PushDescriptorModule::reset_cmd_pools(VkCommandBuffer cmd) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     auto it = m_cmd_states.find((uint64_t)(uintptr_t)cmd);
     if (it == m_cmd_states.end()) return;
 
@@ -318,7 +325,7 @@ VkDevice PushDescriptorModule::get_device_for_cmd(VkCommandBuffer cmd) {
 }
 
 VkDescriptorSetLayout PushDescriptorModule::get_set_layout(VkPipelineLayout layout, uint32_t set) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_pipeline_layouts.find((uint64_t)(uintptr_t)layout);
     if (it != m_pipeline_layouts.end()) {
         if (set < it->second.size()) {
@@ -362,7 +369,7 @@ VkDescriptorPool PushDescriptorModule::create_pool(VkDevice device, uint32_t max
 }
 
 VkDescriptorSet PushDescriptorModule::allocate_push_set(VkDevice device, VkCommandBuffer cmd, VkDescriptorSetLayout setLayout) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     CmdPushState& state = m_cmd_states[(uint64_t)(uintptr_t)cmd];
     state.device = device;
 

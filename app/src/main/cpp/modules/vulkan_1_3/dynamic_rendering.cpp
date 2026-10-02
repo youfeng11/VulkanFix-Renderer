@@ -115,15 +115,18 @@ DynamicRenderingModule::DynamicRenderingModule() {
 }
 
 bool DynamicRenderingModule::is_phys_device_native(VkPhysicalDevice physDev) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_phys_native_support.find((uint64_t)(uintptr_t)physDev);
-    if (it != m_phys_native_support.end()) {
-        return it->second;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+        auto it = m_phys_native_support.find((uint64_t)(uintptr_t)physDev);
+        if (it != m_phys_native_support.end()) {
+            return it->second;
+        }
     }
 
     const char* force_emu = getenv("FORCE_EMULATE_DYNAMIC_RENDERING");
     if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
         LOGI("FORCE_EMULATE_DYNAMIC_RENDERING set, enabling emulation for physical device %p", physDev);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
         return false;
     }
@@ -146,6 +149,7 @@ bool DynamicRenderingModule::is_phys_device_native(VkPhysicalDevice physDev) {
         }
     }
 
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
     if (!native) {
         LOGI("Physical device %p lacks native VK_KHR_dynamic_rendering, enabling emulation layer!", physDev);
@@ -162,7 +166,7 @@ bool DynamicRenderingModule::is_device_native(VkDevice device) {
     if (__builtin_expect(device == m_primary_dev.load(std::memory_order_relaxed), 1)) {
         return m_primary_native.load(std::memory_order_relaxed);
     }
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_device_native_support.find((uint64_t)(uintptr_t)device);
     if (it != m_device_native_support.end()) {
         return it->second;
@@ -175,7 +179,7 @@ VkDevice DynamicRenderingModule::get_device_for_cmd(VkCommandBuffer cmd) {
 }
 
 DynamicRenderingModule::ImageViewMeta DynamicRenderingModule::get_image_view_meta(VkImageView view) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_image_views.find((uint64_t)(uintptr_t)view);
     if (it != m_image_views.end()) {
         return it->second;
@@ -184,7 +188,7 @@ DynamicRenderingModule::ImageViewMeta DynamicRenderingModule::get_image_view_met
 }
 
 VkFormat DynamicRenderingModule::get_image_view_format(VkImageView view) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_image_views.find((uint64_t)(uintptr_t)view);
     if (it != m_image_views.end() && it->second.format != VK_FORMAT_UNDEFINED) {
         return it->second.format;
@@ -193,7 +197,7 @@ VkFormat DynamicRenderingModule::get_image_view_format(VkImageView view) {
 }
 
 VkSampleCountFlagBits DynamicRenderingModule::get_image_view_samples(VkImageView view) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_image_views.find((uint64_t)(uintptr_t)view);
     if (it != m_image_views.end()) {
         return it->second.samples;
@@ -202,7 +206,7 @@ VkSampleCountFlagBits DynamicRenderingModule::get_image_view_samples(VkImageView
 }
 
 VkExtent2D DynamicRenderingModule::get_image_view_extent(VkImageView view) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_image_views.find((uint64_t)(uintptr_t)view);
     if (it != m_image_views.end()) {
         return it->second.extent;
@@ -308,7 +312,7 @@ void DynamicRenderingModule::on_post_create_device(
 ) {
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
         bool native = is_phys_device_native(physicalDevice);
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
         if (m_primary_dev.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
             m_primary_native.store(native, std::memory_order_relaxed);
@@ -323,7 +327,7 @@ void DynamicRenderingModule::on_destroy_device(VkDevice device) {
         m_primary_native.store(false, std::memory_order_relaxed);
     }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
 
     PFN_vkDestroyFramebuffer real_destroy_fb = (PFN_vkDestroyFramebuffer)
         get_real_proc(get_last_instance(), device, "vkDestroyFramebuffer");
@@ -387,10 +391,12 @@ VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     key.samples = samples;
     key.viewMask = viewMask;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_pipeline_rp_cache.find(key);
-    if (it != m_pipeline_rp_cache.end()) {
-        return it->second;
+    {
+        std::shared_lock<std::shared_mutex> readLock(m_rw_mutex);
+        auto it = m_pipeline_rp_cache.find(key);
+        if (it != m_pipeline_rp_cache.end()) {
+            return it->second;
+        }
     }
 
     std::vector<VkAttachmentDescription> attachments;
@@ -464,6 +470,7 @@ VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     VkRenderPass rp = VK_NULL_HANDLE;
     VkResult res = real_create_rp(device, &rpInfo, NULL, &rp);
     if (res == VK_SUCCESS && rp != VK_NULL_HANDLE) {
+        std::unique_lock<std::shared_mutex> writeLock(m_rw_mutex);
         m_pipeline_rp_cache[key] = rp;
         m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(rp);
         LOGI("Created cached pipeline compatible renderPass %p", (void*)(uintptr_t)rp);
@@ -522,7 +529,7 @@ void DynamicRenderingModule::on_post_allocate_command_buffers(
     VkCommandBuffer* pCommandBuffers
 ) {
     if (result == VK_SUCCESS && pAllocateInfo && pCommandBuffers) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> lock(m_cmd_mutex);
         for (uint32_t i = 0; i < pAllocateInfo->commandBufferCount; ++i) {
             m_cmd_devices[(uint64_t)(uintptr_t)pCommandBuffers[i]] = device;
         }
@@ -534,7 +541,7 @@ void DynamicRenderingModule::on_free_command_buffers(
     uint32_t count,
     const VkCommandBuffer* pCommandBuffers
 ) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     for (uint32_t i = 0; i < count; ++i) {
         m_cmd_devices.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
         m_cmd_rendering_states.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
@@ -545,7 +552,7 @@ void DynamicRenderingModule::on_begin_command_buffer(
     VkCommandBuffer commandBuffer,
     const VkCommandBufferBeginInfo* pBeginInfo
 ) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     m_cmd_rendering_states.erase((uint64_t)(uintptr_t)commandBuffer);
 }
 
@@ -553,7 +560,7 @@ void DynamicRenderingModule::on_reset_command_buffer(
     VkCommandBuffer commandBuffer,
     VkCommandBufferResetFlags flags
 ) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     m_cmd_rendering_states.erase((uint64_t)(uintptr_t)commandBuffer);
 }
 
@@ -608,7 +615,7 @@ void DynamicRenderingModule::on_post_create_image(
     VkImage image
 ) {
     if (result == VK_SUCCESS && pCreateInfo && image != VK_NULL_HANDLE) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         ImageMeta meta;
         meta.format = pCreateInfo->format;
         meta.samples = pCreateInfo->samples;
@@ -622,7 +629,7 @@ void DynamicRenderingModule::on_destroy_image(
     VkDevice device,
     VkImage image
 ) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_images.erase((uint64_t)(uintptr_t)image);
 }
 
@@ -633,7 +640,7 @@ void DynamicRenderingModule::on_post_create_image_view(
     VkImageView imageView
 ) {
     if (result == VK_SUCCESS && pCreateInfo && imageView != VK_NULL_HANDLE) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         ImageViewMeta meta;
         meta.format = pCreateInfo->format;
         meta.image = pCreateInfo->image;
@@ -657,7 +664,7 @@ void DynamicRenderingModule::on_destroy_image_view(
     VkDevice device,
     VkImageView imageView
 ) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_image_views.erase((uint64_t)(uintptr_t)imageView);
 
     PFN_vkDestroyFramebuffer real_destroy_fb = (PFN_vkDestroyFramebuffer)
@@ -729,8 +736,8 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         resolveRefs.reserve(colorCount);
     }
 
-    // Acquire lock once for view metadata and cache lookups
-    std::unique_lock<std::mutex> lock(m_mutex);
+    // Acquire lock once for view metadata and cache lookups (concurrent multi-thread read)
+    std::shared_lock<std::shared_mutex> readLock(m_rw_mutex);
 
     // 1. Color Attachments
     for (uint32_t i = 0; i < colorCount; ++i) {
@@ -958,14 +965,17 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
 
     // Fast-path: both renderPass and framebuffer already cached (common runtime hot path)
     if (__builtin_expect(renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE, 1)) {
-        CmdRenderingState& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
-        state.device = device;
-        state.is_rendering = true;
-        state.activeRenderPass = renderPass;
-        state.activeFramebuffer = framebuffer;
+        // Release read lock before proceeding
+        readLock.unlock();
 
-        // Release lock before issuing Vulkan driver command
-        lock.unlock();
+        {
+            std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
+            CmdRenderingState& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
+            state.device = device;
+            state.is_rendering = true;
+            state.activeRenderPass = renderPass;
+            state.activeFramebuffer = framebuffer;
+        }
 
         VkRenderPassBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -992,8 +1002,8 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         return true;
     }
 
-    // Cold path: unlock before calling Vulkan driver creation APIs
-    lock.unlock();
+    // Cold path: unlock read lock before calling Vulkan driver creation APIs
+    readLock.unlock();
 
     if (renderPass == VK_NULL_HANDLE) {
         VkSubpassDescription subpass{};
@@ -1020,10 +1030,18 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             return false;
         }
 
-        lock.lock();
-        m_dynamic_rp_cache[rpKey] = renderPass;
-        m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(renderPass);
-        lock.unlock();
+        {
+            std::unique_lock<std::shared_mutex> writeLock(m_rw_mutex);
+            auto [it, inserted] = m_dynamic_rp_cache.emplace(rpKey, renderPass);
+            if (!inserted) {
+                PFN_vkDestroyRenderPass real_destroy_rp = (PFN_vkDestroyRenderPass)
+                    get_real_proc(get_last_instance(), device, "vkDestroyRenderPass");
+                if (real_destroy_rp) real_destroy_rp(device, renderPass, NULL);
+                renderPass = it->second;
+            } else {
+                m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(renderPass);
+            }
+        }
         LOG_OPT_DEBUG("DynamicRendering: created dynamic renderPass %p", (void*)(uintptr_t)renderPass);
     }
 
@@ -1034,12 +1052,13 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         fbKey.height = fb_h;
         fbKey.layers = fb_layers;
 
-        lock.lock();
-        auto it = m_framebuffer_cache.find(fbKey);
-        if (it != m_framebuffer_cache.end()) {
-            framebuffer = it->second;
+        {
+            std::shared_lock<std::shared_mutex> checkLock(m_rw_mutex);
+            auto it = m_framebuffer_cache.find(fbKey);
+            if (it != m_framebuffer_cache.end()) {
+                framebuffer = it->second;
+            }
         }
-        lock.unlock();
 
         if (framebuffer == VK_NULL_HANDLE) {
             VkFramebufferCreateInfo fbInfo{};
@@ -1061,10 +1080,18 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                 return false;
             }
 
-            lock.lock();
-            m_framebuffer_cache[fbKey] = framebuffer;
-            m_device_resources[(uint64_t)(uintptr_t)device].framebuffers.push_back(framebuffer);
-            lock.unlock();
+            {
+                std::unique_lock<std::shared_mutex> writeLock(m_rw_mutex);
+                auto [it, inserted] = m_framebuffer_cache.emplace(fbKey, framebuffer);
+                if (!inserted) {
+                    PFN_vkDestroyFramebuffer real_destroy_fb = (PFN_vkDestroyFramebuffer)
+                        get_real_proc(get_last_instance(), device, "vkDestroyFramebuffer");
+                    if (real_destroy_fb) real_destroy_fb(device, framebuffer, NULL);
+                    framebuffer = it->second;
+                } else {
+                    m_device_resources[(uint64_t)(uintptr_t)device].framebuffers.push_back(framebuffer);
+                }
+            }
             LOG_OPT_DEBUG("DynamicRendering: created framebuffer %p (%ux%u)", (void*)(uintptr_t)framebuffer, fb_w, fb_h);
         }
     }
@@ -1092,7 +1119,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     }
 
     {
-        std::lock_guard<std::mutex> finalLock(m_mutex);
+        std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
         CmdRenderingState& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
         state.device = device;
         state.is_rendering = true;
@@ -1120,7 +1147,7 @@ bool DynamicRenderingModule::on_cmd_end_rendering(VkCommandBuffer commandBuffer)
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
         auto it = m_cmd_rendering_states.find((uint64_t)(uintptr_t)commandBuffer);
         if (it != m_cmd_rendering_states.end()) {
             it->second.is_rendering = false;

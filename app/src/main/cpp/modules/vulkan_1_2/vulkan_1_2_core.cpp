@@ -41,10 +41,12 @@ Vulkan12CoreModule::Vulkan12CoreModule() {
 }
 
 bool Vulkan12CoreModule::is_phys_device_native(VkPhysicalDevice physDev) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_phys_native_support.find((uint64_t)(uintptr_t)physDev);
-    if (it != m_phys_native_support.end()) {
-        return it->second;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+        auto it = m_phys_native_support.find((uint64_t)(uintptr_t)physDev);
+        if (it != m_phys_native_support.end()) {
+            return it->second;
+        }
     }
 
     uint32_t realApiVer = VK_API_VERSION_1_0;
@@ -55,17 +57,22 @@ bool Vulkan12CoreModule::is_phys_device_native(VkPhysicalDevice physDev) {
         real_props(physDev, &props);
         realApiVer = props.apiVersion;
     }
-    m_phys_real_api_version[(uint64_t)(uintptr_t)physDev] = realApiVer;
 
     const char* force_emu = getenv("FORCE_EMULATE_VULKAN_1_2");
     if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
         LOGI("FORCE_EMULATE_VULKAN_1_2 set, enabling emulation for physical device %p (real api: 0x%x)", physDev, realApiVer);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+        m_phys_real_api_version[(uint64_t)(uintptr_t)physDev] = realApiVer;
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
         return false;
     }
 
     bool native = (realApiVer >= VK_API_VERSION_1_2);
-    m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
+    {
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+        m_phys_real_api_version[(uint64_t)(uintptr_t)physDev] = realApiVer;
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
+    }
     if (!native) {
         LOGI("Physical device %p lacks native Vulkan 1.2 support (native api: 0x%x), enabling Vulkan 1.2 emulation layer!", physDev, realApiVer);
     } else {
@@ -76,16 +83,19 @@ bool Vulkan12CoreModule::is_phys_device_native(VkPhysicalDevice physDev) {
 
 uint32_t Vulkan12CoreModule::get_phys_real_api_version(VkPhysicalDevice physDev) {
     if (!physDev) return VK_API_VERSION_1_0;
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_phys_real_api_version.find((uint64_t)(uintptr_t)physDev);
-    if (it != m_phys_real_api_version.end()) {
-        return it->second;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+        auto it = m_phys_real_api_version.find((uint64_t)(uintptr_t)physDev);
+        if (it != m_phys_real_api_version.end()) {
+            return it->second;
+        }
     }
     PFN_vkGetPhysicalDeviceProperties real_props =
         (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
     if (real_props) {
         VkPhysicalDeviceProperties props{};
         real_props(physDev, &props);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_phys_real_api_version[(uint64_t)(uintptr_t)physDev] = props.apiVersion;
         return props.apiVersion;
     }
@@ -94,7 +104,10 @@ uint32_t Vulkan12CoreModule::get_phys_real_api_version(VkPhysicalDevice physDev)
 
 bool Vulkan12CoreModule::is_device_native(VkDevice device) {
     if (!device) return false;
-    std::lock_guard<std::mutex> lock(m_mutex);
+    if (__builtin_expect(device == m_primary_dev.load(std::memory_order_relaxed), 1)) {
+        return m_primary_native.load(std::memory_order_relaxed);
+    }
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_device_needs_emulation.find((uint64_t)(uintptr_t)device);
     if (it != m_device_needs_emulation.end()) {
         return !it->second;
@@ -475,8 +488,14 @@ void Vulkan12CoreModule::on_post_create_device(
 ) {
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
         bool native = is_phys_device_native(physicalDevice);
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_device_needs_emulation[(uint64_t)(uintptr_t)device] = !native;
+        {
+            std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+            m_device_needs_emulation[(uint64_t)(uintptr_t)device] = !native;
+            if (m_primary_dev.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
+                m_primary_native.store(native, std::memory_order_relaxed);
+                m_primary_dev.store(device, std::memory_order_release);
+            }
+        }
         LOGI("Device %p created: Vulkan 1.2 core native=%d", device, native);
     }
 
@@ -486,7 +505,11 @@ void Vulkan12CoreModule::on_post_create_device(
 }
 
 void Vulkan12CoreModule::on_destroy_device(VkDevice device) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_primary_dev.load(std::memory_order_relaxed) == device) {
+        m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_relaxed);
+        m_primary_native.store(false, std::memory_order_relaxed);
+    }
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
 }
 

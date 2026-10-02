@@ -13,15 +13,21 @@ VertexAttributeDivisorModule::VertexAttributeDivisorModule() {
 }
 
 VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe_phys_device(VkPhysicalDevice physDev) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_phys_devices.find((uint64_t)(uintptr_t)physDev);
-    if (it != m_phys_devices.end() && it->second.probed) {
-        return it->second;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+        auto it = m_phys_devices.find((uint64_t)(uintptr_t)physDev);
+        if (it != m_phys_devices.end() && it->second.probed) {
+            return it->second;
+        }
     }
 
     PhysDeviceInfo info{};
-    if (it != m_phys_devices.end()) {
-        info = it->second;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+        auto it = m_phys_devices.find((uint64_t)(uintptr_t)physDev);
+        if (it != m_phys_devices.end()) {
+            info = it->second;
+        }
     }
 
     // 1. Probe native device extensions if not already known
@@ -77,7 +83,10 @@ VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe
     }
 
     info.probed = true;
-    m_phys_devices[(uint64_t)(uintptr_t)physDev] = info;
+    {
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+        m_phys_devices[(uint64_t)(uintptr_t)physDev] = info;
+    }
 
     LOGI("Physical device %p: native EXT=%d, native KHR=%d, native rateDivisor=%d, native zeroDivisor=%d",
          physDev, info.native_has_ext, info.native_has_khr, info.native_has_rate_divisor, info.native_has_zero_divisor);
@@ -86,7 +95,7 @@ VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe
 }
 
 bool VertexAttributeDivisorModule::is_device_native(VkDevice device) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_device_needs_emulation.find((uint64_t)(uintptr_t)device);
     if (it != m_device_needs_emulation.end()) {
         return !it->second;
@@ -95,7 +104,9 @@ bool VertexAttributeDivisorModule::is_device_native(VkDevice device) {
 }
 
 VkDevice VertexAttributeDivisorModule::get_device_for_cmd(VkCommandBuffer cmd) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    VkDevice dev = LayerManager::get().get_device_for_cmd(cmd);
+    if (dev != VK_NULL_HANDLE) return dev;
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     auto it = m_cmd_devices.find((uint64_t)(uintptr_t)cmd);
     if (it != m_cmd_devices.end()) {
         return it->second;
@@ -110,7 +121,7 @@ VertexAttributeDivisorModule::CmdBufferState* VertexAttributeDivisorModule::get_
         return s_cached_state;
     }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     auto it = m_cmd_states.find((uint64_t)(uintptr_t)cmd);
     if (it != m_cmd_states.end()) {
         s_cached_cmd = cmd;
@@ -134,7 +145,7 @@ void VertexAttributeDivisorModule::on_enumerate_device_extensions(
 
     // Save native driver extension presence
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         auto& info = m_phys_devices[(uint64_t)(uintptr_t)physicalDevice];
         info.native_has_ext = has_ext;
         info.native_has_khr = has_khr;
@@ -366,7 +377,7 @@ void VertexAttributeDivisorModule::on_post_create_device(
                           (!info.native_has_ext && !info.native_has_khr));
 
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
+            std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
             m_device_needs_emulation[(uint64_t)(uintptr_t)device] = needs_emu;
             m_last_device = device;
         }
@@ -377,14 +388,19 @@ void VertexAttributeDivisorModule::on_post_create_device(
 }
 
 void VertexAttributeDivisorModule::on_destroy_device(VkDevice device) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
-    for (auto it = m_cmd_devices.begin(); it != m_cmd_devices.end(); ) {
-        if (it->second == device) {
-            m_cmd_states.erase(it->first);
-            it = m_cmd_devices.erase(it);
-        } else {
-            ++it;
+    {
+        std::unique_lock<std::shared_mutex> rw_lock(m_rw_mutex);
+        m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
+    }
+    {
+        std::lock_guard<std::mutex> cmd_lock(m_cmd_mutex);
+        for (auto it = m_cmd_devices.begin(); it != m_cmd_devices.end(); ) {
+            if (it->second == device) {
+                m_cmd_states.erase(it->first);
+                it = m_cmd_devices.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
     if (m_last_device.load() == device) {
@@ -490,7 +506,7 @@ void VertexAttributeDivisorModule::on_modify_pipeline_create_info(
     createInfo.pVertexInputState = &viState;
 
     // Save pending info
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_pending_divisors[&createInfo][index] = info;
 }
 
@@ -502,7 +518,7 @@ void VertexAttributeDivisorModule::on_post_create_graphics_pipelines(
 ) {
     if (is_device_native(device) || !pCreateInfos || !pPipelines || count == 0) return;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_pending_divisors.find(pCreateInfos);
     if (it == m_pending_divisors.end()) return;
 
@@ -527,7 +543,7 @@ void VertexAttributeDivisorModule::on_destroy_pipeline(
 ) {
     if (pipeline == VK_NULL_HANDLE) return;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_pipeline_divisors.erase((uint64_t)(uintptr_t)pipeline);
 }
 
@@ -538,7 +554,7 @@ void VertexAttributeDivisorModule::on_post_allocate_command_buffers(
     VkCommandBuffer* pCommandBuffers
 ) {
     if (result == VK_SUCCESS && pAllocateInfo && pCommandBuffers) {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> lock(m_cmd_mutex);
         for (uint32_t i = 0; i < pAllocateInfo->commandBufferCount; i++) {
             m_cmd_devices[(uint64_t)(uintptr_t)pCommandBuffers[i]] = device;
         }
@@ -552,7 +568,7 @@ void VertexAttributeDivisorModule::on_free_command_buffers(
 ) {
     if (!pCommandBuffers) return;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     for (uint32_t i = 0; i < count; i++) {
         m_cmd_devices.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
         m_cmd_states.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
@@ -563,7 +579,7 @@ void VertexAttributeDivisorModule::on_reset_command_buffer(
     VkCommandBuffer commandBuffer,
     VkCommandBufferResetFlags flags
 ) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
     auto it = m_cmd_states.find((uint64_t)(uintptr_t)commandBuffer);
     if (it != m_cmd_states.end()) {
         it->second->current_pipeline = VK_NULL_HANDLE;
@@ -591,7 +607,7 @@ void VertexAttributeDivisorModule::on_cmd_bind_pipeline(
         return;
     }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_pipeline_divisors.find((uint64_t)(uintptr_t)pipeline);
     if (it != m_pipeline_divisors.end()) {
         state->active_divisor_info = it->second;

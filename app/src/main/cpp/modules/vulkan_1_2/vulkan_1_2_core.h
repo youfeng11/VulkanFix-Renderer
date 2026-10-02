@@ -3,6 +3,8 @@
 
 #include "layer_module.h"
 #include <mutex>
+#include <shared_mutex>
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 
@@ -62,7 +64,9 @@ public:
     uint32_t get_phys_real_api_version(VkPhysicalDevice physDev);
 
 private:
-    std::mutex m_mutex;
+    mutable std::shared_mutex m_rw_mutex;
+    std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
+    std::atomic<bool> m_primary_native{false};
     std::unordered_map<uint64_t, bool> m_phys_native_support;
     std::unordered_map<uint64_t, uint32_t> m_phys_real_api_version;
     std::unordered_map<uint64_t, bool> m_device_needs_emulation;

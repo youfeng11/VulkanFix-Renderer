@@ -3,6 +3,7 @@
 
 #include "extension_module_base.h"
 #include <mutex>
+#include <shared_mutex>
 #include <condition_variable>
 #include <unordered_map>
 #include <atomic>
@@ -115,15 +116,17 @@ private:
 
     struct TimelineSemaphoreState {
         std::atomic<uint64_t> counter{0};
+        std::mutex state_mutex;
         std::vector<PendingSignal> pendingSignals;
     };
 
-    void check_pending_signals_locked(std::shared_ptr<TimelineSemaphoreState>& state);
+    void check_pending_signals(std::shared_ptr<TimelineSemaphoreState>& state);
 
     VkFence acquire_internal_fence(VkDevice device);
     void release_internal_fence(VkDevice device, VkFence fence);
 
-    std::mutex m_semaphore_mutex;
+    mutable std::shared_mutex m_table_rw_mutex;
+    std::mutex m_wait_mutex;
     std::condition_variable m_global_cv;
     std::atomic<uint32_t> m_active_timeline_count{0};
     std::unordered_map<uint64_t, std::shared_ptr<TimelineSemaphoreState>> m_timeline_semaphores;

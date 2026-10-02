@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 #include <vector>
 #include <cstring>
@@ -28,14 +29,19 @@ public:
     uint32_t get_spec_version() const { return m_spec_version; }
 
     virtual bool is_phys_device_native(VkPhysicalDevice physDev) {
-        std::lock_guard<std::mutex> lock(m_ext_mutex);
-        auto it = m_phys_native.find((uint64_t)(uintptr_t)physDev);
-        if (it != m_phys_native.end()) {
-            return it->second;
+        {
+            std::shared_lock<std::shared_mutex> lock(m_ext_mutex);
+            auto it = m_phys_native.find((uint64_t)(uintptr_t)physDev);
+            if (it != m_phys_native.end()) {
+                return it->second;
+            }
         }
 
         bool native = query_native_support(physDev);
-        m_phys_native[(uint64_t)(uintptr_t)physDev] = native;
+        {
+            std::unique_lock<std::shared_mutex> lock(m_ext_mutex);
+            m_phys_native[(uint64_t)(uintptr_t)physDev] = native;
+        }
         if (!native) {
             LOGI("[%s] Device %p lacks native support, enabling emulation!", m_extension_name.c_str(), physDev);
         } else {
@@ -49,7 +55,7 @@ public:
         if (device == m_cached_device.load(std::memory_order_relaxed)) {
             return m_cached_device_native.load(std::memory_order_relaxed);
         }
-        std::lock_guard<std::mutex> lock(m_ext_mutex);
+        std::shared_lock<std::shared_mutex> lock(m_ext_mutex);
         auto it = m_device_native.find((uint64_t)(uintptr_t)device);
         if (it != m_device_native.end()) {
             m_cached_device.store(device, std::memory_order_relaxed);
@@ -109,7 +115,7 @@ public:
     ) override {
         if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
             bool native = is_phys_device_native(physicalDevice);
-            std::lock_guard<std::mutex> lock(m_ext_mutex);
+            std::unique_lock<std::shared_mutex> lock(m_ext_mutex);
             m_device_native[(uint64_t)(uintptr_t)device] = native;
             m_cached_device.store(device, std::memory_order_relaxed);
             m_cached_device_native.store(native, std::memory_order_relaxed);
@@ -117,7 +123,7 @@ public:
     }
 
     void on_destroy_device(VkDevice device) override {
-        std::lock_guard<std::mutex> lock(m_ext_mutex);
+        std::unique_lock<std::shared_mutex> lock(m_ext_mutex);
         m_device_native.erase((uint64_t)(uintptr_t)device);
         if (m_cached_device.load(std::memory_order_relaxed) == device) {
             m_cached_device.store(VK_NULL_HANDLE, std::memory_order_relaxed);
@@ -167,7 +173,7 @@ protected:
     uint32_t m_spec_version;
     uint32_t m_promoted_version{0};
 
-    std::mutex m_ext_mutex;
+    mutable std::shared_mutex m_ext_mutex;
     std::unordered_map<uint64_t, bool> m_phys_native;
     std::unordered_map<uint64_t, bool> m_device_native;
 

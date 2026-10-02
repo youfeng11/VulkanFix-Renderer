@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 #include <mutex>
+#include <shared_mutex>
 #include <memory>
 #include <atomic>
 
@@ -224,7 +225,8 @@ private:
     CmdBufferState* get_or_create_cmd_state(VkCommandBuffer cmd);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
 
-    std::mutex m_mutex;
+    mutable std::shared_mutex m_rw_mutex;
+    std::mutex m_cmd_mutex;
     std::unordered_map<uint64_t, PhysDeviceInfo> m_phys_devices;
     std::unordered_map<uint64_t, bool> m_device_needs_emulation;
     std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
