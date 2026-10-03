@@ -439,6 +439,18 @@ public:
         const VkEvent* pEvents,
         const VkDependencyInfo* pDependencyInfos);
 
+    void dispatch_cmd_pipeline_barrier(
+        VkCommandBuffer commandBuffer,
+        VkPipelineStageFlags srcStageMask,
+        VkPipelineStageFlags dstStageMask,
+        VkDependencyFlags dependencyFlags,
+        uint32_t memoryBarrierCount,
+        const VkMemoryBarrier* pMemoryBarriers,
+        uint32_t bufferMemoryBarrierCount,
+        const VkBufferMemoryBarrier* pBufferMemoryBarriers,
+        uint32_t imageMemoryBarrierCount,
+        const VkImageMemoryBarrier* pImageMemoryBarriers);
+
     void dispatch_cmd_pipeline_barrier2(
         VkCommandBuffer commandBuffer,
         const VkDependencyInfo* pDependencyInfo);

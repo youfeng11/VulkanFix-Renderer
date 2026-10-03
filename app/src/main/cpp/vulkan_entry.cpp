@@ -570,6 +570,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCmdBeginRenderingKHR);
             MATCH(vkCmdEndRendering);
             MATCH(vkCmdEndRenderingKHR);
+            MATCH(vkCmdPipelineBarrier);
             MATCH(vkCmdPipelineBarrier2);
             MATCH(vkCmdPipelineBarrier2KHR);
             MATCH(vkCmdDrawIndexedIndirect);
@@ -1137,6 +1138,31 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdWaitEvents2KHR(
     const VkDependencyInfo* pDependencyInfos
 ) {
     LayerManager::get().dispatch_cmd_wait_events2(commandBuffer, eventCount, pEvents, pDependencyInfos);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdPipelineBarrier(
+    VkCommandBuffer commandBuffer,
+    VkPipelineStageFlags srcStageMask,
+    VkPipelineStageFlags dstStageMask,
+    VkDependencyFlags dependencyFlags,
+    uint32_t memoryBarrierCount,
+    const VkMemoryBarrier* pMemoryBarriers,
+    uint32_t bufferMemoryBarrierCount,
+    const VkBufferMemoryBarrier* pBufferMemoryBarriers,
+    uint32_t imageMemoryBarrierCount,
+    const VkImageMemoryBarrier* pImageMemoryBarriers
+) {
+    LayerManager::get().dispatch_cmd_pipeline_barrier(
+        commandBuffer,
+        srcStageMask,
+        dstStageMask,
+        dependencyFlags,
+        memoryBarrierCount,
+        pMemoryBarriers,
+        bufferMemoryBarrierCount,
+        pBufferMemoryBarriers,
+        imageMemoryBarrierCount,
+        pImageMemoryBarriers);
 }
 
 VK_LAYER_EXPORT void VKAPI_CALL vkCmdPipelineBarrier2(

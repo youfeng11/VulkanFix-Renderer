@@ -1,6 +1,7 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "pipeline_cache_manager.h"
+#include "tbdr_barrier_optimizer.h"
 
 LayerManager& LayerManager::get() {
     static LayerManager s_instance;
@@ -375,10 +376,20 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
                 return false; // Direct bypass! Driver native!
             }
         }
+        // Pipeline barriers are intercepted for TBDR Tile flush optimization when optimizer is active
+        if (!TBDRBarrierOptimizer::get().is_enabled()) {
+            if (strcmp(cmd, "PipelineBarrier") == 0) {
+                return false;
+            }
+        }
         if (flags.bypass_sync2) {
-            if (strcmp(cmd, "PipelineBarrier2") == 0 ||
-                strcmp(cmd, "PipelineBarrier2KHR") == 0 ||
-                strcmp(cmd, "SetEvent2") == 0 ||
+            if (!TBDRBarrierOptimizer::get().is_enabled()) {
+                if (strcmp(cmd, "PipelineBarrier2") == 0 ||
+                    strcmp(cmd, "PipelineBarrier2KHR") == 0) {
+                    return false;
+                }
+            }
+            if (strcmp(cmd, "SetEvent2") == 0 ||
                 strcmp(cmd, "SetEvent2KHR") == 0 ||
                 strcmp(cmd, "ResetEvent2") == 0 ||
                 strcmp(cmd, "ResetEvent2KHR") == 0 ||
@@ -1133,6 +1144,7 @@ void LayerManager::dispatch_free_command_buffers(
         std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
         for (uint32_t i = 0; i < commandBufferCount; i++) {
             m_cmd_devices.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
+            TBDRBarrierOptimizer::get().on_cmd_free(pCommandBuffers[i]);
         }
     }
 
@@ -1155,6 +1167,8 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     VkCommandBuffer commandBuffer,
     const VkCommandBufferBeginInfo* pBeginInfo
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_begin(commandBuffer);
+
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (!dt.BeginCommandBuffer) return VK_ERROR_INITIALIZATION_FAILED;
@@ -1183,6 +1197,8 @@ VkResult LayerManager::dispatch_reset_command_buffer(
     VkCommandBuffer commandBuffer,
     VkCommandBufferResetFlags flags
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_reset(commandBuffer);
+
     {
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
@@ -1590,6 +1606,8 @@ void LayerManager::dispatch_cmd_draw(
     uint32_t firstVertex,
     uint32_t firstInstance
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             m_primary_table.CmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
@@ -1618,6 +1636,8 @@ void LayerManager::dispatch_cmd_draw_indexed(
     int32_t vertexOffset,
     uint32_t firstInstance
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             m_primary_table.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
@@ -1645,6 +1665,8 @@ void LayerManager::dispatch_cmd_draw_indirect(
     uint32_t drawCount,
     uint32_t stride
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_multi_draw_indirect_mod && m_multi_draw_indirect_mod->is_enabled()) {
         if (m_multi_draw_indirect_mod->on_cmd_draw_indirect(commandBuffer, buffer, offset, drawCount, stride)) {
             return;
@@ -1665,6 +1687,7 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect(
     uint32_t drawCount,
     uint32_t stride
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
     if (m_multi_draw_indirect_mod && m_multi_draw_indirect_mod->is_enabled()) {
         if (m_multi_draw_indirect_mod->on_cmd_draw_indexed_indirect(commandBuffer, buffer, offset, drawCount, stride)) {
             return;
@@ -1806,12 +1829,57 @@ void LayerManager::dispatch_cmd_wait_events2(
     }
 }
 
+void LayerManager::dispatch_cmd_pipeline_barrier(
+    VkCommandBuffer commandBuffer,
+    VkPipelineStageFlags srcStageMask,
+    VkPipelineStageFlags dstStageMask,
+    VkDependencyFlags dependencyFlags,
+    uint32_t memoryBarrierCount,
+    const VkMemoryBarrier* pMemoryBarriers,
+    uint32_t bufferMemoryBarrierCount,
+    const VkBufferMemoryBarrier* pBufferMemoryBarriers,
+    uint32_t imageMemoryBarrierCount,
+    const VkImageMemoryBarrier* pImageMemoryBarriers
+) {
+    TBDRBarrierOptimizer::ScratchStorage1 storage;
+    if (!TBDRBarrierOptimizer::get().optimize_pipeline_barrier1(
+            commandBuffer, srcStageMask, dstStageMask, dependencyFlags,
+            memoryBarrierCount, pMemoryBarriers,
+            bufferMemoryBarrierCount, pBufferMemoryBarriers,
+            imageMemoryBarrierCount, pImageMemoryBarriers,
+            storage)) {
+        return; // Dropped by TBDR optimizer!
+    }
+
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdPipelineBarrier) {
+        dt.CmdPipelineBarrier(
+            commandBuffer,
+            srcStageMask,
+            dstStageMask,
+            dependencyFlags,
+            memoryBarrierCount,
+            pMemoryBarriers,
+            bufferMemoryBarrierCount,
+            pBufferMemoryBarriers,
+            imageMemoryBarrierCount,
+            pImageMemoryBarriers);
+    }
+}
+
 void LayerManager::dispatch_cmd_pipeline_barrier2(
     VkCommandBuffer commandBuffer,
     const VkDependencyInfo* pDependencyInfo
 ) {
+    TBDRBarrierOptimizer::ScratchStorage2 storage;
+    VkDependencyInfo optInfo{};
+    if (!TBDRBarrierOptimizer::get().optimize_dependency_info(commandBuffer, pDependencyInfo, optInfo, storage)) {
+        return; // Dropped by TBDR optimizer!
+    }
+
     if (m_sync2_mod && m_sync2_mod->is_enabled()) {
-        if (m_sync2_mod->on_cmd_pipeline_barrier2(commandBuffer, pDependencyInfo)) {
+        if (m_sync2_mod->on_cmd_pipeline_barrier2(commandBuffer, &optInfo)) {
             return;
         }
     }
@@ -1819,7 +1887,7 @@ void LayerManager::dispatch_cmd_pipeline_barrier2(
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdPipelineBarrier2) {
-        dt.CmdPipelineBarrier2(commandBuffer, pDependencyInfo);
+        dt.CmdPipelineBarrier2(commandBuffer, &optInfo);
     }
 }
 
