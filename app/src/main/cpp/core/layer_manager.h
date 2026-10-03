@@ -101,9 +101,30 @@ struct DeviceDispatchTable {
     PFN_vkDestroyCommandPool DestroyCommandPool = nullptr;
 };
 
+struct DeviceBypassFlags {
+    bool bypass_draw = false;
+    bool bypass_sync2 = false;
+    bool bypass_dynamic_rendering = false;
+    bool bypass_push_descriptor = false;
+    bool bypass_timeline = false;
+    bool bypass_renderpass2 = false;
+    bool bypass_draw_indirect_count = false;
+    bool bypass_device_group = false;
+    bool bypass_bda = false;
+    bool bypass_host_query_reset = false;
+};
+
 class LayerManager {
 public:
     static LayerManager& get();
+
+    // Zero-Overhead Pass-Through / Trampoline Bypass:
+    void update_device_bypass_flags(VkDevice device);
+    void remove_device_bypass_flags(VkDevice device);
+    bool should_intercept_device_proc(VkDevice device, const char* pName);
+    inline bool is_divisor_bypass_active() const {
+        return m_divisor_bypass_active.load(std::memory_order_relaxed);
+    }
 
     void register_module(std::unique_ptr<IVulkanLayerModule> module);
 
@@ -729,6 +750,11 @@ private:
     IVulkanLayerModule* m_swapchain_mod = nullptr;
     IVulkanLayerModule* m_bda_mod = nullptr;
     IVulkanLayerModule* m_host_query_reset_mod = nullptr;
+
+    std::atomic<bool> m_divisor_bypass_active{false};
+    DeviceBypassFlags m_primary_bypass_flags{};
+    std::atomic<bool> m_has_primary_bypass{false};
+    std::unordered_map<uint64_t, DeviceBypassFlags> m_device_bypass_flags;
 };
 
 /**

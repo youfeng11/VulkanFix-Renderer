@@ -213,9 +213,10 @@ public:
     bool on_cmd_end_rendering(
         VkCommandBuffer commandBuffer) override;
 
+    bool is_device_native(VkDevice device) override;
+
 private:
     bool is_phys_device_native(VkPhysicalDevice physDev);
-    bool is_device_native(VkDevice device);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
 
     VkFormat get_image_view_format(VkImageView view);

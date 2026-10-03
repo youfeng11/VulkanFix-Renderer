@@ -190,6 +190,8 @@ public:
         int32_t vertexOffset,
         uint32_t firstInstance) override;
 
+    bool is_device_native(VkDevice device) override;
+
 private:
     struct BindingDivisorInfo {
         uint32_t binding = 0;
@@ -220,7 +222,6 @@ private:
     };
 
     PhysDeviceInfo probe_phys_device(VkPhysicalDevice physDev);
-    bool is_device_native(VkDevice device);
 
     CmdBufferState* get_or_create_cmd_state(VkCommandBuffer cmd);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);

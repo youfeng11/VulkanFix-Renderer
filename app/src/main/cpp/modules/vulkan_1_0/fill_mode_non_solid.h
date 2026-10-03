@@ -52,9 +52,10 @@ public:
         VkPipelineVertexInputStateCreateInfo& viState,
         std::vector<void*>& allocationsToFree) override;
 
+    bool is_device_native(VkDevice device) override;
+
 private:
     bool is_phys_device_native(VkPhysicalDevice physDev);
-    bool is_device_native(VkDevice device);
 
     std::mutex m_mutex;
     std::unordered_map<uint64_t, bool> m_phys_native_support;

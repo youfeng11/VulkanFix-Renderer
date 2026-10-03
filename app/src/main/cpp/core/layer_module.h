@@ -19,6 +19,9 @@ public:
     // Check if module is active
     virtual bool is_enabled() const { return true; }
 
+    // Check if device natively supports this module's extension/feature
+    virtual bool is_device_native(VkDevice device) { return true; }
+
     // 1. Device Extension Enumeration:
     virtual void on_enumerate_device_extensions(
         VkPhysicalDevice physicalDevice,

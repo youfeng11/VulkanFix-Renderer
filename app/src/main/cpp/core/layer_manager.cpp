@@ -284,6 +284,204 @@ void LayerManager::remove_device_dispatch_table(VkDevice device) {
     }
 }
 
+void LayerManager::update_device_bypass_flags(VkDevice device) {
+    if (device == VK_NULL_HANDLE) return;
+
+    DeviceBypassFlags flags{};
+
+    flags.bypass_draw = (m_divisor_mod == nullptr || !m_divisor_mod->is_enabled() || m_divisor_mod->is_device_native(device));
+    flags.bypass_sync2 = (m_sync2_mod == nullptr || !m_sync2_mod->is_enabled() || m_sync2_mod->is_device_native(device));
+    flags.bypass_dynamic_rendering = (m_dyn_rendering_mod == nullptr || !m_dyn_rendering_mod->is_enabled() || m_dyn_rendering_mod->is_device_native(device));
+    flags.bypass_push_descriptor = (m_push_desc_mod == nullptr || !m_push_desc_mod->is_enabled() || m_push_desc_mod->is_device_native(device));
+    flags.bypass_timeline = (m_timeline_mod == nullptr || !m_timeline_mod->is_enabled() || m_timeline_mod->is_device_native(device));
+    flags.bypass_renderpass2 = (m_renderpass2_mod == nullptr || !m_renderpass2_mod->is_enabled() || m_renderpass2_mod->is_device_native(device));
+    flags.bypass_draw_indirect_count = (m_draw_indirect_count_mod == nullptr || !m_draw_indirect_count_mod->is_enabled() || m_draw_indirect_count_mod->is_device_native(device));
+    flags.bypass_device_group = (m_device_group_mod == nullptr || !m_device_group_mod->is_enabled() || m_device_group_mod->is_device_native(device));
+    flags.bypass_bda = (m_bda_mod == nullptr || !m_bda_mod->is_enabled() || m_bda_mod->is_device_native(device));
+    flags.bypass_host_query_reset = (m_host_query_reset_mod == nullptr || !m_host_query_reset_mod->is_enabled() || m_host_query_reset_mod->is_device_native(device));
+
+    {
+        std::unique_lock<std::shared_mutex> lock(m_table_rw_mutex);
+        m_device_bypass_flags[(uint64_t)(uintptr_t)device] = flags;
+        if (!m_has_primary_bypass.load(std::memory_order_relaxed) || m_primary_device.load(std::memory_order_relaxed) == device) {
+            m_primary_bypass_flags = flags;
+            m_has_primary_bypass.store(true, std::memory_order_release);
+        }
+    }
+
+    if (flags.bypass_draw) {
+        m_divisor_bypass_active.store(true, std::memory_order_release);
+        LOGI("Device %p: Divisor bypass active (Trampoline enabled, 0-overhead draw/bind)", device);
+    } else {
+        m_divisor_bypass_active.store(false, std::memory_order_release);
+        LOGI("Device %p: Divisor emulation active (sub-draw batching)", device);
+    }
+
+    LOGI("Device %p bypass flags: draw=%d, sync2=%d, dyn_render=%d, push_desc=%d, timeline=%d, rp2=%d",
+         device, flags.bypass_draw, flags.bypass_sync2, flags.bypass_dynamic_rendering,
+         flags.bypass_push_descriptor, flags.bypass_timeline, flags.bypass_renderpass2);
+}
+
+void LayerManager::remove_device_bypass_flags(VkDevice device) {
+    std::unique_lock<std::shared_mutex> lock(m_table_rw_mutex);
+    m_device_bypass_flags.erase((uint64_t)(uintptr_t)device);
+    if (m_primary_device.load(std::memory_order_relaxed) == device) {
+        if (!m_device_bypass_flags.empty()) {
+            auto it = m_device_bypass_flags.begin();
+            m_primary_bypass_flags = it->second;
+            m_has_primary_bypass.store(true, std::memory_order_release);
+            m_divisor_bypass_active.store(m_primary_bypass_flags.bypass_draw, std::memory_order_release);
+        } else {
+            m_has_primary_bypass.store(false, std::memory_order_release);
+            m_divisor_bypass_active.store(false, std::memory_order_release);
+        }
+    }
+}
+
+bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pName) {
+    if (!pName) return true;
+
+    // Retrieve bypass flags for this device
+    DeviceBypassFlags flags;
+    bool found = false;
+    if (__builtin_expect(device == m_primary_device.load(std::memory_order_relaxed), 1) &&
+        m_has_primary_bypass.load(std::memory_order_relaxed)) {
+        flags = m_primary_bypass_flags;
+        found = true;
+    } else {
+        std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
+        auto it = m_device_bypass_flags.find((uint64_t)(uintptr_t)device);
+        if (it != m_device_bypass_flags.end()) {
+            flags = it->second;
+            found = true;
+        }
+    }
+
+    if (!found) {
+        // Device not yet registered or untracked: maintain layer interception for safety
+        return true;
+    }
+
+    // Hot path 1: vkCmd...
+    if (pName[0] == 'v' && pName[1] == 'k' && pName[2] == 'C' && pName[3] == 'm' && pName[4] == 'd') {
+        const char* cmd = pName + 5; // e.g. "DrawIndexed", "BindPipeline", "PipelineBarrier2", etc.
+        if (flags.bypass_draw) {
+            if (strcmp(cmd, "DrawIndexed") == 0 ||
+                strcmp(cmd, "Draw") == 0 ||
+                strcmp(cmd, "BindPipeline") == 0 ||
+                strcmp(cmd, "BindVertexBuffers") == 0 ||
+                strcmp(cmd, "BindVertexBuffers2") == 0 ||
+                strcmp(cmd, "BindVertexBuffers2EXT") == 0) {
+                return false; // Direct bypass! Driver native!
+            }
+        }
+        if (flags.bypass_sync2) {
+            if (strcmp(cmd, "PipelineBarrier2") == 0 ||
+                strcmp(cmd, "PipelineBarrier2KHR") == 0 ||
+                strcmp(cmd, "SetEvent2") == 0 ||
+                strcmp(cmd, "SetEvent2KHR") == 0 ||
+                strcmp(cmd, "ResetEvent2") == 0 ||
+                strcmp(cmd, "ResetEvent2KHR") == 0 ||
+                strcmp(cmd, "WaitEvents2") == 0 ||
+                strcmp(cmd, "WaitEvents2KHR") == 0 ||
+                strcmp(cmd, "WriteTimestamp2") == 0 ||
+                strcmp(cmd, "WriteTimestamp2KHR") == 0) {
+                return false;
+            }
+        }
+        if (flags.bypass_dynamic_rendering) {
+            if (strcmp(cmd, "BeginRendering") == 0 ||
+                strcmp(cmd, "BeginRenderingKHR") == 0 ||
+                strcmp(cmd, "EndRendering") == 0 ||
+                strcmp(cmd, "EndRenderingKHR") == 0) {
+                return false;
+            }
+        }
+        if (flags.bypass_push_descriptor) {
+            if (strcmp(cmd, "PushDescriptorSetKHR") == 0 ||
+                strcmp(cmd, "PushDescriptorSetWithTemplateKHR") == 0) {
+                return false;
+            }
+        }
+        if (flags.bypass_draw_indirect_count) {
+            if (strcmp(cmd, "DrawIndirectCount") == 0 ||
+                strcmp(cmd, "DrawIndirectCountKHR") == 0 ||
+                strcmp(cmd, "DrawIndirectCountAMD") == 0 ||
+                strcmp(cmd, "DrawIndexedIndirectCount") == 0 ||
+                strcmp(cmd, "DrawIndexedIndirectCountKHR") == 0 ||
+                strcmp(cmd, "DrawIndexedIndirectCountAMD") == 0) {
+                return false;
+            }
+        }
+        if (flags.bypass_renderpass2) {
+            if (strcmp(cmd, "BeginRenderPass2") == 0 ||
+                strcmp(cmd, "BeginRenderPass2KHR") == 0 ||
+                strcmp(cmd, "NextSubpass2") == 0 ||
+                strcmp(cmd, "NextSubpass2KHR") == 0 ||
+                strcmp(cmd, "EndRenderPass2") == 0 ||
+                strcmp(cmd, "EndRenderPass2KHR") == 0) {
+                return false;
+            }
+        }
+        if (flags.bypass_device_group) {
+            if (strcmp(cmd, "SetDeviceMask") == 0 ||
+                strcmp(cmd, "SetDeviceMaskKHR") == 0 ||
+                strcmp(cmd, "DispatchBase") == 0 ||
+                strcmp(cmd, "DispatchBaseKHR") == 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Queue submissions:
+    if (flags.bypass_sync2) {
+        if (strcmp(pName, "vkQueueSubmit2") == 0 ||
+            strcmp(pName, "vkQueueSubmit2KHR") == 0) {
+            return false;
+        }
+    }
+
+    // Timeline Semaphores:
+    if (flags.bypass_timeline) {
+        if (strcmp(pName, "vkWaitSemaphores") == 0 ||
+            strcmp(pName, "vkWaitSemaphoresKHR") == 0 ||
+            strcmp(pName, "vkSignalSemaphore") == 0 ||
+            strcmp(pName, "vkSignalSemaphoreKHR") == 0 ||
+            strcmp(pName, "vkGetSemaphoreCounterValue") == 0 ||
+            strcmp(pName, "vkGetSemaphoreCounterValueKHR") == 0) {
+            return false;
+        }
+    }
+
+    // Buffer Device Address:
+    if (flags.bypass_bda) {
+        if (strcmp(pName, "vkGetBufferDeviceAddress") == 0 ||
+            strcmp(pName, "vkGetBufferDeviceAddressKHR") == 0 ||
+            strcmp(pName, "vkGetBufferDeviceAddressEXT") == 0) {
+            return false;
+        }
+    }
+
+    // Host Query Reset:
+    if (flags.bypass_host_query_reset) {
+        if (strcmp(pName, "vkResetQueryPool") == 0 ||
+            strcmp(pName, "vkResetQueryPoolEXT") == 0) {
+            return false;
+        }
+    }
+
+    // RenderPass2 creation:
+    if (flags.bypass_renderpass2) {
+        if (strcmp(pName, "vkCreateRenderPass2") == 0 ||
+            strcmp(pName, "vkCreateRenderPass2KHR") == 0) {
+            return false;
+        }
+    }
+
+    return true; // Keep intercepting for non-bypassed commands
+}
+
 const DeviceDispatchTable& LayerManager::get_dispatch_table_slow(VkDevice device) {
     {
         std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
@@ -569,6 +767,7 @@ VkResult LayerManager::dispatch_create_device(
         m_device_count.fetch_add(1, std::memory_order_relaxed);
         m_primary_device.store(*pDevice, std::memory_order_relaxed);
         init_device_dispatch_table(*pDevice);
+        update_device_bypass_flags(*pDevice);
         PipelineCacheManager::get().init_for_device(physicalDevice, *pDevice);
         LOGI("Created logical device %p with layer module emulation enabled", *pDevice);
     }
@@ -582,6 +781,7 @@ void LayerManager::dispatch_destroy_device(
 ) {
     PipelineCacheManager::get().on_destroy_device(device);
     m_device_count.fetch_sub(1, std::memory_order_relaxed);
+    remove_device_bypass_flags(device);
     remove_device_dispatch_table(device);
 
     {
@@ -1307,6 +1507,13 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     VkPipelineBindPoint pipelineBindPoint,
     VkPipeline pipeline
 ) {
+    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
+            m_primary_table.CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
+            return;
+        }
+    }
+
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
         m_divisor_mod->on_cmd_bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
     }
@@ -1325,6 +1532,13 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers(
     const VkBuffer* pBuffers,
     const VkDeviceSize* pOffsets
 ) {
+    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
+            m_primary_table.CmdBindVertexBuffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+            return;
+        }
+    }
+
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
         m_divisor_mod->on_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
     }
@@ -1345,6 +1559,17 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
     const VkDeviceSize* pSizes,
     const VkDeviceSize* pStrides
 ) {
+    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
+            if (m_primary_table.CmdBindVertexBuffers2) {
+                m_primary_table.CmdBindVertexBuffers2(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
+            } else if (m_primary_table.CmdBindVertexBuffers) {
+                m_primary_table.CmdBindVertexBuffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+            }
+            return;
+        }
+    }
+
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
         m_divisor_mod->on_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
     }
@@ -1365,6 +1590,13 @@ void LayerManager::dispatch_cmd_draw(
     uint32_t firstVertex,
     uint32_t firstInstance
 ) {
+    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
+            m_primary_table.CmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+            return;
+        }
+    }
+
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
         if (m_divisor_mod->on_cmd_draw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance)) {
             return;
@@ -1386,6 +1618,13 @@ void LayerManager::dispatch_cmd_draw_indexed(
     int32_t vertexOffset,
     uint32_t firstInstance
 ) {
+    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
+            m_primary_table.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+            return;
+        }
+    }
+
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
         if (m_divisor_mod->on_cmd_draw_indexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance)) {
             return;

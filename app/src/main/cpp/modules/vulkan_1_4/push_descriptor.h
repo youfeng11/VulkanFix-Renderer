@@ -146,9 +146,10 @@ public:
         uint32_t set,
         const void* pData) override;
 
+    bool is_device_native(VkDevice device) override;
+
 private:
     bool is_phys_device_native(VkPhysicalDevice physDev);
-    bool is_device_native(VkDevice device);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
     VkDescriptorSetLayout get_set_layout(VkPipelineLayout layout, uint32_t set);
     VkDescriptorSet allocate_push_set(VkDevice device, VkCommandBuffer cmd, VkDescriptorSetLayout setLayout);

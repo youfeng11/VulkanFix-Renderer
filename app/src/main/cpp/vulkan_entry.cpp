@@ -806,6 +806,18 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     PFN_vkVoidFunction custom_proc = LayerManager::get().get_custom_proc(pName);
     if (custom_proc) return custom_proc;
 
+    // Breakthrough 1: Zero-Overhead Direct Bypass
+    // If the device natively supports the requested feature and requires no layer emulation,
+    // directly return the real driver's function pointer, completely bypassing the layer!
+    if (device != VK_NULL_HANDLE && !LayerManager::get().should_intercept_device_proc(device, pName)) {
+        init_real_vulkan();
+        PFN_vkGetDeviceProcAddr real_gdpa = get_real_device_proc_addr();
+        if (real_gdpa) {
+            PFN_vkVoidFunction real_fn = real_gdpa(device, pName);
+            if (real_fn) return real_fn;
+        }
+    }
+
     PFN_vkVoidFunction matched = lookup_layer_proc(pName, true);
     if (matched) return matched;
 

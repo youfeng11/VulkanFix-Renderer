@@ -40,7 +40,7 @@ public:
 
     void on_destroy_device(VkDevice device) override;
 
-    bool is_device_native(VkDevice device);
+    bool is_device_native(VkDevice device) override;
 
 private:
     bool is_phys_device_native(VkPhysicalDevice physDev);

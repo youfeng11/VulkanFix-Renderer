@@ -50,7 +50,7 @@ public:
         return native;
     }
 
-    virtual bool is_device_native(VkDevice device) {
+    bool is_device_native(VkDevice device) override {
         if (device == VK_NULL_HANDLE) return false;
         if (device == m_cached_device.load(std::memory_order_relaxed)) {
             return m_cached_device_native.load(std::memory_order_relaxed);

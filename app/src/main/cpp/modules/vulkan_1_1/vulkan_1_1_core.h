@@ -61,7 +61,7 @@ public:
     void on_destroy_device(VkDevice device) override;
 
     bool is_phys_device_native(VkPhysicalDevice physDev);
-    bool is_device_native(VkDevice device);
+    bool is_device_native(VkDevice device) override;
     uint32_t get_phys_real_api_version(VkPhysicalDevice physDev);
 
 private:

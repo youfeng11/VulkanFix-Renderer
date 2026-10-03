@@ -76,7 +76,7 @@ public:
         VkResult& outResult) override;
 
     bool is_phys_device_native(VkPhysicalDevice physDev);
-    bool is_device_native(VkDevice device);
+    bool is_device_native(VkDevice device) override;
 
 private:
     std::mutex m_mutex;
