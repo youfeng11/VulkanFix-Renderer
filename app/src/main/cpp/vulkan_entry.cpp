@@ -260,6 +260,57 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
 }
 
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateComputePipelines(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    uint32_t createInfoCount,
+    const VkComputePipelineCreateInfo* pCreateInfos,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipeline* pPipelines
+) {
+    return LayerManager::get().dispatch_create_compute_pipelines(
+        device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreatePipelineCache(
+    VkDevice device,
+    const VkPipelineCacheCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipelineCache* pPipelineCache
+) {
+    return LayerManager::get().dispatch_create_pipeline_cache(
+        device, pCreateInfo, pAllocator, pPipelineCache);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyPipelineCache(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    const VkAllocationCallbacks* pAllocator
+) {
+    LayerManager::get().dispatch_destroy_pipeline_cache(
+        device, pipelineCache, pAllocator);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPipelineCacheData(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    size_t* pDataSize,
+    void* pData
+) {
+    return LayerManager::get().dispatch_get_pipeline_cache_data(
+        device, pipelineCache, pDataSize, pData);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkMergePipelineCaches(
+    VkDevice device,
+    VkPipelineCache dstCache,
+    uint32_t srcCacheCount,
+    const VkPipelineCache* pSrcCaches
+) {
+    return LayerManager::get().dispatch_merge_pipeline_caches(
+        device, dstCache, srcCacheCount, pSrcCaches);
+}
+
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
     VkDevice device,
     const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
@@ -556,6 +607,8 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCreateAndroidSurfaceKHR);
         }
         MATCH(vkCreateGraphicsPipelines);
+        MATCH(vkCreateComputePipelines);
+        MATCH(vkCreatePipelineCache);
         MATCH(vkCreateDescriptorSetLayout);
         MATCH(vkCreatePipelineLayout);
         MATCH(vkCreateDescriptorUpdateTemplate);
@@ -573,6 +626,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
     }
     case 'D': {
         MATCH(vkDestroyPipeline);
+        MATCH(vkDestroyPipelineCache);
         MATCH(vkDestroyDescriptorSetLayout);
         MATCH(vkDestroyPipelineLayout);
         MATCH(vkDestroyDescriptorUpdateTemplate);
@@ -647,6 +701,11 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vkGetPhysicalDeviceExternalSemaphoreProperties);
         MATCH(vkGetPhysicalDeviceExternalSemaphorePropertiesKHR);
         MATCH(vkGetSwapchainImagesKHR);
+        MATCH(vkGetPipelineCacheData);
+        return NULL;
+    }
+    case 'M': {
+        MATCH(vkMergePipelineCaches);
         return NULL;
     }
     case 'Q': {

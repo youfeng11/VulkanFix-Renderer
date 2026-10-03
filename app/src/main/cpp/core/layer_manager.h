@@ -35,6 +35,11 @@ struct DeviceDispatchTable {
     PFN_vkGetDeviceQueue GetDeviceQueue = nullptr;
     PFN_vkGetDeviceQueue2 GetDeviceQueue2 = nullptr;
     PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines = nullptr;
+    PFN_vkCreateComputePipelines CreateComputePipelines = nullptr;
+    PFN_vkCreatePipelineCache CreatePipelineCache = nullptr;
+    PFN_vkDestroyPipelineCache DestroyPipelineCache = nullptr;
+    PFN_vkGetPipelineCacheData GetPipelineCacheData = nullptr;
+    PFN_vkMergePipelineCaches MergePipelineCaches = nullptr;
     PFN_vkDestroyPipeline DestroyPipeline = nullptr;
     PFN_vkCreateDescriptorSetLayout CreateDescriptorSetLayout = nullptr;
     PFN_vkDestroyDescriptorSetLayout DestroyDescriptorSetLayout = nullptr;
@@ -153,6 +158,37 @@ public:
         const VkGraphicsPipelineCreateInfo* pCreateInfos,
         const VkAllocationCallbacks* pAllocator,
         VkPipeline* pPipelines);
+
+    VkResult dispatch_create_compute_pipelines(
+        VkDevice device,
+        VkPipelineCache pipelineCache,
+        uint32_t createInfoCount,
+        const VkComputePipelineCreateInfo* pCreateInfos,
+        const VkAllocationCallbacks* pAllocator,
+        VkPipeline* pPipelines);
+
+    VkResult dispatch_create_pipeline_cache(
+        VkDevice device,
+        const VkPipelineCacheCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkPipelineCache* pPipelineCache);
+
+    void dispatch_destroy_pipeline_cache(
+        VkDevice device,
+        VkPipelineCache pipelineCache,
+        const VkAllocationCallbacks* pAllocator);
+
+    VkResult dispatch_get_pipeline_cache_data(
+        VkDevice device,
+        VkPipelineCache pipelineCache,
+        size_t* pDataSize,
+        void* pData);
+
+    VkResult dispatch_merge_pipeline_caches(
+        VkDevice device,
+        VkPipelineCache dstCache,
+        uint32_t srcCacheCount,
+        const VkPipelineCache* pSrcCaches);
 
     inline VkDevice get_primary_device() const {
         return m_primary_emulated_device.load(std::memory_order_relaxed);

@@ -1,5 +1,6 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
+#include "pipeline_cache_manager.h"
 
 LayerManager& LayerManager::get() {
     static LayerManager s_instance;
@@ -116,6 +117,11 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     LOAD_PROC(GetDeviceQueue);
     LOAD_PROC(GetDeviceQueue2);
     LOAD_PROC(CreateGraphicsPipelines);
+    LOAD_PROC(CreateComputePipelines);
+    LOAD_PROC(CreatePipelineCache);
+    LOAD_PROC(DestroyPipelineCache);
+    LOAD_PROC(GetPipelineCacheData);
+    LOAD_PROC(MergePipelineCaches);
     LOAD_PROC(DestroyPipeline);
     LOAD_PROC(CreateDescriptorSetLayout);
     LOAD_PROC(DestroyDescriptorSetLayout);
@@ -563,6 +569,7 @@ VkResult LayerManager::dispatch_create_device(
         m_device_count.fetch_add(1, std::memory_order_relaxed);
         m_primary_device.store(*pDevice, std::memory_order_relaxed);
         init_device_dispatch_table(*pDevice);
+        PipelineCacheManager::get().init_for_device(physicalDevice, *pDevice);
         LOGI("Created logical device %p with layer module emulation enabled", *pDevice);
     }
 
@@ -573,6 +580,7 @@ void LayerManager::dispatch_destroy_device(
     VkDevice device,
     const VkAllocationCallbacks* pAllocator
 ) {
+    PipelineCacheManager::get().on_destroy_device(device);
     m_device_count.fetch_sub(1, std::memory_order_relaxed);
     remove_device_dispatch_table(device);
 
@@ -627,8 +635,14 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
         (PFN_vkCreateGraphicsPipelines) get_real_proc(get_last_instance(), device, "vkCreateGraphicsPipelines");
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
+    VkPipelineCache effectiveCache = PipelineCacheManager::get().prepare_pipeline_cache(device, pipelineCache);
+
     if (!is_emulated_device(device) || createInfoCount == 0 || !pCreateInfos) {
-        return real_fn(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+        VkResult res = real_fn(device, effectiveCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+        if (res == VK_SUCCESS) {
+            PipelineCacheManager::get().on_pipelines_created(device, effectiveCache, createInfoCount);
+        }
+        return res;
     }
 
     // Fast-path scan: Check if ANY module requires interception for this pipeline batch
@@ -642,7 +656,11 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
 
     // FAST-PATH: Zero heap allocations, zero copies!
     if (!needs_interception) {
-        return real_fn(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+        VkResult res = real_fn(device, effectiveCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+        if (res == VK_SUCCESS) {
+            PipelineCacheManager::get().on_pipelines_created(device, effectiveCache, createInfoCount);
+        }
+        return res;
     }
 
     // Small Buffer Optimization: use stack allocation for common small batches (<= 16 pipelines)
@@ -676,9 +694,10 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
         }
     }
 
-    VkResult res = real_fn(device, pipelineCache, createInfoCount, modInfos, pAllocator, pPipelines);
+    VkResult res = real_fn(device, effectiveCache, createInfoCount, modInfos, pAllocator, pPipelines);
 
     if (res == VK_SUCCESS && pPipelines) {
+        PipelineCacheManager::get().on_pipelines_created(device, effectiveCache, createInfoCount);
         for (auto& mod : m_modules) {
             if (mod->is_enabled()) {
                 mod->on_post_create_graphics_pipelines(device, createInfoCount, modInfos, pPipelines);
@@ -693,6 +712,90 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
     if (modInfos != stackInfos) free(modInfos);
 
     return res;
+}
+
+VkResult LayerManager::dispatch_create_compute_pipelines(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    uint32_t createInfoCount,
+    const VkComputePipelineCreateInfo* pCreateInfos,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipeline* pPipelines
+) {
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkCreateComputePipelines real_fn = dt.CreateComputePipelines ? dt.CreateComputePipelines :
+        (PFN_vkCreateComputePipelines) get_real_proc(get_last_instance(), device, "vkCreateComputePipelines");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkPipelineCache effectiveCache = PipelineCacheManager::get().prepare_pipeline_cache(device, pipelineCache);
+    VkResult res = real_fn(device, effectiveCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+    if (res == VK_SUCCESS) {
+        PipelineCacheManager::get().on_pipelines_created(device, effectiveCache, createInfoCount);
+    }
+    return res;
+}
+
+VkResult LayerManager::dispatch_create_pipeline_cache(
+    VkDevice device,
+    const VkPipelineCacheCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipelineCache* pPipelineCache
+) {
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkCreatePipelineCache real_fn = dt.CreatePipelineCache ? dt.CreatePipelineCache :
+        (PFN_vkCreatePipelineCache) get_real_proc(get_last_instance(), device, "vkCreatePipelineCache");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkResult res = real_fn(device, pCreateInfo, pAllocator, pPipelineCache);
+    if (res == VK_SUCCESS && pPipelineCache && *pPipelineCache != VK_NULL_HANDLE) {
+        PipelineCacheManager::get().on_post_create_app_pipeline_cache(device, *pPipelineCache);
+    }
+    return res;
+}
+
+void LayerManager::dispatch_destroy_pipeline_cache(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    const VkAllocationCallbacks* pAllocator
+) {
+    if (pipelineCache == VK_NULL_HANDLE) return;
+
+    PipelineCacheManager::get().on_pre_destroy_app_pipeline_cache(device, pipelineCache);
+
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkDestroyPipelineCache real_fn = dt.DestroyPipelineCache ? dt.DestroyPipelineCache :
+        (PFN_vkDestroyPipelineCache) get_real_proc(get_last_instance(), device, "vkDestroyPipelineCache");
+    if (real_fn) {
+        real_fn(device, pipelineCache, pAllocator);
+    }
+}
+
+VkResult LayerManager::dispatch_get_pipeline_cache_data(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    size_t* pDataSize,
+    void* pData
+) {
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkGetPipelineCacheData real_fn = dt.GetPipelineCacheData ? dt.GetPipelineCacheData :
+        (PFN_vkGetPipelineCacheData) get_real_proc(get_last_instance(), device, "vkGetPipelineCacheData");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    return real_fn(device, pipelineCache, pDataSize, pData);
+}
+
+VkResult LayerManager::dispatch_merge_pipeline_caches(
+    VkDevice device,
+    VkPipelineCache dstCache,
+    uint32_t srcCacheCount,
+    const VkPipelineCache* pSrcCaches
+) {
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkMergePipelineCaches real_fn = dt.MergePipelineCaches ? dt.MergePipelineCaches :
+        (PFN_vkMergePipelineCaches) get_real_proc(get_last_instance(), device, "vkMergePipelineCaches");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    return real_fn(device, dstCache, srcCacheCount, pSrcCaches);
 }
 
 VkResult LayerManager::dispatch_create_descriptor_set_layout(
