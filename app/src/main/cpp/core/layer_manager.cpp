@@ -60,6 +60,10 @@ void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
     else if (strcmp(name, "VK_KHR_swapchain") == 0) m_swapchain_mod = module.get();
     else if (strcmp(name, "VK_KHR_buffer_device_address") == 0) m_bda_mod = module.get();
     else if (strcmp(name, "VK_EXT_host_query_reset") == 0) m_host_query_reset_mod = module.get();
+    else if (strcmp(name, "VK_KHR_maintenance1") == 0) m_maintenance_mod = module.get();
+    else if (strcmp(name, "VK_KHR_get_memory_requirements2") == 0) m_get_mem_reqs2_mod = module.get();
+    else if (strcmp(name, "VK_KHR_descriptor_update_template") == 0) m_desc_template_mod = module.get();
+    else if (strcmp(name, "VK_KHR_bind_memory2") == 0) m_bind_mem2_mod = module.get();
     m_modules.push_back(std::move(module));
 }
 
@@ -113,6 +117,10 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     LOAD_PROC(CmdResetEvent);
     LOAD_PROC(CmdWaitEvents);
     LOAD_PROC(CmdWriteTimestamp);
+    LOAD_PROC_OPT(CmdWriteTimestamp2, "vkCmdWriteTimestamp2KHR");
+    if (!dt.CmdWriteTimestamp2) {
+        LOAD_PROC(CmdWriteTimestamp2);
+    }
     LOAD_PROC(QueueWaitIdle);
     LOAD_PROC(DeviceWaitIdle);
     LOAD_PROC(GetDeviceQueue);
@@ -145,6 +153,7 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     LOAD_PROC(CmdBindDescriptorSets);
     LOAD_PROC(AllocateDescriptorSets);
     LOAD_PROC(FreeDescriptorSets);
+    LOAD_PROC(ResetDescriptorPool);
     LOAD_PROC(CreateSemaphore);
     LOAD_PROC(DestroySemaphore);
     LOAD_PROC(GetSemaphoreCounterValue);
@@ -291,6 +300,7 @@ void LayerManager::update_device_bypass_flags(VkDevice device) {
     DeviceBypassFlags flags{};
 
     flags.bypass_draw = (m_divisor_mod == nullptr || !m_divisor_mod->is_enabled() || m_divisor_mod->is_device_native(device));
+    flags.bypass_multi_draw = (m_multi_draw_indirect_mod == nullptr || !m_multi_draw_indirect_mod->is_enabled() || m_multi_draw_indirect_mod->is_device_native(device));
     flags.bypass_sync2 = (m_sync2_mod == nullptr || !m_sync2_mod->is_enabled() || m_sync2_mod->is_device_native(device));
     flags.bypass_dynamic_rendering = (m_dyn_rendering_mod == nullptr || !m_dyn_rendering_mod->is_enabled() || m_dyn_rendering_mod->is_device_native(device));
     flags.bypass_push_descriptor = (m_push_desc_mod == nullptr || !m_push_desc_mod->is_enabled() || m_push_desc_mod->is_device_native(device));
@@ -318,8 +328,8 @@ void LayerManager::update_device_bypass_flags(VkDevice device) {
         LOGI("Device %p: Divisor emulation active (sub-draw batching)", device);
     }
 
-    LOGI("Device %p bypass flags: draw=%d, sync2=%d, dyn_render=%d, push_desc=%d, timeline=%d, rp2=%d",
-         device, flags.bypass_draw, flags.bypass_sync2, flags.bypass_dynamic_rendering,
+    LOGI("Device %p bypass flags: draw=%d, multi_draw=%d, sync2=%d, dyn_render=%d, push_desc=%d, timeline=%d, rp2=%d",
+         device, flags.bypass_draw, flags.bypass_multi_draw, flags.bypass_sync2, flags.bypass_dynamic_rendering,
          flags.bypass_push_descriptor, flags.bypass_timeline, flags.bypass_renderpass2);
 }
 
@@ -373,6 +383,12 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
                 strcmp(cmd, "BindVertexBuffers") == 0 ||
                 strcmp(cmd, "BindVertexBuffers2") == 0 ||
                 strcmp(cmd, "BindVertexBuffers2EXT") == 0) {
+                return false; // Direct bypass! Driver native!
+            }
+        }
+        if (flags.bypass_multi_draw) {
+            if (strcmp(cmd, "DrawIndirect") == 0 ||
+                strcmp(cmd, "DrawIndexedIndirect") == 0) {
                 return false; // Direct bypass! Driver native!
             }
         }
@@ -635,22 +651,26 @@ void LayerManager::dispatch_get_physical_device_features2(
         return;
     }
 
-    std::vector<void*> user_data(m_modules.size(), nullptr);
-    {
-        for (size_t i = 0; i < m_modules.size(); i++) {
-            if (m_modules[i]->is_enabled()) {
-                m_modules[i]->on_pre_get_features2(physicalDevice, pFeatures, user_data[i]);
-            }
+    const size_t mod_count = m_modules.size();
+    void* stack_user_data[32] = {nullptr};
+    std::vector<void*> heap_user_data;
+    void** user_data = stack_user_data;
+    if (__builtin_expect(mod_count > 32, 0)) {
+        heap_user_data.resize(mod_count, nullptr);
+        user_data = heap_user_data.data();
+    }
+
+    for (size_t i = 0; i < mod_count; i++) {
+        if (m_modules[i]->is_enabled()) {
+            m_modules[i]->on_pre_get_features2(physicalDevice, pFeatures, user_data[i]);
         }
     }
 
     real_fn(physicalDevice, pFeatures);
 
-    {
-        for (size_t i = 0; i < m_modules.size(); i++) {
-            if (m_modules[i]->is_enabled()) {
-                m_modules[i]->on_post_get_features2(physicalDevice, pFeatures, user_data[i]);
-            }
+    for (size_t i = 0; i < mod_count; i++) {
+        if (m_modules[i]->is_enabled()) {
+            m_modules[i]->on_post_get_features2(physicalDevice, pFeatures, user_data[i]);
         }
     }
 }
@@ -674,22 +694,26 @@ void LayerManager::dispatch_get_physical_device_properties2(
             real_fn1(physicalDevice, &pProperties->properties);
         }
     } else {
-        std::vector<void*> user_data(m_modules.size(), nullptr);
-        {
-            for (size_t i = 0; i < m_modules.size(); i++) {
-                if (m_modules[i]->is_enabled()) {
-                    m_modules[i]->on_pre_get_properties2(physicalDevice, pProperties, user_data[i]);
-                }
+        const size_t mod_count = m_modules.size();
+        void* stack_user_data[32] = {nullptr};
+        std::vector<void*> heap_user_data;
+        void** user_data = stack_user_data;
+        if (__builtin_expect(mod_count > 32, 0)) {
+            heap_user_data.resize(mod_count, nullptr);
+            user_data = heap_user_data.data();
+        }
+
+        for (size_t i = 0; i < mod_count; i++) {
+            if (m_modules[i]->is_enabled()) {
+                m_modules[i]->on_pre_get_properties2(physicalDevice, pProperties, user_data[i]);
             }
         }
 
         real_fn(physicalDevice, pProperties);
 
-        {
-            for (size_t i = 0; i < m_modules.size(); i++) {
-                if (m_modules[i]->is_enabled()) {
-                    m_modules[i]->on_post_get_properties2(physicalDevice, pProperties, user_data[i]);
-                }
+        for (size_t i = 0; i < mod_count; i++) {
+            if (m_modules[i]->is_enabled()) {
+                m_modules[i]->on_post_get_properties2(physicalDevice, pProperties, user_data[i]);
             }
         }
         return;
@@ -750,12 +774,18 @@ VkResult LayerManager::dispatch_create_device(
         );
     }
 
-    std::vector<void*> user_data(m_modules.size(), nullptr);
-    {
-        for (size_t i = 0; i < m_modules.size(); i++) {
-            if (m_modules[i]->is_enabled()) {
-                m_modules[i]->on_pre_create_device(physicalDevice, &modCreateInfo, has_mod_features ? &modFeatures : nullptr, enabledExtensions, user_data[i]);
-            }
+    const size_t mod_count = m_modules.size();
+    void* stack_user_data[32] = {nullptr};
+    std::vector<void*> heap_user_data;
+    void** user_data = stack_user_data;
+    if (__builtin_expect(mod_count > 32, 0)) {
+        heap_user_data.resize(mod_count, nullptr);
+        user_data = heap_user_data.data();
+    }
+
+    for (size_t i = 0; i < mod_count; i++) {
+        if (m_modules[i]->is_enabled()) {
+            m_modules[i]->on_pre_create_device(physicalDevice, &modCreateInfo, has_mod_features ? &modFeatures : nullptr, enabledExtensions, user_data[i]);
         }
     }
 
@@ -764,11 +794,9 @@ VkResult LayerManager::dispatch_create_device(
 
     VkResult res = real_fn(physicalDevice, &modCreateInfo, pAllocator, pDevice);
 
-    {
-        for (size_t i = 0; i < m_modules.size(); i++) {
-            if (m_modules[i]->is_enabled()) {
-                m_modules[i]->on_post_create_device(physicalDevice, (res == VK_SUCCESS && pDevice) ? *pDevice : VK_NULL_HANDLE, res, user_data[i]);
-            }
+    for (size_t i = 0; i < mod_count; i++) {
+        if (m_modules[i]->is_enabled()) {
+            m_modules[i]->on_post_create_device(physicalDevice, (res == VK_SUCCESS && pDevice) ? *pDevice : VK_NULL_HANDLE, res, user_data[i]);
         }
     }
 
@@ -842,8 +870,11 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
     const VkAllocationCallbacks* pAllocator,
     VkPipeline* pPipelines
 ) {
-    PFN_vkCreateGraphicsPipelines real_fn =
-        (PFN_vkCreateGraphicsPipelines) get_real_proc(get_last_instance(), device, "vkCreateGraphicsPipelines");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkCreateGraphicsPipelines real_fn = dt.CreateGraphicsPipelines;
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateGraphicsPipelines) get_real_proc(get_last_instance(), device, "vkCreateGraphicsPipelines");
+    }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkPipelineCache effectiveCache = PipelineCacheManager::get().prepare_pipeline_cache(device, pipelineCache);
@@ -858,11 +889,12 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
 
     // Fast-path scan: Check if ANY module requires interception for this pipeline batch
     bool needs_interception = false;
-    for (auto& mod : m_modules) {
-        if (mod->is_enabled() && mod->needs_pipeline_interception(device, createInfoCount, pCreateInfos)) {
-            needs_interception = true;
-            break;
-        }
+    if (m_fill_mode_mod && m_fill_mode_mod->is_enabled() && m_fill_mode_mod->needs_pipeline_interception(device, createInfoCount, pCreateInfos)) {
+        needs_interception = true;
+    } else if (m_divisor_mod && m_divisor_mod->is_enabled() && m_divisor_mod->needs_pipeline_interception(device, createInfoCount, pCreateInfos)) {
+        needs_interception = true;
+    } else if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled() && m_dyn_rendering_mod->needs_pipeline_interception(device, createInfoCount, pCreateInfos)) {
+        needs_interception = true;
     }
 
     // FAST-PATH: Zero heap allocations, zero copies!
@@ -898,10 +930,14 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
         if (modInfos[i].pVertexInputState) {
             modVIStates[i] = *modInfos[i].pVertexInputState;
         }
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_modify_pipeline_create_info(device, i, modInfos[i], modVIStates[i], allocationsToFree);
-            }
+        if (m_fill_mode_mod && m_fill_mode_mod->is_enabled()) {
+            m_fill_mode_mod->on_modify_pipeline_create_info(device, i, modInfos[i], modVIStates[i], allocationsToFree);
+        }
+        if (m_divisor_mod && m_divisor_mod->is_enabled()) {
+            m_divisor_mod->on_modify_pipeline_create_info(device, i, modInfos[i], modVIStates[i], allocationsToFree);
+        }
+        if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+            m_dyn_rendering_mod->on_modify_pipeline_create_info(device, i, modInfos[i], modVIStates[i], allocationsToFree);
         }
     }
 
@@ -909,10 +945,8 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
 
     if (res == VK_SUCCESS && pPipelines) {
         PipelineCacheManager::get().on_pipelines_created(device, effectiveCache, createInfoCount);
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_post_create_graphics_pipelines(device, createInfoCount, modInfos, pPipelines);
-            }
+        if (m_divisor_mod && m_divisor_mod->is_enabled()) {
+            m_divisor_mod->on_post_create_graphics_pipelines(device, createInfoCount, modInfos, pPipelines);
         }
     }
 
@@ -1015,29 +1049,24 @@ VkResult LayerManager::dispatch_create_descriptor_set_layout(
     const VkAllocationCallbacks* pAllocator,
     VkDescriptorSetLayout* pSetLayout
 ) {
-    PFN_vkCreateDescriptorSetLayout real_fn =
-        (PFN_vkCreateDescriptorSetLayout) get_real_proc(get_last_instance(), device, "vkCreateDescriptorSetLayout");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkCreateDescriptorSetLayout real_fn = dt.CreateDescriptorSetLayout;
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateDescriptorSetLayout) get_real_proc(get_last_instance(), device, "vkCreateDescriptorSetLayout");
+    }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     if (!pCreateInfo) return real_fn(device, pCreateInfo, pAllocator, pSetLayout);
 
     VkDescriptorSetLayoutCreateInfo modInfo = *pCreateInfo;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_pre_create_descriptor_set_layout(device, modInfo);
-            }
-        }
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        m_push_desc_mod->on_pre_create_descriptor_set_layout(device, modInfo);
     }
 
     VkResult res = real_fn(device, &modInfo, pAllocator, pSetLayout);
 
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_post_create_descriptor_set_layout(device, pCreateInfo, res, (res == VK_SUCCESS && pSetLayout) ? *pSetLayout : VK_NULL_HANDLE);
-            }
-        }
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        m_push_desc_mod->on_post_create_descriptor_set_layout(device, pCreateInfo, res, (res == VK_SUCCESS && pSetLayout) ? *pSetLayout : VK_NULL_HANDLE);
     }
 
     return res;
@@ -1048,18 +1077,19 @@ void LayerManager::dispatch_destroy_descriptor_set_layout(
     VkDescriptorSetLayout descriptorSetLayout,
     const VkAllocationCallbacks* pAllocator
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_destroy_descriptor_set_layout(device, descriptorSetLayout);
-            }
-        }
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        m_push_desc_mod->on_destroy_descriptor_set_layout(device, descriptorSetLayout);
     }
 
-    PFN_vkDestroyDescriptorSetLayout real_fn =
-        (PFN_vkDestroyDescriptorSetLayout) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorSetLayout");
-    if (real_fn) {
-        real_fn(device, descriptorSetLayout, pAllocator);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.DestroyDescriptorSetLayout) {
+        dt.DestroyDescriptorSetLayout(device, descriptorSetLayout, pAllocator);
+    } else {
+        PFN_vkDestroyDescriptorSetLayout real_fn =
+            (PFN_vkDestroyDescriptorSetLayout) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorSetLayout");
+        if (real_fn) {
+            real_fn(device, descriptorSetLayout, pAllocator);
+        }
     }
 }
 
@@ -1069,17 +1099,18 @@ VkResult LayerManager::dispatch_create_pipeline_layout(
     const VkAllocationCallbacks* pAllocator,
     VkPipelineLayout* pPipelineLayout
 ) {
-    PFN_vkCreatePipelineLayout real_fn =
-        (PFN_vkCreatePipelineLayout) get_real_proc(get_last_instance(), device, "vkCreatePipelineLayout");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkCreatePipelineLayout real_fn = dt.CreatePipelineLayout;
+    if (!real_fn) {
+        real_fn = (PFN_vkCreatePipelineLayout) get_real_proc(get_last_instance(), device, "vkCreatePipelineLayout");
+    }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkResult res = real_fn(device, pCreateInfo, pAllocator, pPipelineLayout);
 
     if (res == VK_SUCCESS && pCreateInfo && pPipelineLayout) {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_post_create_pipeline_layout(device, pCreateInfo, res, *pPipelineLayout);
-            }
+        if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+            m_push_desc_mod->on_post_create_pipeline_layout(device, pCreateInfo, res, *pPipelineLayout);
         }
     }
 
@@ -1091,18 +1122,19 @@ void LayerManager::dispatch_destroy_pipeline_layout(
     VkPipelineLayout pipelineLayout,
     const VkAllocationCallbacks* pAllocator
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_destroy_pipeline_layout(device, pipelineLayout);
-            }
-        }
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        m_push_desc_mod->on_destroy_pipeline_layout(device, pipelineLayout);
     }
 
-    PFN_vkDestroyPipelineLayout real_fn =
-        (PFN_vkDestroyPipelineLayout) get_real_proc(get_last_instance(), device, "vkDestroyPipelineLayout");
-    if (real_fn) {
-        real_fn(device, pipelineLayout, pAllocator);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.DestroyPipelineLayout) {
+        dt.DestroyPipelineLayout(device, pipelineLayout, pAllocator);
+    } else {
+        PFN_vkDestroyPipelineLayout real_fn =
+            (PFN_vkDestroyPipelineLayout) get_real_proc(get_last_instance(), device, "vkDestroyPipelineLayout");
+        if (real_fn) {
+            real_fn(device, pipelineLayout, pAllocator);
+        }
     }
 }
 
@@ -1111,8 +1143,11 @@ VkResult LayerManager::dispatch_allocate_command_buffers(
     const VkCommandBufferAllocateInfo* pAllocateInfo,
     VkCommandBuffer* pCommandBuffers
 ) {
-    PFN_vkAllocateCommandBuffers real_fn =
-        (PFN_vkAllocateCommandBuffers) get_real_proc(get_last_instance(), device, "vkAllocateCommandBuffers");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkAllocateCommandBuffers real_fn = dt.AllocateCommandBuffers;
+    if (!real_fn) {
+        real_fn = (PFN_vkAllocateCommandBuffers) get_real_proc(get_last_instance(), device, "vkAllocateCommandBuffers");
+    }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkResult res = real_fn(device, pAllocateInfo, pCommandBuffers);
@@ -1124,10 +1159,14 @@ VkResult LayerManager::dispatch_allocate_command_buffers(
                 m_cmd_devices[(uint64_t)(uintptr_t)pCommandBuffers[i]] = device;
             }
         }
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
-            }
+        if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+            m_push_desc_mod->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
+        }
+        if (m_divisor_mod && m_divisor_mod->is_enabled()) {
+            m_divisor_mod->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
+        }
+        if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+            m_dyn_rendering_mod->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
         }
     }
 
@@ -1148,18 +1187,25 @@ void LayerManager::dispatch_free_command_buffers(
         }
     }
 
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_free_command_buffers(device, commandBufferCount, pCommandBuffers);
-            }
-        }
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        m_push_desc_mod->on_free_command_buffers(device, commandBufferCount, pCommandBuffers);
+    }
+    if (m_divisor_mod && m_divisor_mod->is_enabled()) {
+        m_divisor_mod->on_free_command_buffers(device, commandBufferCount, pCommandBuffers);
+    }
+    if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+        m_dyn_rendering_mod->on_free_command_buffers(device, commandBufferCount, pCommandBuffers);
     }
 
-    PFN_vkFreeCommandBuffers real_fn =
-        (PFN_vkFreeCommandBuffers) get_real_proc(get_last_instance(), device, "vkFreeCommandBuffers");
-    if (real_fn) {
-        real_fn(device, commandPool, commandBufferCount, pCommandBuffers);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.FreeCommandBuffers) {
+        dt.FreeCommandBuffers(device, commandPool, commandBufferCount, pCommandBuffers);
+    } else {
+        PFN_vkFreeCommandBuffers real_fn =
+            (PFN_vkFreeCommandBuffers) get_real_proc(get_last_instance(), device, "vkFreeCommandBuffers");
+        if (real_fn) {
+            real_fn(device, commandPool, commandBufferCount, pCommandBuffers);
+        }
     }
 }
 
@@ -1181,13 +1227,12 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     VkCommandBufferInheritanceInfo modInheritanceInfo{};
     bool has_mod_inheritance = false;
 
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_begin_command_buffer(commandBuffer, pBeginInfo);
-                mod->on_pre_begin_command_buffer(commandBuffer, pBeginInfo, modBeginInfo, modInheritanceInfo, has_mod_inheritance);
-            }
-        }
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        m_push_desc_mod->on_begin_command_buffer(commandBuffer, pBeginInfo);
+    }
+    if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+        m_dyn_rendering_mod->on_begin_command_buffer(commandBuffer, pBeginInfo);
+        m_dyn_rendering_mod->on_pre_begin_command_buffer(commandBuffer, pBeginInfo, modBeginInfo, modInheritanceInfo, has_mod_inheritance);
     }
 
     return dt.BeginCommandBuffer(commandBuffer, has_mod_inheritance ? &modBeginInfo : pBeginInfo);
@@ -1199,12 +1244,14 @@ VkResult LayerManager::dispatch_reset_command_buffer(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_reset(commandBuffer);
 
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_reset_command_buffer(commandBuffer, flags);
-            }
-        }
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        m_push_desc_mod->on_reset_command_buffer(commandBuffer, flags);
+    }
+    if (m_divisor_mod && m_divisor_mod->is_enabled()) {
+        m_divisor_mod->on_reset_command_buffer(commandBuffer, flags);
+    }
+    if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+        m_dyn_rendering_mod->on_reset_command_buffer(commandBuffer, flags);
     }
 
     VkDevice device = get_device_for_cmd(commandBuffer);
@@ -1224,21 +1271,15 @@ VkResult LayerManager::dispatch_create_descriptor_update_template(
     if (!pCreateInfo || !pDescriptorUpdateTemplate) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkDescriptorUpdateTemplateCreateInfo modInfo = *pCreateInfo;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_pre_create_descriptor_update_template(device, modInfo);
-            }
-        }
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        m_push_desc_mod->on_pre_create_descriptor_update_template(device, modInfo);
     }
 
     VkResult res = VK_SUCCESS;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_create_descriptor_update_template(
-                    device, &modInfo, pAllocator, pDescriptorUpdateTemplate, res)) {
-                return res;
-            }
+    if (m_desc_template_mod && m_desc_template_mod->is_enabled()) {
+        if (m_desc_template_mod->on_create_descriptor_update_template(
+                device, &modInfo, pAllocator, pDescriptorUpdateTemplate, res)) {
+            return res;
         }
     }
 
@@ -1259,26 +1300,20 @@ void LayerManager::dispatch_destroy_descriptor_update_template(
     VkDescriptorUpdateTemplate descriptorUpdateTemplate,
     const VkAllocationCallbacks* pAllocator
 ) {
-    bool handled = false;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_destroy_descriptor_update_template(
-                    device, descriptorUpdateTemplate, pAllocator)) {
-                handled = true;
-                break;
-            }
+    if (m_desc_template_mod && m_desc_template_mod->is_enabled()) {
+        if (m_desc_template_mod->on_destroy_descriptor_update_template(
+                device, descriptorUpdateTemplate, pAllocator)) {
+            return;
         }
     }
 
-    if (!handled) {
-        PFN_vkDestroyDescriptorUpdateTemplate real_fn =
-            (PFN_vkDestroyDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorUpdateTemplate");
-        if (!real_fn) {
-            real_fn = (PFN_vkDestroyDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorUpdateTemplateKHR");
-        }
-        if (real_fn) {
-            real_fn(device, descriptorUpdateTemplate, pAllocator);
-        }
+    PFN_vkDestroyDescriptorUpdateTemplate real_fn =
+        (PFN_vkDestroyDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorUpdateTemplate");
+    if (!real_fn) {
+        real_fn = (PFN_vkDestroyDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorUpdateTemplateKHR");
+    }
+    if (real_fn) {
+        real_fn(device, descriptorUpdateTemplate, pAllocator);
     }
 }
 
@@ -1311,24 +1346,18 @@ void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
     uint32_t set,
     const void* pData
 ) {
-    bool handled = false;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_cmd_push_descriptor_set_with_template(
-                    commandBuffer, descriptorUpdateTemplate, layout, set, pData)) {
-                handled = true;
-                break;
-            }
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        if (m_push_desc_mod->on_cmd_push_descriptor_set_with_template(
+                commandBuffer, descriptorUpdateTemplate, layout, set, pData)) {
+            return;
         }
     }
 
-    if (!handled) {
-        VkDevice device = get_device_for_cmd(commandBuffer);
-        PFN_vkCmdPushDescriptorSetWithTemplateKHR real_fn =
-            (PFN_vkCmdPushDescriptorSetWithTemplateKHR) get_real_proc(get_last_instance(), device, "vkCmdPushDescriptorSetWithTemplateKHR");
-        if (real_fn) {
-            real_fn(commandBuffer, descriptorUpdateTemplate, layout, set, pData);
-        }
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    PFN_vkCmdPushDescriptorSetWithTemplateKHR real_fn =
+        (PFN_vkCmdPushDescriptorSetWithTemplateKHR) get_real_proc(get_last_instance(), device, "vkCmdPushDescriptorSetWithTemplateKHR");
+    if (real_fn) {
+        real_fn(commandBuffer, descriptorUpdateTemplate, layout, set, pData);
     }
 }
 
@@ -1338,16 +1367,17 @@ VkResult LayerManager::dispatch_create_image(
     const VkAllocationCallbacks* pAllocator,
     VkImage* pImage
 ) {
-    PFN_vkCreateImage real_fn =
-        (PFN_vkCreateImage) get_real_proc(get_last_instance(), device, "vkCreateImage");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkCreateImage real_fn = dt.CreateImage;
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateImage) get_real_proc(get_last_instance(), device, "vkCreateImage");
+    }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkResult res = real_fn(device, pCreateInfo, pAllocator, pImage);
     if (res == VK_SUCCESS && pCreateInfo && pImage && *pImage != VK_NULL_HANDLE) {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_post_create_image(device, pCreateInfo, res, *pImage);
-            }
+        if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+            m_dyn_rendering_mod->on_post_create_image(device, pCreateInfo, res, *pImage);
         }
     }
     return res;
@@ -1358,18 +1388,19 @@ void LayerManager::dispatch_destroy_image(
     VkImage image,
     const VkAllocationCallbacks* pAllocator
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_destroy_image(device, image);
-            }
-        }
+    if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+        m_dyn_rendering_mod->on_destroy_image(device, image);
     }
 
-    PFN_vkDestroyImage real_fn =
-        (PFN_vkDestroyImage) get_real_proc(get_last_instance(), device, "vkDestroyImage");
-    if (real_fn) {
-        real_fn(device, image, pAllocator);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.DestroyImage) {
+        dt.DestroyImage(device, image, pAllocator);
+    } else {
+        PFN_vkDestroyImage real_fn =
+            (PFN_vkDestroyImage) get_real_proc(get_last_instance(), device, "vkDestroyImage");
+        if (real_fn) {
+            real_fn(device, image, pAllocator);
+        }
     }
 }
 
@@ -1379,16 +1410,17 @@ VkResult LayerManager::dispatch_create_image_view(
     const VkAllocationCallbacks* pAllocator,
     VkImageView* pView
 ) {
-    PFN_vkCreateImageView real_fn =
-        (PFN_vkCreateImageView) get_real_proc(get_last_instance(), device, "vkCreateImageView");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkCreateImageView real_fn = dt.CreateImageView;
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateImageView) get_real_proc(get_last_instance(), device, "vkCreateImageView");
+    }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkResult res = real_fn(device, pCreateInfo, pAllocator, pView);
     if (res == VK_SUCCESS && pCreateInfo && pView && *pView != VK_NULL_HANDLE) {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_post_create_image_view(device, pCreateInfo, res, *pView);
-            }
+        if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+            m_dyn_rendering_mod->on_post_create_image_view(device, pCreateInfo, res, *pView);
         }
     }
     return res;
@@ -1399,18 +1431,19 @@ void LayerManager::dispatch_destroy_image_view(
     VkImageView imageView,
     const VkAllocationCallbacks* pAllocator
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_destroy_image_view(device, imageView);
-            }
-        }
+    if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+        m_dyn_rendering_mod->on_destroy_image_view(device, imageView);
     }
 
-    PFN_vkDestroyImageView real_fn =
-        (PFN_vkDestroyImageView) get_real_proc(get_last_instance(), device, "vkDestroyImageView");
-    if (real_fn) {
-        real_fn(device, imageView, pAllocator);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.DestroyImageView) {
+        dt.DestroyImageView(device, imageView, pAllocator);
+    } else {
+        PFN_vkDestroyImageView real_fn =
+            (PFN_vkDestroyImageView) get_real_proc(get_last_instance(), device, "vkDestroyImageView");
+        if (real_fn) {
+            real_fn(device, imageView, pAllocator);
+        }
     }
 }
 
@@ -1420,30 +1453,21 @@ VkResult LayerManager::dispatch_create_sampler(
     const VkAllocationCallbacks* pAllocator,
     VkSampler* pSampler
 ) {
-    PFN_vkCreateSampler real_fn =
-        (PFN_vkCreateSampler) get_real_proc(get_last_instance(), device, "vkCreateSampler");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkCreateSampler real_fn = dt.CreateSampler;
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateSampler) get_real_proc(get_last_instance(), device, "vkCreateSampler");
+    }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     if (!pCreateInfo) return real_fn(device, pCreateInfo, pAllocator, pSampler);
 
     VkSamplerCreateInfo modInfo = *pCreateInfo;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_pre_create_sampler(device, modInfo);
-            }
-        }
+    if (m_sampler_anisotropy_mod && m_sampler_anisotropy_mod->is_enabled()) {
+        m_sampler_anisotropy_mod->on_pre_create_sampler(device, modInfo);
     }
 
-    VkResult res = real_fn(device, &modInfo, pAllocator, pSampler);
-    if (res == VK_SUCCESS && pSampler && *pSampler != VK_NULL_HANDLE) {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_post_create_sampler(device, pCreateInfo, res, *pSampler);
-            }
-        }
-    }
-    return res;
+    return real_fn(device, &modInfo, pAllocator, pSampler);
 }
 
 void LayerManager::dispatch_destroy_sampler(
@@ -1452,18 +1476,16 @@ void LayerManager::dispatch_destroy_sampler(
     const VkAllocationCallbacks* pAllocator
 ) {
     if (sampler == VK_NULL_HANDLE) return;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_destroy_sampler(device, sampler);
-            }
-        }
-    }
 
-    PFN_vkDestroySampler real_fn =
-        (PFN_vkDestroySampler) get_real_proc(get_last_instance(), device, "vkDestroySampler");
-    if (real_fn) {
-        real_fn(device, sampler, pAllocator);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.DestroySampler) {
+        dt.DestroySampler(device, sampler, pAllocator);
+    } else {
+        PFN_vkDestroySampler real_fn =
+            (PFN_vkDestroySampler) get_real_proc(get_last_instance(), device, "vkDestroySampler");
+        if (real_fn) {
+            real_fn(device, sampler, pAllocator);
+        }
     }
 }
 
@@ -1471,12 +1493,9 @@ void LayerManager::dispatch_cmd_begin_rendering(
     VkCommandBuffer commandBuffer,
     const VkRenderingInfo* pRenderingInfo
 ) {
-    bool handled = false;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_cmd_begin_rendering(commandBuffer, pRenderingInfo)) {
-                return;
-            }
+    if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
+        if (m_dyn_rendering_mod->on_cmd_begin_rendering(commandBuffer, pRenderingInfo)) {
+            return;
         }
     }
 
@@ -1667,6 +1686,13 @@ void LayerManager::dispatch_cmd_draw_indirect(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
+    if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed) && m_primary_bypass_flags.bypass_multi_draw, 1)) {
+        if (m_primary_table.CmdDrawIndirect) {
+            m_primary_table.CmdDrawIndirect(commandBuffer, buffer, offset, drawCount, stride);
+            return;
+        }
+    }
+
     if (m_multi_draw_indirect_mod && m_multi_draw_indirect_mod->is_enabled()) {
         if (m_multi_draw_indirect_mod->on_cmd_draw_indirect(commandBuffer, buffer, offset, drawCount, stride)) {
             return;
@@ -1688,6 +1714,14 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect(
     uint32_t stride
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
+    if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed) && m_primary_bypass_flags.bypass_multi_draw, 1)) {
+        if (m_primary_table.CmdDrawIndexedIndirect) {
+            m_primary_table.CmdDrawIndexedIndirect(commandBuffer, buffer, offset, drawCount, stride);
+            return;
+        }
+    }
+
     if (m_multi_draw_indirect_mod && m_multi_draw_indirect_mod->is_enabled()) {
         if (m_multi_draw_indirect_mod->on_cmd_draw_indexed_indirect(commandBuffer, buffer, offset, drawCount, stride)) {
             return;
@@ -1710,8 +1744,11 @@ void LayerManager::dispatch_get_device_queue(
     uint32_t queueIndex,
     VkQueue* pQueue
 ) {
-    PFN_vkGetDeviceQueue real_fn =
-        (PFN_vkGetDeviceQueue) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkGetDeviceQueue real_fn = dt.GetDeviceQueue;
+    if (!real_fn) {
+        real_fn = (PFN_vkGetDeviceQueue) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue");
+    }
     if (real_fn) {
         real_fn(device, queueFamilyIndex, queueIndex, pQueue);
         if (pQueue && *pQueue != VK_NULL_HANDLE) {
@@ -1727,8 +1764,11 @@ void LayerManager::dispatch_get_device_queue2(
     const VkDeviceQueueInfo2* pQueueInfo,
     VkQueue* pQueue
 ) {
-    PFN_vkGetDeviceQueue2 real_fn =
-        (PFN_vkGetDeviceQueue2) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue2");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkGetDeviceQueue2 real_fn = dt.GetDeviceQueue2;
+    if (!real_fn) {
+        real_fn = (PFN_vkGetDeviceQueue2) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue2");
+    }
     if (real_fn) {
         real_fn(device, pQueueInfo, pQueue);
         if (pQueue && *pQueue != VK_NULL_HANDLE && pQueueInfo) {
@@ -1755,26 +1795,20 @@ void LayerManager::dispatch_cmd_set_event2(
     VkEvent event,
     const VkDependencyInfo* pDependencyInfo
 ) {
-    bool handled = false;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_cmd_set_event2(commandBuffer, event, pDependencyInfo)) {
-                handled = true;
-                break;
-            }
+    if (m_sync2_mod && m_sync2_mod->is_enabled()) {
+        if (m_sync2_mod->on_cmd_set_event2(commandBuffer, event, pDependencyInfo)) {
+            return;
         }
     }
 
-    if (!handled) {
-        VkDevice device = get_device_for_cmd(commandBuffer);
-        PFN_vkCmdSetEvent2KHR real_fn =
-            (PFN_vkCmdSetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdSetEvent2KHR");
-        if (!real_fn) {
-            real_fn = (PFN_vkCmdSetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdSetEvent2");
-        }
-        if (real_fn) {
-            real_fn(commandBuffer, event, pDependencyInfo);
-        }
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    PFN_vkCmdSetEvent2KHR real_fn =
+        (PFN_vkCmdSetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdSetEvent2KHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkCmdSetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdSetEvent2");
+    }
+    if (real_fn) {
+        real_fn(commandBuffer, event, pDependencyInfo);
     }
 }
 
@@ -1783,26 +1817,20 @@ void LayerManager::dispatch_cmd_reset_event2(
     VkEvent event,
     VkPipelineStageFlags2 stageMask
 ) {
-    bool handled = false;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_cmd_reset_event2(commandBuffer, event, stageMask)) {
-                handled = true;
-                break;
-            }
+    if (m_sync2_mod && m_sync2_mod->is_enabled()) {
+        if (m_sync2_mod->on_cmd_reset_event2(commandBuffer, event, stageMask)) {
+            return;
         }
     }
 
-    if (!handled) {
-        VkDevice device = get_device_for_cmd(commandBuffer);
-        PFN_vkCmdResetEvent2KHR real_fn =
-            (PFN_vkCmdResetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdResetEvent2KHR");
-        if (!real_fn) {
-            real_fn = (PFN_vkCmdResetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdResetEvent2");
-        }
-        if (real_fn) {
-            real_fn(commandBuffer, event, stageMask);
-        }
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    PFN_vkCmdResetEvent2KHR real_fn =
+        (PFN_vkCmdResetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdResetEvent2KHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkCmdResetEvent2KHR) get_real_proc(get_last_instance(), device, "vkCmdResetEvent2");
+    }
+    if (real_fn) {
+        real_fn(commandBuffer, event, stageMask);
     }
 }
 
@@ -1841,7 +1869,7 @@ void LayerManager::dispatch_cmd_pipeline_barrier(
     uint32_t imageMemoryBarrierCount,
     const VkImageMemoryBarrier* pImageMemoryBarriers
 ) {
-    TBDRBarrierOptimizer::ScratchStorage1 storage;
+    static thread_local TBDRBarrierOptimizer::ScratchStorage1 storage;
     if (!TBDRBarrierOptimizer::get().optimize_pipeline_barrier1(
             commandBuffer, srcStageMask, dstStageMask, dependencyFlags,
             memoryBarrierCount, pMemoryBarriers,
@@ -1872,7 +1900,7 @@ void LayerManager::dispatch_cmd_pipeline_barrier2(
     VkCommandBuffer commandBuffer,
     const VkDependencyInfo* pDependencyInfo
 ) {
-    TBDRBarrierOptimizer::ScratchStorage2 storage;
+    static thread_local TBDRBarrierOptimizer::ScratchStorage2 storage;
     VkDependencyInfo optInfo{};
     if (!TBDRBarrierOptimizer::get().optimize_dependency_info(commandBuffer, pDependencyInfo, optInfo, storage)) {
         return; // Dropped by TBDR optimizer!
@@ -1905,9 +1933,8 @@ void LayerManager::dispatch_cmd_write_timestamp2(
 
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
-    PFN_vkCmdWriteTimestamp2KHR real_fn = dt.CmdPipelineBarrier2 ? (PFN_vkCmdWriteTimestamp2KHR) get_real_proc(get_last_instance(), device, "vkCmdWriteTimestamp2KHR") : nullptr;
-    if (real_fn) {
-        real_fn(commandBuffer, stage, queryPool, query);
+    if (dt.CmdWriteTimestamp2) {
+        dt.CmdWriteTimestamp2(commandBuffer, stage, queryPool, query);
     } else if (dt.CmdWriteTimestamp) {
         dt.CmdWriteTimestamp(commandBuffer, (VkPipelineStageFlagBits)(stage & 0x0001FFFFULL), queryPool, query);
     }
@@ -1972,10 +1999,8 @@ VkResult LayerManager::dispatch_queue_wait_idle(VkQueue queue) {
         (PFN_vkQueueWaitIdle) get_real_proc(get_last_instance(), device, "vkQueueWaitIdle");
     VkResult res = real_fn ? real_fn(queue) : VK_SUCCESS;
     if (res == VK_SUCCESS) {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_queue_wait_idle(queue);
-            }
+        if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+            m_timeline_mod->on_queue_wait_idle(queue);
         }
     }
     return res;
@@ -1987,10 +2012,8 @@ VkResult LayerManager::dispatch_device_wait_idle(VkDevice device) {
         (PFN_vkDeviceWaitIdle) get_real_proc(get_last_instance(), device, "vkDeviceWaitIdle");
     VkResult res = real_fn ? real_fn(device) : VK_SUCCESS;
     if (res == VK_SUCCESS) {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_device_wait_idle(device);
-            }
+        if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+            m_timeline_mod->on_device_wait_idle(device);
         }
     }
     return res;
@@ -2010,29 +2033,26 @@ VkResult LayerManager::dispatch_create_semaphore(
     const VkAllocationCallbacks* pAllocator,
     VkSemaphore* pSemaphore
 ) {
-    PFN_vkCreateSemaphore real_fn =
-        (PFN_vkCreateSemaphore) get_real_proc(get_last_instance(), device, "vkCreateSemaphore");
+    const auto& dt = get_dispatch_table(device);
+    PFN_vkCreateSemaphore real_fn = dt.CreateSemaphore;
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateSemaphore) get_real_proc(get_last_instance(), device, "vkCreateSemaphore");
+    }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     if (!pCreateInfo) return real_fn(device, pCreateInfo, pAllocator, pSemaphore);
 
     VkSemaphoreCreateInfo modInfo = *pCreateInfo;
-    std::vector<void*> user_data(m_modules.size(), nullptr);
-    {
-        for (size_t i = 0; i < m_modules.size(); i++) {
-            if (m_modules[i]->is_enabled()) {
-                m_modules[i]->on_pre_create_semaphore(device, modInfo, user_data[i]);
-            }
-        }
+    void* user_data = nullptr;
+    if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+        m_timeline_mod->on_pre_create_semaphore(device, modInfo, user_data);
     }
 
     VkResult res = real_fn(device, &modInfo, pAllocator, pSemaphore);
 
     if (res == VK_SUCCESS && pSemaphore && *pSemaphore != VK_NULL_HANDLE) {
-        for (size_t i = 0; i < m_modules.size(); i++) {
-            if (m_modules[i]->is_enabled()) {
-                m_modules[i]->on_post_create_semaphore(device, pCreateInfo, res, *pSemaphore, user_data[i]);
-            }
+        if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+            m_timeline_mod->on_post_create_semaphore(device, pCreateInfo, res, *pSemaphore, user_data);
         }
     }
     return res;
@@ -2043,18 +2063,19 @@ void LayerManager::dispatch_destroy_semaphore(
     VkSemaphore semaphore,
     const VkAllocationCallbacks* pAllocator
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_destroy_semaphore(device, semaphore);
-            }
-        }
+    if (m_timeline_mod && m_timeline_mod->is_enabled()) {
+        m_timeline_mod->on_destroy_semaphore(device, semaphore);
     }
 
-    PFN_vkDestroySemaphore real_fn =
-        (PFN_vkDestroySemaphore) get_real_proc(get_last_instance(), device, "vkDestroySemaphore");
-    if (real_fn) {
-        real_fn(device, semaphore, pAllocator);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.DestroySemaphore) {
+        dt.DestroySemaphore(device, semaphore, pAllocator);
+    } else {
+        PFN_vkDestroySemaphore real_fn =
+            (PFN_vkDestroySemaphore) get_real_proc(get_last_instance(), device, "vkDestroySemaphore");
+        if (real_fn) {
+            real_fn(device, semaphore, pAllocator);
+        }
     }
 }
 
@@ -2356,11 +2377,9 @@ VkResult LayerManager::dispatch_bind_buffer_memory2(
     const VkBindBufferMemoryInfo* pBindInfos
 ) {
     VkResult res = VK_SUCCESS;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_bind_buffer_memory2(device, bindInfoCount, pBindInfos, res)) {
-                return res;
-            }
+    if (m_bind_mem2_mod && m_bind_mem2_mod->is_enabled()) {
+        if (m_bind_mem2_mod->on_bind_buffer_memory2(device, bindInfoCount, pBindInfos, res)) {
+            return res;
         }
     }
 
@@ -2391,11 +2410,9 @@ VkResult LayerManager::dispatch_bind_image_memory2(
     const VkBindImageMemoryInfo* pBindInfos
 ) {
     VkResult res = VK_SUCCESS;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_bind_image_memory2(device, bindInfoCount, pBindInfos, res)) {
-                return res;
-            }
+    if (m_bind_mem2_mod && m_bind_mem2_mod->is_enabled()) {
+        if (m_bind_mem2_mod->on_bind_image_memory2(device, bindInfoCount, pBindInfos, res)) {
+            return res;
         }
     }
 
@@ -2425,11 +2442,9 @@ void LayerManager::dispatch_get_buffer_memory_requirements2(
     const VkBufferMemoryRequirementsInfo2* pInfo,
     VkMemoryRequirements2* pMemoryRequirements
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_get_buffer_memory_requirements2(device, pInfo, pMemoryRequirements)) {
-                return;
-            }
+    if (m_get_mem_reqs2_mod && m_get_mem_reqs2_mod->is_enabled()) {
+        if (m_get_mem_reqs2_mod->on_get_buffer_memory_requirements2(device, pInfo, pMemoryRequirements)) {
+            return;
         }
     }
 
@@ -2457,11 +2472,9 @@ void LayerManager::dispatch_get_image_memory_requirements2(
     const VkImageMemoryRequirementsInfo2* pInfo,
     VkMemoryRequirements2* pMemoryRequirements
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_get_image_memory_requirements2(device, pInfo, pMemoryRequirements)) {
-                return;
-            }
+    if (m_get_mem_reqs2_mod && m_get_mem_reqs2_mod->is_enabled()) {
+        if (m_get_mem_reqs2_mod->on_get_image_memory_requirements2(device, pInfo, pMemoryRequirements)) {
+            return;
         }
     }
 
@@ -2490,12 +2503,10 @@ void LayerManager::dispatch_get_image_sparse_memory_requirements2(
     uint32_t* pSparseMemoryRequirementCount,
     VkSparseImageMemoryRequirements2* pSparseMemoryRequirements
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_get_image_sparse_memory_requirements2(
-                    device, pInfo, pSparseMemoryRequirementCount, pSparseMemoryRequirements)) {
-                return;
-            }
+    if (m_get_mem_reqs2_mod && m_get_mem_reqs2_mod->is_enabled()) {
+        if (m_get_mem_reqs2_mod->on_get_image_sparse_memory_requirements2(
+                device, pInfo, pSparseMemoryRequirementCount, pSparseMemoryRequirements)) {
+            return;
         }
     }
 
@@ -2520,12 +2531,10 @@ void LayerManager::dispatch_update_descriptor_set_with_template(
     VkDescriptorUpdateTemplate descriptorUpdateTemplate,
     const void* pData
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_update_descriptor_set_with_template(
-                    device, descriptorSet, descriptorUpdateTemplate, pData)) {
-                return;
-            }
+    if (m_desc_template_mod && m_desc_template_mod->is_enabled()) {
+        if (m_desc_template_mod->on_update_descriptor_set_with_template(
+                device, descriptorSet, descriptorUpdateTemplate, pData)) {
+            return;
         }
     }
 
@@ -2544,11 +2553,9 @@ void LayerManager::dispatch_get_descriptor_set_layout_support(
     const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
     VkDescriptorSetLayoutSupport* pSupport
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_get_descriptor_set_layout_support(device, pCreateInfo, pSupport)) {
-                return;
-            }
+    if (m_maintenance_mod && m_maintenance_mod->is_enabled()) {
+        if (m_maintenance_mod->on_get_descriptor_set_layout_support(device, pCreateInfo, pSupport)) {
+            return;
         }
     }
 
@@ -2604,12 +2611,10 @@ VkResult LayerManager::dispatch_enumerate_physical_device_groups(
     VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties
 ) {
     VkResult res = VK_SUCCESS;
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_enumerate_physical_device_groups(
-                    instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties, res)) {
-                return res;
-            }
+    if (m_device_group_mod && m_device_group_mod->is_enabled()) {
+        if (m_device_group_mod->on_enumerate_physical_device_groups(
+                instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties, res)) {
+            return res;
         }
     }
 
@@ -2631,12 +2636,8 @@ void LayerManager::dispatch_trim_command_pool(
     VkCommandPool commandPool,
     VkCommandPoolTrimFlags flags
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_trim_command_pool(device, commandPool, flags);
-            }
-        }
+    if (m_maintenance_mod && m_maintenance_mod->is_enabled()) {
+        m_maintenance_mod->on_trim_command_pool(device, commandPool, flags);
     }
 
     PFN_vkTrimCommandPool real_fn =
@@ -2671,12 +2672,10 @@ void LayerManager::dispatch_get_device_group_peer_memory_features(
     uint32_t remoteDeviceIndex,
     VkPeerMemoryFeatureFlags* pPeerMemoryFeatures
 ) {
-    {
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled() && mod->on_get_device_group_peer_memory_features(
-                    device, heapIndex, localDeviceIndex, remoteDeviceIndex, pPeerMemoryFeatures)) {
-                return;
-            }
+    if (m_device_group_mod && m_device_group_mod->is_enabled()) {
+        if (m_device_group_mod->on_get_device_group_peer_memory_features(
+                device, heapIndex, localDeviceIndex, remoteDeviceIndex, pPeerMemoryFeatures)) {
+            return;
         }
     }
 
@@ -3000,7 +2999,3 @@ void LayerManager::dispatch_destroy_surface(
         real_fn(instance, surface, pAllocator);
     }
 }
-
-
-
-

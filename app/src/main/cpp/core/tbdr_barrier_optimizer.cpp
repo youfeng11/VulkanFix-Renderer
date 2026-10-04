@@ -74,13 +74,13 @@ TBDRBarrierOptimizer::CmdTracker& TBDRBarrierOptimizer::get_or_create_tracker(Vk
     return ref;
 }
 
-void TBDRBarrierOptimizer::notify_action_slow(VkCommandBuffer cmd) {
+void TBDRBarrierOptimizer::notify_action_slow(VkCommandBuffer cmd, VkCommandBuffer& outCachedCmd, std::atomic<bool>*& outCachedAction) {
     std::lock_guard<std::mutex> lock(m_tracker_mutex);
     auto it = m_trackers.find((uint64_t)(uintptr_t)cmd);
     if (it != m_trackers.end()) {
         it->second->hadAction.store(true, std::memory_order_relaxed);
-        m_primary_cmd.store(cmd, std::memory_order_release);
-        m_primary_had_action = &it->second->hadAction;
+        outCachedCmd = cmd;
+        outCachedAction = &it->second->hadAction;
     }
 }
 
@@ -489,6 +489,23 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
                 inOutDstStageMask = (inOutDstStageMask & ~VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
                 m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
             }
+        }
+    }
+
+    // Promote in-pass dependencies to BY_REGION for TBDR tile locality
+    if (storage.imageBarriers.size() > 0 && (inOutDependencyFlags & VK_DEPENDENCY_BY_REGION_BIT) == 0) {
+        bool all_attachments = true;
+        for (const auto& ib : storage.imageBarriers) {
+            if (ib.oldLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                ib.oldLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
+                ib.newLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
+                ib.newLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+                all_attachments = false;
+                break;
+            }
+        }
+        if (all_attachments) {
+            inOutDependencyFlags |= VK_DEPENDENCY_BY_REGION_BIT;
         }
     }
 

@@ -13,19 +13,14 @@ VertexAttributeDivisorModule::VertexAttributeDivisorModule() {
 }
 
 VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe_phys_device(VkPhysicalDevice physDev) {
-    {
-        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
-        auto it = m_phys_devices.find((uint64_t)(uintptr_t)physDev);
-        if (it != m_phys_devices.end() && it->second.probed) {
-            return it->second;
-        }
-    }
-
     PhysDeviceInfo info{};
     {
         std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
         auto it = m_phys_devices.find((uint64_t)(uintptr_t)physDev);
         if (it != m_phys_devices.end()) {
+            if (it->second.probed) {
+                return it->second;
+            }
             info = it->second;
         }
     }
@@ -95,10 +90,17 @@ VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe
 }
 
 bool VertexAttributeDivisorModule::is_device_native(VkDevice device) {
+    if (device == VK_NULL_HANDLE) return false;
+    if (__builtin_expect(device == m_primary_dev.load(std::memory_order_relaxed), 1)) {
+        return m_primary_native.load(std::memory_order_relaxed);
+    }
     std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_device_needs_emulation.find((uint64_t)(uintptr_t)device);
     if (it != m_device_needs_emulation.end()) {
-        return !it->second;
+        bool native = !it->second;
+        m_primary_dev.store(device, std::memory_order_relaxed);
+        m_primary_native.store(native, std::memory_order_relaxed);
+        return native;
     }
     return false;
 }
@@ -380,6 +382,8 @@ void VertexAttributeDivisorModule::on_post_create_device(
             std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
             m_device_needs_emulation[(uint64_t)(uintptr_t)device] = needs_emu;
             m_last_device = device;
+            m_primary_dev.store(device, std::memory_order_release);
+            m_primary_native.store(!needs_emu, std::memory_order_release);
         }
 
         LOGI("Device %p created: divisor emulation %s", device,
@@ -391,6 +395,9 @@ void VertexAttributeDivisorModule::on_destroy_device(VkDevice device) {
     {
         std::unique_lock<std::shared_mutex> rw_lock(m_rw_mutex);
         m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
+        if (m_primary_dev.load(std::memory_order_relaxed) == device) {
+            m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_release);
+        }
     }
     {
         std::lock_guard<std::mutex> cmd_lock(m_cmd_mutex);

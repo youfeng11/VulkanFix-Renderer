@@ -73,13 +73,13 @@ public:
     // Marks that rendering/state commands occurred on this command buffer since last barrier.
     inline void on_cmd_action(VkCommandBuffer cmd) {
         if (!m_enabled.load(std::memory_order_relaxed)) return;
-        if (__builtin_expect(cmd == m_primary_cmd.load(std::memory_order_relaxed), 1)) {
-            if (m_primary_had_action) {
-                m_primary_had_action->store(true, std::memory_order_relaxed);
-            }
+        thread_local VkCommandBuffer t_cached_cmd = VK_NULL_HANDLE;
+        thread_local std::atomic<bool>* t_cached_had_action = nullptr;
+        if (__builtin_expect(cmd == t_cached_cmd && t_cached_had_action != nullptr, 1)) {
+            t_cached_had_action->store(true, std::memory_order_relaxed);
             return;
         }
-        notify_action_slow(cmd);
+        notify_action_slow(cmd, t_cached_cmd, t_cached_had_action);
     }
 
     // Command buffer lifecycle hooks
@@ -121,7 +121,7 @@ private:
         bool hasLastBarrier = false;
     };
 
-    void notify_action_slow(VkCommandBuffer cmd);
+    void notify_action_slow(VkCommandBuffer cmd, VkCommandBuffer& outCachedCmd, std::atomic<bool>*& outCachedAction);
     CmdTracker& get_or_create_tracker(VkCommandBuffer cmd);
 
     std::atomic<bool> m_enabled{true};

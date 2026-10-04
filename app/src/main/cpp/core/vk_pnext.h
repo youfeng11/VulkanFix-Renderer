@@ -4,6 +4,7 @@
 #include "vk_common.h"
 #include <vector>
 #include <cstring>
+#include <algorithm>
 
 namespace vku {
 
@@ -116,6 +117,7 @@ inline bool remove_pnext(const void*& pNextHead, VkStructureType sType) {
  * Helper to check if an extension is already present in a vector of VkExtensionProperties.
  */
 inline bool has_extension(const std::vector<VkExtensionProperties>& extensions, const char* name) {
+    if (!name) return false;
     for (const auto& e : extensions) {
         if (std::strcmp(e.extensionName, name) == 0) return true;
     }
@@ -127,16 +129,16 @@ inline bool has_extension(const std::vector<VkExtensionProperties>& extensions, 
  * Returns true if an extension was removed.
  */
 inline bool strip_extension(std::vector<const char*>& extensions, const char* name) {
-    bool stripped = false;
-    for (auto it = extensions.begin(); it != extensions.end(); ) {
-        if (std::strcmp(*it, name) == 0) {
-            it = extensions.erase(it);
-            stripped = true;
-        } else {
-            ++it;
-        }
-    }
-    return stripped;
+    if (!name) return false;
+    const auto orig_size = extensions.size();
+    extensions.erase(
+        std::remove_if(extensions.begin(), extensions.end(),
+            [name](const char* ext) {
+                return ext && std::strcmp(ext, name) == 0;
+            }),
+        extensions.end()
+    );
+    return extensions.size() < orig_size;
 }
 
 } // namespace vku

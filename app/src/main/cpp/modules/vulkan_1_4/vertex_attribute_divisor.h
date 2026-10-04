@@ -232,6 +232,8 @@ private:
     std::unordered_map<uint64_t, bool> m_device_needs_emulation;
     std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
     std::atomic<VkDevice> m_last_device{VK_NULL_HANDLE};
+    std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
+    std::atomic<bool> m_primary_native{false};
 
     std::atomic<bool> m_has_divisor_pipelines{false};
     std::unordered_map<uint64_t, std::shared_ptr<PipelineDivisorInfo>> m_pipeline_divisors;

@@ -3,6 +3,7 @@
 
 #include "layer_module.h"
 #include "driver_loader.h"
+#include "vk_pnext.h"
 #include <string>
 #include <unordered_map>
 #include <mutex>
@@ -71,10 +72,8 @@ public:
     ) override {
         if (is_phys_device_native(physicalDevice)) return;
 
-        for (const auto& ext : extensions) {
-            if (strcmp(ext.extensionName, m_extension_name.c_str()) == 0) {
-                return;
-            }
+        if (vku::has_extension(extensions, m_extension_name.c_str())) {
+            return;
         }
 
         VkExtensionProperties prop{};
@@ -95,13 +94,8 @@ public:
         if (is_phys_device_native(physicalDevice)) return;
 
         // Auto-strip extension from enabledExtensions for the native driver
-        for (auto it = enabledExtensions.begin(); it != enabledExtensions.end(); ) {
-            if (strcmp(*it, m_extension_name.c_str()) == 0) {
-                it = enabledExtensions.erase(it);
-                LOGI("[%s] vkCreateDevice: safely stripped from enabledExtensions", m_extension_name.c_str());
-            } else {
-                ++it;
-            }
+        if (vku::strip_extension(enabledExtensions, m_extension_name.c_str())) {
+            LOGI("[%s] vkCreateDevice: safely stripped from enabledExtensions", m_extension_name.c_str());
         }
 
         on_pre_create_device_custom(physicalDevice, pCreateInfo, pEnabledFeatures, enabledExtensions, pUserData);

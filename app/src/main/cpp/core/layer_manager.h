@@ -30,6 +30,7 @@ struct DeviceDispatchTable {
     PFN_vkCmdResetEvent CmdResetEvent = nullptr;
     PFN_vkCmdWaitEvents CmdWaitEvents = nullptr;
     PFN_vkCmdWriteTimestamp CmdWriteTimestamp = nullptr;
+    PFN_vkCmdWriteTimestamp2KHR CmdWriteTimestamp2 = nullptr;
     PFN_vkQueueWaitIdle QueueWaitIdle = nullptr;
     PFN_vkDeviceWaitIdle DeviceWaitIdle = nullptr;
     PFN_vkGetDeviceQueue GetDeviceQueue = nullptr;
@@ -62,6 +63,7 @@ struct DeviceDispatchTable {
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets = nullptr;
     PFN_vkAllocateDescriptorSets AllocateDescriptorSets = nullptr;
     PFN_vkFreeDescriptorSets FreeDescriptorSets = nullptr;
+    PFN_vkResetDescriptorPool ResetDescriptorPool = nullptr;
     PFN_vkCreateSemaphore CreateSemaphore = nullptr;
     PFN_vkDestroySemaphore DestroySemaphore = nullptr;
     PFN_vkGetSemaphoreCounterValueKHR GetSemaphoreCounterValue = nullptr;
@@ -103,6 +105,7 @@ struct DeviceDispatchTable {
 
 struct DeviceBypassFlags {
     bool bypass_draw = false;
+    bool bypass_multi_draw = false;
     bool bypass_sync2 = false;
     bool bypass_dynamic_rendering = false;
     bool bypass_push_descriptor = false;
@@ -762,6 +765,10 @@ private:
     IVulkanLayerModule* m_swapchain_mod = nullptr;
     IVulkanLayerModule* m_bda_mod = nullptr;
     IVulkanLayerModule* m_host_query_reset_mod = nullptr;
+    IVulkanLayerModule* m_maintenance_mod = nullptr;
+    IVulkanLayerModule* m_get_mem_reqs2_mod = nullptr;
+    IVulkanLayerModule* m_desc_template_mod = nullptr;
+    IVulkanLayerModule* m_bind_mem2_mod = nullptr;
 
     std::atomic<bool> m_divisor_bypass_active{false};
     DeviceBypassFlags m_primary_bypass_flags{};

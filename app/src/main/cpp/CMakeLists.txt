@@ -76,12 +76,15 @@ target_compile_options(vulkan_fix PRIVATE
         -fomit-frame-pointer
         -ffunction-sections
         -fdata-sections
+        -flto=thin
     >
 )
 
 target_link_options(vulkan_fix PRIVATE
+    -Wl,-z,max-page-size=16384
     $<$<CONFIG:Release>:
         -Wl,--gc-sections
         -Wl,-Bsymbolic
+        -flto=thin
     >
 )

@@ -41,9 +41,15 @@ bool DrawIndirectFirstInstanceModule::is_phys_device_native(VkPhysicalDevice phy
 }
 
 bool DrawIndirectFirstInstanceModule::is_device_native(VkDevice device) {
+    if (device == VK_NULL_HANDLE) return false;
+    if (__builtin_expect(device == m_cached_device.load(std::memory_order_relaxed), 1)) {
+        return m_cached_device_native.load(std::memory_order_relaxed);
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_device_native_support.find((uint64_t)(uintptr_t)device);
     if (it != m_device_native_support.end()) {
+        m_cached_device.store(device, std::memory_order_relaxed);
+        m_cached_device_native.store(it->second, std::memory_order_relaxed);
         return it->second;
     }
     if (!m_phys_native_support.empty()) {
@@ -122,6 +128,8 @@ void DrawIndirectFirstInstanceModule::on_post_create_device(
         bool native = is_phys_device_native(physicalDevice);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
+        m_cached_device.store(device, std::memory_order_release);
+        m_cached_device_native.store(native, std::memory_order_release);
         LOGI("Device %p created: drawIndirectFirstInstance %s", device, native ? "NATIVE" : "EMULATED");
     }
 }
@@ -129,4 +137,7 @@ void DrawIndirectFirstInstanceModule::on_post_create_device(
 void DrawIndirectFirstInstanceModule::on_destroy_device(VkDevice device) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_device_native_support.erase((uint64_t)(uintptr_t)device);
+    if (m_cached_device.load(std::memory_order_relaxed) == device) {
+        m_cached_device.store(VK_NULL_HANDLE, std::memory_order_release);
+    }
 }

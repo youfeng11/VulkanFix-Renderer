@@ -697,6 +697,91 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     if (is_device_native(device) || !pRenderingInfo) return false;
 
     const uint32_t colorCount = pRenderingInfo->colorAttachmentCount;
+
+    // Fast-path MRU (Most Recently Used) Fingerprint Cache:
+    // If the rendering attachments and render area match the previous call on this thread,
+    // directly execute using cached renderPass & framebuffer without any heap allocation or lock.
+    struct ThreadMRU {
+        uint64_t fingerprint = 0;
+        VkDevice device = VK_NULL_HANDLE;
+        VkRenderPass renderPass = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    };
+    thread_local ThreadMRU t_mru{};
+
+    uint64_t fp = (uint64_t)colorCount;
+    for (uint32_t i = 0; i < colorCount; ++i) {
+        const auto& att = pRenderingInfo->pColorAttachments[i];
+        fp ^= ((uint64_t)(uintptr_t)att.imageView >> 3) + 0x9e3779b97f4a7c15ULL + (fp << 6) + (fp >> 2);
+        fp ^= ((uint64_t)att.loadOp << 4) ^ ((uint64_t)att.storeOp << 8) ^ ((uint64_t)att.imageLayout << 16);
+        if (att.resolveImageView != VK_NULL_HANDLE) {
+            fp ^= ((uint64_t)(uintptr_t)att.resolveImageView >> 3) + 0x517cc1b727220a95ULL;
+        }
+    }
+    if (pRenderingInfo->pDepthAttachment && pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
+        fp ^= ((uint64_t)(uintptr_t)pRenderingInfo->pDepthAttachment->imageView >> 3) + 0x9e3779b97f4a7c15ULL;
+        fp ^= ((uint64_t)pRenderingInfo->pDepthAttachment->loadOp << 24) ^ ((uint64_t)pRenderingInfo->pDepthAttachment->storeOp << 28);
+    }
+    if (pRenderingInfo->pStencilAttachment && pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
+        fp ^= ((uint64_t)(uintptr_t)pRenderingInfo->pStencilAttachment->imageView >> 3) + 0x517cc1b727220a95ULL;
+        fp ^= ((uint64_t)pRenderingInfo->pStencilAttachment->loadOp << 32) ^ ((uint64_t)pRenderingInfo->pStencilAttachment->storeOp << 36);
+    }
+    fp ^= ((uint64_t)pRenderingInfo->renderArea.offset.x << 40) ^ ((uint64_t)pRenderingInfo->renderArea.offset.y << 44);
+    fp ^= ((uint64_t)pRenderingInfo->renderArea.extent.width << 48) ^ ((uint64_t)pRenderingInfo->renderArea.extent.height << 56);
+
+    if (__builtin_expect(fp != 0 && t_mru.fingerprint == fp && t_mru.device == device &&
+                         t_mru.renderPass != VK_NULL_HANDLE && t_mru.framebuffer != VK_NULL_HANDLE, 1)) {
+        constexpr uint32_t SBO_CLEAR_LIMIT = 8;
+        VkClearValue stackClears[SBO_CLEAR_LIMIT];
+        uint32_t clearCount = 0;
+        for (uint32_t i = 0; i < colorCount && clearCount < SBO_CLEAR_LIMIT; ++i) {
+            if (pRenderingInfo->pColorAttachments[i].imageView != VK_NULL_HANDLE) {
+                stackClears[clearCount++] = pRenderingInfo->pColorAttachments[i].clearValue;
+            }
+        }
+        if (pRenderingInfo->pDepthAttachment && pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE && clearCount < SBO_CLEAR_LIMIT) {
+            VkClearValue dsClear{};
+            dsClear.depthStencil.depth = pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth;
+            if (pRenderingInfo->pStencilAttachment) {
+                dsClear.depthStencil.stencil = pRenderingInfo->pStencilAttachment->clearValue.depthStencil.stencil;
+            } else {
+                dsClear.depthStencil.stencil = pRenderingInfo->pDepthAttachment->clearValue.depthStencil.stencil;
+            }
+            stackClears[clearCount++] = dsClear;
+        }
+
+        {
+            std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
+            CmdRenderingState& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
+            state.device = device;
+            state.is_rendering = true;
+            state.activeRenderPass = t_mru.renderPass;
+            state.activeFramebuffer = t_mru.framebuffer;
+        }
+
+        VkRenderPassBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        beginInfo.renderPass = t_mru.renderPass;
+        beginInfo.framebuffer = t_mru.framebuffer;
+        beginInfo.renderArea = pRenderingInfo->renderArea;
+        beginInfo.clearValueCount = clearCount;
+        beginInfo.pClearValues = clearCount > 0 ? stackClears : NULL;
+
+        VkSubpassContents contents = (pRenderingInfo->flags & VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT_KHR) ?
+            VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE;
+
+        const auto& dt = LayerManager::get().get_dispatch_table(device);
+        if (dt.CmdBeginRenderPass) {
+            dt.CmdBeginRenderPass(commandBuffer, &beginInfo, contents);
+        } else {
+            PFN_vkCmdBeginRenderPass real_begin_rp = (PFN_vkCmdBeginRenderPass)
+                get_real_proc(get_last_instance(), device, "vkCmdBeginRenderPass");
+            if (!real_begin_rp) return false;
+            real_begin_rp(commandBuffer, &beginInfo, contents);
+        }
+        return true;
+    }
+
     const uint32_t maxAttCount = colorCount * 2 + 1;
 
     DynamicRenderPassKey rpKey;
@@ -998,6 +1083,11 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             real_begin_rp(commandBuffer, &beginInfo, contents);
         }
 
+        t_mru.fingerprint = fp;
+        t_mru.device = device;
+        t_mru.renderPass = renderPass;
+        t_mru.framebuffer = framebuffer;
+
         LOG_OPT_DEBUG("DynamicRendering: emulated vkCmdBeginRenderingKHR for cmd %p (fast path)", commandBuffer);
         return true;
     }
@@ -1126,6 +1216,11 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         state.activeRenderPass = renderPass;
         state.activeFramebuffer = framebuffer;
     }
+
+    t_mru.fingerprint = fp;
+    t_mru.device = device;
+    t_mru.renderPass = renderPass;
+    t_mru.framebuffer = framebuffer;
 
     LOG_OPT_DEBUG("DynamicRendering: emulated vkCmdBeginRenderingKHR for cmd %p", commandBuffer);
     return true;

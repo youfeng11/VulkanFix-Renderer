@@ -297,8 +297,12 @@ void PushDescriptorModule::reset_cmd_pools(VkCommandBuffer cmd) {
     auto it = m_cmd_states.find((uint64_t)(uintptr_t)cmd);
     if (it == m_cmd_states.end()) return;
 
-    PFN_vkResetDescriptorPool real_reset_pool = (PFN_vkResetDescriptorPool)
-        get_real_proc(get_last_instance(), it->second.device, "vkResetDescriptorPool");
+    const auto& dt = LayerManager::get().get_dispatch_table(it->second.device);
+    PFN_vkResetDescriptorPool real_reset_pool = dt.ResetDescriptorPool;
+    if (!real_reset_pool) {
+        real_reset_pool = (PFN_vkResetDescriptorPool)
+            get_real_proc(get_last_instance(), it->second.device, "vkResetDescriptorPool");
+    }
     if (real_reset_pool) {
         for (VkDescriptorPool pool : it->second.pools) {
             real_reset_pool(it->second.device, pool, 0);
@@ -369,8 +373,20 @@ VkDescriptorPool PushDescriptorModule::create_pool(VkDevice device, uint32_t max
 }
 
 VkDescriptorSet PushDescriptorModule::allocate_push_set(VkDevice device, VkCommandBuffer cmd, VkDescriptorSetLayout setLayout) {
-    std::lock_guard<std::mutex> lock(m_cmd_mutex);
-    CmdPushState& state = m_cmd_states[(uint64_t)(uintptr_t)cmd];
+    thread_local VkCommandBuffer s_cached_cmd = VK_NULL_HANDLE;
+    thread_local CmdPushState* s_cached_state = nullptr;
+
+    CmdPushState* pState = nullptr;
+    if (__builtin_expect(cmd == s_cached_cmd && s_cached_state != nullptr, 1)) {
+        pState = s_cached_state;
+    } else {
+        std::lock_guard<std::mutex> lock(m_cmd_mutex);
+        pState = &m_cmd_states[(uint64_t)(uintptr_t)cmd];
+        s_cached_cmd = cmd;
+        s_cached_state = pState;
+    }
+
+    CmdPushState& state = *pState;
     state.device = device;
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
