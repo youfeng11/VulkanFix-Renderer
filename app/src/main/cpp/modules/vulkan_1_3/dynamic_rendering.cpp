@@ -177,42 +177,6 @@ VkDevice DynamicRenderingModule::get_device_for_cmd(VkCommandBuffer cmd) {
     return LayerManager::get().get_device_for_cmd(cmd);
 }
 
-DynamicRenderingModule::ImageViewMeta DynamicRenderingModule::get_image_view_meta(VkImageView view) {
-    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
-    auto it = m_image_views.find((uint64_t)(uintptr_t)view);
-    if (it != m_image_views.end()) {
-        return it->second;
-    }
-    return ImageViewMeta{};
-}
-
-VkFormat DynamicRenderingModule::get_image_view_format(VkImageView view) {
-    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
-    auto it = m_image_views.find((uint64_t)(uintptr_t)view);
-    if (it != m_image_views.end() && it->second.format != VK_FORMAT_UNDEFINED) {
-        return it->second.format;
-    }
-    return VK_FORMAT_R8G8B8A8_UNORM;
-}
-
-VkSampleCountFlagBits DynamicRenderingModule::get_image_view_samples(VkImageView view) {
-    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
-    auto it = m_image_views.find((uint64_t)(uintptr_t)view);
-    if (it != m_image_views.end()) {
-        return it->second.samples;
-    }
-    return VK_SAMPLE_COUNT_1_BIT;
-}
-
-VkExtent2D DynamicRenderingModule::get_image_view_extent(VkImageView view) {
-    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
-    auto it = m_image_views.find((uint64_t)(uintptr_t)view);
-    if (it != m_image_views.end()) {
-        return it->second.extent;
-    }
-    return {0, 0};
-}
-
 void DynamicRenderingModule::on_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
     std::vector<VkExtensionProperties>& extensions

@@ -228,10 +228,6 @@ private:
     bool is_phys_device_native(VkPhysicalDevice physDev);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
 
-    VkFormat get_image_view_format(VkImageView view);
-    VkSampleCountFlagBits get_image_view_samples(VkImageView view);
-    VkExtent2D get_image_view_extent(VkImageView view);
-
     VkRenderPass get_or_create_pipeline_render_pass(
         VkDevice device,
         uint32_t colorAttachmentCount,
@@ -256,8 +252,6 @@ private:
         VkImage image = VK_NULL_HANDLE;
         VkImageUsageFlags usage = 0;
     };
-
-    ImageViewMeta get_image_view_meta(VkImageView view);
 
     struct PipelineRenderPassKey {
         std::vector<VkFormat> colorFormats;
