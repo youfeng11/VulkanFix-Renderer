@@ -3,97 +3,6 @@
 #include "layer_manager.h"
 #include <string.h>
 #include <string>
-#include <dirent.h>
-#include <sys/stat.h>
-
-static void repair_options_file(const std::string& filepath) {
-    FILE* f = fopen(filepath.c_str(), "rb");
-    if (!f) return;
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz <= 0 || sz > 2 * 1024 * 1024) { fclose(f); return; }
-
-    std::string content(sz, '\0');
-    if (fread(&content[0], 1, sz, f) != (size_t)sz) { fclose(f); return; }
-    fclose(f);
-
-    bool modified = false;
-
-    // 1. Fix graphicsApiPreference
-    size_t pos = content.find("graphicsApiPreference:");
-    if (pos != std::string::npos) {
-        size_t eol = content.find('\n', pos);
-        if (eol == std::string::npos) eol = content.length();
-        std::string line = content.substr(pos, eol - pos);
-        if (line.find("prefer_vulkan") == std::string::npos) {
-            content.replace(pos, eol - pos, "graphicsApiPreference:prefer_vulkan");
-            modified = true;
-            LOGI("Repaired %s: set graphicsApiPreference:prefer_vulkan", filepath.c_str());
-        }
-    } else {
-        if (!content.empty() && content.back() != '\n') content += '\n';
-        content += "graphicsApiPreference:prefer_vulkan\n";
-        modified = true;
-        LOGI("Appended to %s: graphicsApiPreference:prefer_vulkan", filepath.c_str());
-    }
-
-    // 2. Fix graphicsApi
-    pos = content.find("graphicsApi:");
-    if (pos != std::string::npos) {
-        size_t eol = content.find('\n', pos);
-        if (eol == std::string::npos) eol = content.length();
-        std::string line = content.substr(pos, eol - pos);
-        if (line.find("vulkan") == std::string::npos) {
-            content.replace(pos, eol - pos, "graphicsApi:vulkan");
-            modified = true;
-            LOGI("Repaired %s: set graphicsApi:vulkan", filepath.c_str());
-        }
-    }
-
-    if (modified) {
-        f = fopen(filepath.c_str(), "wb");
-        if (f) {
-            fwrite(content.data(), 1, content.size(), f);
-            fclose(f);
-            LOGI("Successfully saved repaired options to %s", filepath.c_str());
-        }
-    }
-}
-
-static void check_and_repair_options() {
-    repair_options_file("options.txt");
-    repair_options_file("../options.txt");
-
-    DIR* vdir = opendir("versions");
-    if (vdir) {
-        struct dirent* entry;
-        while ((entry = readdir(vdir)) != NULL) {
-            if (entry->d_name[0] == '.') continue;
-            std::string path = std::string("versions/") + entry->d_name + "/options.txt";
-            repair_options_file(path);
-        }
-        closedir(vdir);
-    }
-
-    const char* home = getenv("HOME");
-    if (home) {
-        std::string mc_dir = std::string(home) + "/.minecraft";
-        repair_options_file(mc_dir + "/options.txt");
-
-        std::string versions_dir = mc_dir + "/versions";
-        DIR* dir = opendir(versions_dir.c_str());
-        if (dir) {
-            struct dirent* entry;
-            while ((entry = readdir(dir)) != NULL) {
-                if (entry->d_name[0] == '.') continue;
-                std::string path = versions_dir + "/" + entry->d_name + "/options.txt";
-                repair_options_file(path);
-            }
-            closedir(dir);
-        }
-    }
-}
 
 __attribute__((constructor))
 static void init_vulkan_layer() {
@@ -104,7 +13,6 @@ static void init_vulkan_layer() {
     manager.init_registered_modules();
 
     register_vulkan_ptr();
-    check_and_repair_options();
     LOGI("Vulkan Layer initialization completed successfully");
 }
 
