@@ -376,7 +376,9 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
     // Hot path 1: vkCmd...
     if (pName[0] == 'v' && pName[1] == 'k' && pName[2] == 'C' && pName[3] == 'm' && pName[4] == 'd') {
         const char* cmd = pName + 5; // e.g. "DrawIndexed", "BindPipeline", "PipelineBarrier2", etc.
-        if (flags.bypass_draw) {
+        const char c0 = cmd[0];
+
+        if (flags.bypass_draw && (c0 == 'D' || c0 == 'B')) {
             if (strcmp(cmd, "DrawIndexed") == 0 ||
                 strcmp(cmd, "Draw") == 0 ||
                 strcmp(cmd, "BindPipeline") == 0 ||
@@ -386,37 +388,39 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
                 return false; // Direct bypass! Driver native!
             }
         }
-        if (flags.bypass_multi_draw) {
+        if (flags.bypass_multi_draw && c0 == 'D') {
             if (strcmp(cmd, "DrawIndirect") == 0 ||
                 strcmp(cmd, "DrawIndexedIndirect") == 0) {
                 return false; // Direct bypass! Driver native!
             }
         }
         // Pipeline barriers are intercepted for TBDR Tile flush optimization when optimizer is active
-        if (!TBDRBarrierOptimizer::get().is_enabled()) {
+        if (c0 == 'P' && !TBDRBarrierOptimizer::get().is_enabled()) {
             if (strcmp(cmd, "PipelineBarrier") == 0) {
                 return false;
             }
         }
         if (flags.bypass_sync2) {
-            if (!TBDRBarrierOptimizer::get().is_enabled()) {
+            if (c0 == 'P' && !TBDRBarrierOptimizer::get().is_enabled()) {
                 if (strcmp(cmd, "PipelineBarrier2") == 0 ||
                     strcmp(cmd, "PipelineBarrier2KHR") == 0) {
                     return false;
                 }
             }
-            if (strcmp(cmd, "SetEvent2") == 0 ||
-                strcmp(cmd, "SetEvent2KHR") == 0 ||
-                strcmp(cmd, "ResetEvent2") == 0 ||
-                strcmp(cmd, "ResetEvent2KHR") == 0 ||
-                strcmp(cmd, "WaitEvents2") == 0 ||
-                strcmp(cmd, "WaitEvents2KHR") == 0 ||
-                strcmp(cmd, "WriteTimestamp2") == 0 ||
-                strcmp(cmd, "WriteTimestamp2KHR") == 0) {
-                return false;
+            if (c0 == 'S' || c0 == 'R' || c0 == 'W') {
+                if (strcmp(cmd, "SetEvent2") == 0 ||
+                    strcmp(cmd, "SetEvent2KHR") == 0 ||
+                    strcmp(cmd, "ResetEvent2") == 0 ||
+                    strcmp(cmd, "ResetEvent2KHR") == 0 ||
+                    strcmp(cmd, "WaitEvents2") == 0 ||
+                    strcmp(cmd, "WaitEvents2KHR") == 0 ||
+                    strcmp(cmd, "WriteTimestamp2") == 0 ||
+                    strcmp(cmd, "WriteTimestamp2KHR") == 0) {
+                    return false;
+                }
             }
         }
-        if (flags.bypass_dynamic_rendering) {
+        if (flags.bypass_dynamic_rendering && (c0 == 'B' || c0 == 'E')) {
             if (strcmp(cmd, "BeginRendering") == 0 ||
                 strcmp(cmd, "BeginRenderingKHR") == 0 ||
                 strcmp(cmd, "EndRendering") == 0 ||
@@ -424,13 +428,13 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
                 return false;
             }
         }
-        if (flags.bypass_push_descriptor) {
+        if (flags.bypass_push_descriptor && c0 == 'P') {
             if (strcmp(cmd, "PushDescriptorSetKHR") == 0 ||
                 strcmp(cmd, "PushDescriptorSetWithTemplateKHR") == 0) {
                 return false;
             }
         }
-        if (flags.bypass_draw_indirect_count) {
+        if (flags.bypass_draw_indirect_count && c0 == 'D') {
             if (strcmp(cmd, "DrawIndirectCount") == 0 ||
                 strcmp(cmd, "DrawIndirectCountKHR") == 0 ||
                 strcmp(cmd, "DrawIndirectCountAMD") == 0 ||
@@ -440,7 +444,7 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
                 return false;
             }
         }
-        if (flags.bypass_renderpass2) {
+        if (flags.bypass_renderpass2 && (c0 == 'B' || c0 == 'N' || c0 == 'E')) {
             if (strcmp(cmd, "BeginRenderPass2") == 0 ||
                 strcmp(cmd, "BeginRenderPass2KHR") == 0 ||
                 strcmp(cmd, "NextSubpass2") == 0 ||
@@ -450,7 +454,7 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
                 return false;
             }
         }
-        if (flags.bypass_device_group) {
+        if (flags.bypass_device_group && (c0 == 'S' || c0 == 'D')) {
             if (strcmp(cmd, "SetDeviceMask") == 0 ||
                 strcmp(cmd, "SetDeviceMaskKHR") == 0 ||
                 strcmp(cmd, "DispatchBase") == 0 ||
