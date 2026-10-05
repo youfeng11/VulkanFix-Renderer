@@ -205,6 +205,15 @@ public:
         VkDevice device,
         VkImageView imageView) override;
 
+    void on_post_get_swapchain_images(
+        VkDevice device,
+        VkSwapchainKHR swapchain,
+        VkFormat format,
+        VkExtent2D extent,
+        VkImageUsageFlags usage,
+        uint32_t count,
+        const VkImage* pImages) override;
+
     // 7. Dynamic Rendering Commands:
     bool on_cmd_begin_rendering(
         VkCommandBuffer commandBuffer,

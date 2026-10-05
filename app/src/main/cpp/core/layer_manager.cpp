@@ -2706,19 +2706,38 @@ VkResult LayerManager::dispatch_create_swapchain(
     VkResult res = VK_SUCCESS;
     if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
         if (m_swapchain_mod->on_create_swapchain(device, pCreateInfo, pAllocator, pSwapchain, res)) {
+            if (res == VK_SUCCESS && pSwapchain && *pSwapchain != VK_NULL_HANDLE && pCreateInfo) {
+                std::lock_guard<std::mutex> lk(m_swapchain_meta_mutex);
+                m_swapchain_meta[(uint64_t)(uintptr_t)*pSwapchain] = {
+                    pCreateInfo->imageFormat,
+                    pCreateInfo->imageExtent,
+                    pCreateInfo->imageUsage
+                };
+            }
             return res;
         }
     }
     const auto& dt = get_dispatch_table(device);
     if (dt.CreateSwapchain) {
-        return dt.CreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
+        res = dt.CreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
+    } else {
+        PFN_vkCreateSwapchainKHR real_fn =
+            (PFN_vkCreateSwapchainKHR) get_real_proc(get_last_instance(), device, "vkCreateSwapchainKHR");
+        if (real_fn) {
+            res = real_fn(device, pCreateInfo, pAllocator, pSwapchain);
+        } else {
+            res = VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
     }
-    PFN_vkCreateSwapchainKHR real_fn =
-        (PFN_vkCreateSwapchainKHR) get_real_proc(get_last_instance(), device, "vkCreateSwapchainKHR");
-    if (real_fn) {
-        return real_fn(device, pCreateInfo, pAllocator, pSwapchain);
+    if (res == VK_SUCCESS && pSwapchain && *pSwapchain != VK_NULL_HANDLE && pCreateInfo) {
+        std::lock_guard<std::mutex> lk(m_swapchain_meta_mutex);
+        m_swapchain_meta[(uint64_t)(uintptr_t)*pSwapchain] = {
+            pCreateInfo->imageFormat,
+            pCreateInfo->imageExtent,
+            pCreateInfo->imageUsage
+        };
     }
-    return VK_ERROR_EXTENSION_NOT_PRESENT;
+    return res;
 }
 
 void LayerManager::dispatch_destroy_swapchain(
@@ -2726,6 +2745,10 @@ void LayerManager::dispatch_destroy_swapchain(
     VkSwapchainKHR swapchain,
     const VkAllocationCallbacks* pAllocator
 ) {
+    {
+        std::lock_guard<std::mutex> lk(m_swapchain_meta_mutex);
+        m_swapchain_meta.erase((uint64_t)(uintptr_t)swapchain);
+    }
     if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
         if (m_swapchain_mod->on_destroy_swapchain(device, swapchain, pAllocator)) {
             return;
@@ -2752,19 +2775,63 @@ VkResult LayerManager::dispatch_get_swapchain_images(
     VkResult res = VK_SUCCESS;
     if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
         if (m_swapchain_mod->on_get_swapchain_images(device, swapchain, pSwapchainImageCount, pSwapchainImages, res)) {
-            return res;
+            // Handled below if successful
+        } else {
+            const auto& dt = get_dispatch_table(device);
+            if (dt.GetSwapchainImages) {
+                res = dt.GetSwapchainImages(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+            } else {
+                PFN_vkGetSwapchainImagesKHR real_fn =
+                    (PFN_vkGetSwapchainImagesKHR) get_real_proc(get_last_instance(), device, "vkGetSwapchainImagesKHR");
+                if (real_fn) {
+                    res = real_fn(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+                } else {
+                    res = VK_ERROR_EXTENSION_NOT_PRESENT;
+                }
+            }
+        }
+    } else {
+        const auto& dt = get_dispatch_table(device);
+        if (dt.GetSwapchainImages) {
+            res = dt.GetSwapchainImages(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+        } else {
+            PFN_vkGetSwapchainImagesKHR real_fn =
+                (PFN_vkGetSwapchainImagesKHR) get_real_proc(get_last_instance(), device, "vkGetSwapchainImagesKHR");
+            if (real_fn) {
+                res = real_fn(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+            } else {
+                res = VK_ERROR_EXTENSION_NOT_PRESENT;
+            }
         }
     }
-    const auto& dt = get_dispatch_table(device);
-    if (dt.GetSwapchainImages) {
-        return dt.GetSwapchainImages(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+
+    if (res == VK_SUCCESS && pSwapchainImages && pSwapchainImageCount && *pSwapchainImageCount > 0) {
+        SwapchainMetadata meta{};
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lk(m_swapchain_meta_mutex);
+            auto it = m_swapchain_meta.find((uint64_t)(uintptr_t)swapchain);
+            if (it != m_swapchain_meta.end()) {
+                meta = it->second;
+                found = true;
+            }
+        }
+        if (found) {
+            std::lock_guard<std::recursive_mutex> lock(m_modules_mutex);
+            for (auto& mod : m_modules) {
+                mod->on_post_get_swapchain_images(
+                    device,
+                    swapchain,
+                    meta.format,
+                    meta.extent,
+                    meta.usage,
+                    *pSwapchainImageCount,
+                    pSwapchainImages
+                );
+            }
+        }
     }
-    PFN_vkGetSwapchainImagesKHR real_fn =
-        (PFN_vkGetSwapchainImagesKHR) get_real_proc(get_last_instance(), device, "vkGetSwapchainImagesKHR");
-    if (real_fn) {
-        return real_fn(device, swapchain, pSwapchainImageCount, pSwapchainImages);
-    }
-    return VK_ERROR_EXTENSION_NOT_PRESENT;
+    return res;
 }
 
 VkResult LayerManager::dispatch_acquire_next_image(

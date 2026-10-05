@@ -40,23 +40,28 @@ TBDRBarrierOptimizer& TBDRBarrierOptimizer::get() {
 TBDRBarrierOptimizer::TBDRBarrierOptimizer() {
     const char* env_opt = getenv("VULKAN_FIX_OPTIMIZE_BARRIER");
     const char* env_tbdr = getenv("VULKAN_FIX_OPTIMIZE_TBDR");
-    if ((env_opt && (strcmp(env_opt, "0") == 0 || strcasecmp(env_opt, "false") == 0)) ||
-        (env_tbdr && (strcmp(env_tbdr, "0") == 0 || strcasecmp(env_tbdr, "false") == 0))) {
-        m_enabled.store(false, std::memory_order_relaxed);
-        LOGI("TBDRBarrierOptimizer: disabled via environment variable");
-    } else {
+    if ((env_opt && (strcmp(env_opt, "1") == 0 || strcasecmp(env_opt, "true") == 0)) ||
+        (env_tbdr && (strcmp(env_tbdr, "1") == 0 || strcasecmp(env_tbdr, "true") == 0))) {
         m_enabled.store(true, std::memory_order_relaxed);
-        LOGI("TBDRBarrierOptimizer: initialized and ENABLED (No-Op Elimination, Consecutive Dedup, TBDR Stage Narrowing)");
+        LOGI("TBDRBarrierOptimizer: initialized and ENABLED via environment variable");
+    } else {
+        m_enabled.store(false, std::memory_order_relaxed);
+        LOGI("TBDRBarrierOptimizer: disabled by default (pass-through for zero-overhead native stability)");
     }
 
     const char* env_narrow = getenv("VULKAN_FIX_BARRIER_NARROW");
-    if (env_narrow && (strcmp(env_narrow, "0") == 0 || strcasecmp(env_narrow, "false") == 0)) {
-        m_narrow_stages.store(false, std::memory_order_relaxed);
+    if (env_narrow && (strcmp(env_narrow, "1") == 0 || strcasecmp(env_narrow, "true") == 0)) {
+        m_narrow_stages.store(true, std::memory_order_relaxed);
     }
 
     const char* env_dedup = getenv("VULKAN_FIX_BARRIER_DEDUP");
-    if (env_dedup && (strcmp(env_dedup, "0") == 0 || strcasecmp(env_dedup, "false") == 0)) {
-        m_dedup_consecutive.store(false, std::memory_order_relaxed);
+    if (env_dedup && (strcmp(env_dedup, "1") == 0 || strcasecmp(env_dedup, "true") == 0)) {
+        m_dedup_consecutive.store(true, std::memory_order_relaxed);
+    }
+
+    const char* env_strip = getenv("VULKAN_FIX_BARRIER_STRIP");
+    if (env_strip && (strcmp(env_strip, "1") == 0 || strcasecmp(env_strip, "true") == 0)) {
+        m_strip_noops.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -74,13 +79,11 @@ TBDRBarrierOptimizer::CmdTracker& TBDRBarrierOptimizer::get_or_create_tracker(Vk
     return ref;
 }
 
-void TBDRBarrierOptimizer::notify_action_slow(VkCommandBuffer cmd, VkCommandBuffer& outCachedCmd, std::atomic<bool>*& outCachedAction) {
+void TBDRBarrierOptimizer::notify_action_slow(VkCommandBuffer cmd) {
     std::lock_guard<std::mutex> lock(m_tracker_mutex);
     auto it = m_trackers.find((uint64_t)(uintptr_t)cmd);
     if (it != m_trackers.end()) {
         it->second->hadAction.store(true, std::memory_order_relaxed);
-        outCachedCmd = cmd;
-        outCachedAction = &it->second->hadAction;
     }
 }
 
@@ -144,11 +147,10 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             if (strip_noops) {
                 if (b.oldLayout == b.newLayout &&
                     b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
-                    if (b.srcAccessMask == b.dstAccessMask ||
-                        (b.srcAccessMask == 0 && b.dstAccessMask == 0) ||
-                        (is_read_only_access2(b.srcAccessMask) && is_read_only_access2(b.dstAccessMask))) {
+                    if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
+                        is_read_only_access2(b.srcAccessMask) && is_read_only_access2(b.dstAccessMask)) {
                         m_stat_stripped_img.fetch_add(1, std::memory_order_relaxed);
-                        continue; // Strip redundant image barrier!
+                        continue; // Strip redundant read-only image barrier!
                     }
                 }
             }
@@ -204,8 +206,8 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
 
             if (strip_noops) {
                 if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
-                    if ((b.srcAccessMask == 0 && b.dstAccessMask == 0) ||
-                        (is_read_only_access2(b.srcAccessMask) && is_read_only_access2(b.dstAccessMask))) {
+                    if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
+                        is_read_only_access2(b.srcAccessMask) && is_read_only_access2(b.dstAccessMask)) {
                         m_stat_stripped_buf.fetch_add(1, std::memory_order_relaxed);
                         continue; // Strip redundant buffer barrier!
                     }
@@ -268,16 +270,7 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
         }
     }
 
-    // 4. Empty barrier check
-    if (storage.imageBarriers.empty() && storage.bufferBarriers.empty() && storage.memoryBarriers.empty()) {
-        if (pSrc->dependencyFlags == 0) {
-            m_stat_eliminated.fetch_add(1, std::memory_order_relaxed);
-            LOG_OPT_DEBUG("TBDRBarrierOptimizer: eliminated empty pipeline barrier for cmd %p", cmd);
-            return false; // COMPLETELY DROPPED!
-        }
-    }
-
-    // 5. Consecutive Duplicate Barrier Check
+    // 4. Consecutive Duplicate Barrier Check
     if (dedup) {
         std::lock_guard<std::mutex> lock(m_tracker_mutex);
         CmdTracker& tracker = get_or_create_tracker(cmd);
@@ -304,7 +297,7 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
         tracker.hadAction.store(false, std::memory_order_relaxed);
     }
 
-    // 6. Build optimized DependencyInfo
+    // 5. Build optimized DependencyInfo
     outOptimized = *pSrc;
     outOptimized.memoryBarrierCount = (uint32_t)storage.memoryBarriers.size();
     outOptimized.pMemoryBarriers = storage.memoryBarriers.empty() ? nullptr : storage.memoryBarriers.data();
@@ -312,23 +305,6 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
     outOptimized.pBufferMemoryBarriers = storage.bufferBarriers.empty() ? nullptr : storage.bufferBarriers.data();
     outOptimized.imageMemoryBarrierCount = (uint32_t)storage.imageBarriers.size();
     outOptimized.pImageMemoryBarriers = storage.imageBarriers.empty() ? nullptr : storage.imageBarriers.data();
-
-    // Promote in-pass dependencies to BY_REGION for TBDR tile locality
-    if (outOptimized.imageMemoryBarrierCount > 0 && (outOptimized.dependencyFlags & VK_DEPENDENCY_BY_REGION_BIT) == 0) {
-        bool all_attachments = true;
-        for (const auto& ib : storage.imageBarriers) {
-            if (ib.oldLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
-                ib.oldLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
-                ib.newLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
-                ib.newLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-                all_attachments = false;
-                break;
-            }
-        }
-        if (all_attachments) {
-            outOptimized.dependencyFlags |= VK_DEPENDENCY_BY_REGION_BIT;
-        }
-    }
 
     return true;
 }
@@ -371,9 +347,8 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
             if (strip_noops) {
                 if (b.oldLayout == b.newLayout &&
                     b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
-                    if (b.srcAccessMask == b.dstAccessMask ||
-                        (b.srcAccessMask == 0 && b.dstAccessMask == 0) ||
-                        (is_read_only_access1(b.srcAccessMask) && is_read_only_access1(b.dstAccessMask))) {
+                    if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
+                        is_read_only_access1(b.srcAccessMask) && is_read_only_access1(b.dstAccessMask)) {
                         m_stat_stripped_img.fetch_add(1, std::memory_order_relaxed);
                         continue;
                     }
@@ -396,8 +371,8 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
             const auto& b = pInOutBufBarriers[i];
             if (strip_noops) {
                 if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
-                    if ((b.srcAccessMask == 0 && b.dstAccessMask == 0) ||
-                        (is_read_only_access1(b.srcAccessMask) && is_read_only_access1(b.dstAccessMask))) {
+                    if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
+                        is_read_only_access1(b.srcAccessMask) && is_read_only_access1(b.dstAccessMask)) {
                         m_stat_stripped_buf.fetch_add(1, std::memory_order_relaxed);
                         continue;
                     }
@@ -424,14 +399,6 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
             hash_combine_64(barrier_hash, (uint64_t)b.srcAccessMask);
             hash_combine_64(barrier_hash, (uint64_t)b.dstAccessMask);
             storage.memoryBarriers.push_back(b);
-        }
-    }
-
-    // Empty barrier check
-    if (storage.imageBarriers.empty() && storage.bufferBarriers.empty() && storage.memoryBarriers.empty()) {
-        if (inOutDependencyFlags == 0 && (inOutSrcStageMask == inOutDstStageMask || inOutSrcStageMask == VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT)) {
-            m_stat_eliminated.fetch_add(1, std::memory_order_relaxed);
-            return false; // DROPPED!
         }
     }
 
@@ -489,23 +456,6 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
                 inOutDstStageMask = (inOutDstStageMask & ~VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
                 m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
             }
-        }
-    }
-
-    // Promote in-pass dependencies to BY_REGION for TBDR tile locality
-    if (storage.imageBarriers.size() > 0 && (inOutDependencyFlags & VK_DEPENDENCY_BY_REGION_BIT) == 0) {
-        bool all_attachments = true;
-        for (const auto& ib : storage.imageBarriers) {
-            if (ib.oldLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
-                ib.oldLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
-                ib.newLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
-                ib.newLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-                all_attachments = false;
-                break;
-            }
-        }
-        if (all_attachments) {
-            inOutDependencyFlags |= VK_DEPENDENCY_BY_REGION_BIT;
         }
     }
 

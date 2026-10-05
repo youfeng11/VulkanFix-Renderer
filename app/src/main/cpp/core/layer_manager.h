@@ -774,6 +774,14 @@ private:
     DeviceBypassFlags m_primary_bypass_flags{};
     std::atomic<bool> m_has_primary_bypass{false};
     std::unordered_map<uint64_t, DeviceBypassFlags> m_device_bypass_flags;
+
+    struct SwapchainMetadata {
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        VkExtent2D extent = {0, 0};
+        VkImageUsageFlags usage = 0;
+    };
+    std::mutex m_swapchain_meta_mutex;
+    std::unordered_map<uint64_t, SwapchainMetadata> m_swapchain_meta;
 };
 
 /**

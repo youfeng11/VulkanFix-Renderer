@@ -73,13 +73,11 @@ public:
     // Marks that rendering/state commands occurred on this command buffer since last barrier.
     inline void on_cmd_action(VkCommandBuffer cmd) {
         if (!m_enabled.load(std::memory_order_relaxed)) return;
-        thread_local VkCommandBuffer t_cached_cmd = VK_NULL_HANDLE;
-        thread_local std::atomic<bool>* t_cached_had_action = nullptr;
-        if (__builtin_expect(cmd == t_cached_cmd && t_cached_had_action != nullptr, 1)) {
-            t_cached_had_action->store(true, std::memory_order_relaxed);
+        if (m_primary_cmd.load(std::memory_order_relaxed) == cmd && m_primary_had_action) {
+            m_primary_had_action->store(true, std::memory_order_relaxed);
             return;
         }
-        notify_action_slow(cmd, t_cached_cmd, t_cached_had_action);
+        notify_action_slow(cmd);
     }
 
     // Command buffer lifecycle hooks
@@ -121,13 +119,13 @@ private:
         bool hasLastBarrier = false;
     };
 
-    void notify_action_slow(VkCommandBuffer cmd, VkCommandBuffer& outCachedCmd, std::atomic<bool>*& outCachedAction);
+    void notify_action_slow(VkCommandBuffer cmd);
     CmdTracker& get_or_create_tracker(VkCommandBuffer cmd);
 
-    std::atomic<bool> m_enabled{true};
-    std::atomic<bool> m_narrow_stages{true};
-    std::atomic<bool> m_dedup_consecutive{true};
-    std::atomic<bool> m_strip_noops{true};
+    std::atomic<bool> m_enabled{false};
+    std::atomic<bool> m_narrow_stages{false};
+    std::atomic<bool> m_dedup_consecutive{false};
+    std::atomic<bool> m_strip_noops{false};
 
     // Primary command buffer fast-path cache (eliminates map lookups on hot draw calls)
     std::atomic<VkCommandBuffer> m_primary_cmd{VK_NULL_HANDLE};

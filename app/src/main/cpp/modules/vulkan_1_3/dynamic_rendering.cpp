@@ -73,17 +73,26 @@ static VkImageLayout sanitize_color_layout(VkImageLayout layout) {
         layout == VK_IMAGE_LAYOUT_GENERAL ||
         layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ||
         layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
-        layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+        layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ||
+        layout == VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR) {
         return layout;
+    }
+    if (layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        return VK_IMAGE_LAYOUT_UNDEFINED;
     }
     return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 }
 
 static VkImageLayout sanitize_depth_layout(VkImageLayout layout) {
-    if (layout == VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR) {
+    if (layout == VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR ||
+        layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL ||
+        layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL) {
         return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
-    if (layout == VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL_KHR) {
+    if (layout == VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL_KHR ||
+        layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL ||
+        layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL) {
         return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     }
     if (layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
@@ -94,20 +103,10 @@ static VkImageLayout sanitize_depth_layout(VkImageLayout layout) {
         layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         return layout;
     }
-    return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-}
-
-static bool is_tbdr_opt_enabled() {
-    const char* env = getenv("VULKAN_FIX_OPTIMIZE_TBDR");
-    if (env && (strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0)) {
-        return false;
+    if (layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        return VK_IMAGE_LAYOUT_UNDEFINED;
     }
-    return true;
-}
-
-static bool is_aggressive_depth_store_opt() {
-    const char* env = getenv("FORCE_OPTIMIZE_DEPTH_STORE");
-    return env && (strcmp(env, "1") == 0 || strcasecmp(env, "true") == 0);
+    return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 }
 
 DynamicRenderingModule::DynamicRenderingModule() {
@@ -689,6 +688,40 @@ void DynamicRenderingModule::on_destroy_image_view(
     }
 }
 
+void DynamicRenderingModule::on_post_get_swapchain_images(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    VkFormat format,
+    VkExtent2D extent,
+    VkImageUsageFlags usage,
+    uint32_t count,
+    const VkImage* pImages
+) {
+    if (!pImages || count == 0) return;
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+    for (uint32_t i = 0; i < count; ++i) {
+        VkImage image = pImages[i];
+        if (image == VK_NULL_HANDLE) continue;
+        ImageMeta meta;
+        meta.format = format;
+        meta.samples = VK_SAMPLE_COUNT_1_BIT;
+        meta.extent = {extent.width, extent.height, 1};
+        meta.usage = usage;
+        m_images[(uint64_t)(uintptr_t)image] = meta;
+
+        for (auto& pair : m_image_views) {
+            if (pair.second.image == image) {
+                pair.second.extent = extent;
+                pair.second.usage = usage;
+                pair.second.samples = VK_SAMPLE_COUNT_1_BIT;
+                if (pair.second.format == VK_FORMAT_UNDEFINED) {
+                    pair.second.format = format;
+                }
+            }
+        }
+    }
+}
+
 bool DynamicRenderingModule::on_cmd_begin_rendering(
     VkCommandBuffer commandBuffer,
     const VkRenderingInfo* pRenderingInfo
@@ -697,91 +730,6 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     if (is_device_native(device) || !pRenderingInfo) return false;
 
     const uint32_t colorCount = pRenderingInfo->colorAttachmentCount;
-
-    // Fast-path MRU (Most Recently Used) Fingerprint Cache:
-    // If the rendering attachments and render area match the previous call on this thread,
-    // directly execute using cached renderPass & framebuffer without any heap allocation or lock.
-    struct ThreadMRU {
-        uint64_t fingerprint = 0;
-        VkDevice device = VK_NULL_HANDLE;
-        VkRenderPass renderPass = VK_NULL_HANDLE;
-        VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    };
-    thread_local ThreadMRU t_mru{};
-
-    uint64_t fp = (uint64_t)colorCount;
-    for (uint32_t i = 0; i < colorCount; ++i) {
-        const auto& att = pRenderingInfo->pColorAttachments[i];
-        fp ^= ((uint64_t)(uintptr_t)att.imageView >> 3) + 0x9e3779b97f4a7c15ULL + (fp << 6) + (fp >> 2);
-        fp ^= ((uint64_t)att.loadOp << 4) ^ ((uint64_t)att.storeOp << 8) ^ ((uint64_t)att.imageLayout << 16);
-        if (att.resolveImageView != VK_NULL_HANDLE) {
-            fp ^= ((uint64_t)(uintptr_t)att.resolveImageView >> 3) + 0x517cc1b727220a95ULL;
-        }
-    }
-    if (pRenderingInfo->pDepthAttachment && pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
-        fp ^= ((uint64_t)(uintptr_t)pRenderingInfo->pDepthAttachment->imageView >> 3) + 0x9e3779b97f4a7c15ULL;
-        fp ^= ((uint64_t)pRenderingInfo->pDepthAttachment->loadOp << 24) ^ ((uint64_t)pRenderingInfo->pDepthAttachment->storeOp << 28);
-    }
-    if (pRenderingInfo->pStencilAttachment && pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
-        fp ^= ((uint64_t)(uintptr_t)pRenderingInfo->pStencilAttachment->imageView >> 3) + 0x517cc1b727220a95ULL;
-        fp ^= ((uint64_t)pRenderingInfo->pStencilAttachment->loadOp << 32) ^ ((uint64_t)pRenderingInfo->pStencilAttachment->storeOp << 36);
-    }
-    fp ^= ((uint64_t)pRenderingInfo->renderArea.offset.x << 40) ^ ((uint64_t)pRenderingInfo->renderArea.offset.y << 44);
-    fp ^= ((uint64_t)pRenderingInfo->renderArea.extent.width << 48) ^ ((uint64_t)pRenderingInfo->renderArea.extent.height << 56);
-
-    if (__builtin_expect(fp != 0 && t_mru.fingerprint == fp && t_mru.device == device &&
-                         t_mru.renderPass != VK_NULL_HANDLE && t_mru.framebuffer != VK_NULL_HANDLE, 1)) {
-        constexpr uint32_t SBO_CLEAR_LIMIT = 8;
-        VkClearValue stackClears[SBO_CLEAR_LIMIT];
-        uint32_t clearCount = 0;
-        for (uint32_t i = 0; i < colorCount && clearCount < SBO_CLEAR_LIMIT; ++i) {
-            if (pRenderingInfo->pColorAttachments[i].imageView != VK_NULL_HANDLE) {
-                stackClears[clearCount++] = pRenderingInfo->pColorAttachments[i].clearValue;
-            }
-        }
-        if (pRenderingInfo->pDepthAttachment && pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE && clearCount < SBO_CLEAR_LIMIT) {
-            VkClearValue dsClear{};
-            dsClear.depthStencil.depth = pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth;
-            if (pRenderingInfo->pStencilAttachment) {
-                dsClear.depthStencil.stencil = pRenderingInfo->pStencilAttachment->clearValue.depthStencil.stencil;
-            } else {
-                dsClear.depthStencil.stencil = pRenderingInfo->pDepthAttachment->clearValue.depthStencil.stencil;
-            }
-            stackClears[clearCount++] = dsClear;
-        }
-
-        {
-            std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
-            CmdRenderingState& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
-            state.device = device;
-            state.is_rendering = true;
-            state.activeRenderPass = t_mru.renderPass;
-            state.activeFramebuffer = t_mru.framebuffer;
-        }
-
-        VkRenderPassBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        beginInfo.renderPass = t_mru.renderPass;
-        beginInfo.framebuffer = t_mru.framebuffer;
-        beginInfo.renderArea = pRenderingInfo->renderArea;
-        beginInfo.clearValueCount = clearCount;
-        beginInfo.pClearValues = clearCount > 0 ? stackClears : NULL;
-
-        VkSubpassContents contents = (pRenderingInfo->flags & VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT_KHR) ?
-            VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE;
-
-        const auto& dt = LayerManager::get().get_dispatch_table(device);
-        if (dt.CmdBeginRenderPass) {
-            dt.CmdBeginRenderPass(commandBuffer, &beginInfo, contents);
-        } else {
-            PFN_vkCmdBeginRenderPass real_begin_rp = (PFN_vkCmdBeginRenderPass)
-                get_real_proc(get_last_instance(), device, "vkCmdBeginRenderPass");
-            if (!real_begin_rp) return false;
-            real_begin_rp(commandBuffer, &beginInfo, contents);
-        }
-        return true;
-    }
-
     const uint32_t maxAttCount = colorCount * 2 + 1;
 
     DynamicRenderPassKey rpKey;
@@ -839,16 +787,11 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             aDesc.samples = samples;
             aDesc.loadOp = att.loadOp;
             aDesc.storeOp = att.storeOp;
-            aDesc.initialLayout = sanitize_color_layout(att.imageLayout);
-            aDesc.finalLayout = aDesc.initialLayout;
-            aDesc.refLayout = aDesc.initialLayout;
-
-            // TBDR optimization: Prevent loading uninitialized DDR data into Tile memory
-            if (is_tbdr_opt_enabled() && aDesc.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
-                if (aDesc.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
-                    aDesc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-                }
-            }
+            VkImageLayout sanitized = sanitize_color_layout(att.imageLayout);
+            aDesc.initialLayout = sanitized;
+            aDesc.refLayout = (sanitized == VK_IMAGE_LAYOUT_UNDEFINED) ?
+                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : sanitized;
+            aDesc.finalLayout = aDesc.refLayout;
             rpKey.colorAttachments.push_back(aDesc);
 
             VkAttachmentDescription vkDesc{};
@@ -904,37 +847,9 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             }
         }
 
-        // TBDR mobile optimizations for depth/stencil attachments:
-        if (is_tbdr_opt_enabled()) {
-            // 1. Prevent loading undefined contents from DDR into on-chip Tile memory
-            if (dsDesc.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
-                if (dsDesc.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
-                    dsDesc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-                }
-                if (dsDesc.stencilLoadOp == VK_ATTACHMENT_LOAD_OP_LOAD) {
-                    dsDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-                }
-            }
-
-            // 2. Intelligent DONT_CARE storeOp conversion:
-            // Check if image usage indicates it is transient or will never be sampled/copied
-            VkImageUsageFlags dsUsage = (it != m_image_views.end()) ? it->second.usage : 0;
-            bool isTransient = (dsUsage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT) != 0;
-            bool cannotBeSampled = (dsUsage != 0) &&
-                ((dsUsage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT)) == 0);
-
-            if (isTransient || cannotBeSampled || is_aggressive_depth_store_opt()) {
-                if (dsDesc.storeOp == VK_ATTACHMENT_STORE_OP_STORE) {
-                    dsDesc.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                }
-                if (dsDesc.stencilStoreOp == VK_ATTACHMENT_STORE_OP_STORE) {
-                    dsDesc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                }
-            }
-        }
-
-        dsDesc.finalLayout = dsDesc.initialLayout;
-        dsDesc.refLayout = dsDesc.initialLayout;
+        dsDesc.refLayout = (dsDesc.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED) ?
+                           VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : dsDesc.initialLayout;
+        dsDesc.finalLayout = dsDesc.refLayout;
 
         VkAttachmentDescription vkDesc{};
         vkDesc.format = dsDesc.format;
@@ -978,9 +893,11 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                 rDesc.samples = VK_SAMPLE_COUNT_1_BIT;
                 rDesc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 rDesc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-                rDesc.initialLayout = sanitize_color_layout(att.resolveImageLayout);
-                rDesc.finalLayout = rDesc.initialLayout;
-                rDesc.refLayout = rDesc.initialLayout;
+                VkImageLayout sanitized = sanitize_color_layout(att.resolveImageLayout);
+                rDesc.initialLayout = sanitized;
+                rDesc.refLayout = (sanitized == VK_IMAGE_LAYOUT_UNDEFINED) ?
+                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : sanitized;
+                rDesc.finalLayout = rDesc.refLayout;
                 rpKey.resolveAttachments.push_back(rDesc);
 
                 VkAttachmentDescription vkDesc{};
@@ -1011,19 +928,26 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     }
 
     // Framebuffer dimensions calculation
-    uint32_t fb_w = pRenderingInfo->renderArea.offset.x + pRenderingInfo->renderArea.extent.width;
-    uint32_t fb_h = pRenderingInfo->renderArea.offset.y + pRenderingInfo->renderArea.extent.height;
-    if (fb_w == 0 || fb_h == 0) {
-        for (VkImageView v : fbViews) {
-            auto it = m_image_views.find((uint64_t)(uintptr_t)v);
-            if (it != m_image_views.end()) {
-                fb_w = std::max(fb_w, it->second.extent.width);
-                fb_h = std::max(fb_h, it->second.extent.height);
-            }
+    uint32_t fb_w = 0;
+    uint32_t fb_h = 0;
+    for (VkImageView v : fbViews) {
+        auto it = m_image_views.find((uint64_t)(uintptr_t)v);
+        if (it != m_image_views.end() && it->second.extent.width > 0 && it->second.extent.height > 0) {
+            fb_w = (fb_w == 0) ? it->second.extent.width : std::min(fb_w, it->second.extent.width);
+            fb_h = (fb_h == 0) ? it->second.extent.height : std::min(fb_h, it->second.extent.height);
         }
-        if (fb_w == 0) fb_w = 1;
-        if (fb_h == 0) fb_h = 1;
     }
+    uint32_t area_w = pRenderingInfo->renderArea.offset.x + pRenderingInfo->renderArea.extent.width;
+    uint32_t area_h = pRenderingInfo->renderArea.offset.y + pRenderingInfo->renderArea.extent.height;
+    if (fb_w == 0 || fb_h == 0) {
+        fb_w = area_w;
+        fb_h = area_h;
+    } else {
+        fb_w = std::max(fb_w, area_w);
+        fb_h = std::max(fb_h, area_h);
+    }
+    if (fb_w == 0) fb_w = 1;
+    if (fb_h == 0) fb_h = 1;
     uint32_t fb_layers = (pRenderingInfo->layerCount > 0) ? pRenderingInfo->layerCount : 1;
 
     // 4. Cache Lookup
@@ -1082,11 +1006,6 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             if (!real_begin_rp) return false;
             real_begin_rp(commandBuffer, &beginInfo, contents);
         }
-
-        t_mru.fingerprint = fp;
-        t_mru.device = device;
-        t_mru.renderPass = renderPass;
-        t_mru.framebuffer = framebuffer;
 
         LOG_OPT_DEBUG("DynamicRendering: emulated vkCmdBeginRenderingKHR for cmd %p (fast path)", commandBuffer);
         return true;
@@ -1216,11 +1135,6 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         state.activeRenderPass = renderPass;
         state.activeFramebuffer = framebuffer;
     }
-
-    t_mru.fingerprint = fp;
-    t_mru.device = device;
-    t_mru.renderPass = renderPass;
-    t_mru.framebuffer = framebuffer;
 
     LOG_OPT_DEBUG("DynamicRendering: emulated vkCmdBeginRenderingKHR for cmd %p", commandBuffer);
     return true;

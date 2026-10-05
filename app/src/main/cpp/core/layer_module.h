@@ -499,6 +499,15 @@ public:
         VkImage* pSwapchainImages,
         VkResult& outResult) { return false; }
 
+    virtual void on_post_get_swapchain_images(
+        VkDevice device,
+        VkSwapchainKHR swapchain,
+        VkFormat format,
+        VkExtent2D extent,
+        VkImageUsageFlags usage,
+        uint32_t count,
+        const VkImage* pImages) {}
+
     virtual bool on_acquire_next_image(
         VkDevice device,
         VkSwapchainKHR swapchain,

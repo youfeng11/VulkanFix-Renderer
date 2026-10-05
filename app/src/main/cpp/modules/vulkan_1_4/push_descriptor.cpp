@@ -345,15 +345,15 @@ VkDescriptorPool PushDescriptorModule::create_pool(VkDevice device, uint32_t max
     if (!real_create_pool) return VK_NULL_HANDLE;
 
     VkDescriptorPoolSize poolSizes[] = {
-        { VK_DESCRIPTOR_TYPE_SAMPLER, maxSets * 2 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, maxSets * 4 },
-        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, maxSets * 4 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, maxSets * 2 },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, maxSets * 2 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, maxSets * 2 },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, maxSets * 4 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, maxSets * 2 },
-        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, maxSets },
+        { VK_DESCRIPTOR_TYPE_SAMPLER, maxSets * 16 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, maxSets * 32 },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, maxSets * 32 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, maxSets * 16 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, maxSets * 8 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, maxSets * 8 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, maxSets * 16 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, maxSets * 16 },
+        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, maxSets * 8 },
     };
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -373,20 +373,8 @@ VkDescriptorPool PushDescriptorModule::create_pool(VkDevice device, uint32_t max
 }
 
 VkDescriptorSet PushDescriptorModule::allocate_push_set(VkDevice device, VkCommandBuffer cmd, VkDescriptorSetLayout setLayout) {
-    thread_local VkCommandBuffer s_cached_cmd = VK_NULL_HANDLE;
-    thread_local CmdPushState* s_cached_state = nullptr;
-
-    CmdPushState* pState = nullptr;
-    if (__builtin_expect(cmd == s_cached_cmd && s_cached_state != nullptr, 1)) {
-        pState = s_cached_state;
-    } else {
-        std::lock_guard<std::mutex> lock(m_cmd_mutex);
-        pState = &m_cmd_states[(uint64_t)(uintptr_t)cmd];
-        s_cached_cmd = cmd;
-        s_cached_state = pState;
-    }
-
-    CmdPushState& state = *pState;
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
+    CmdPushState& state = m_cmd_states[(uint64_t)(uintptr_t)cmd];
     state.device = device;
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);

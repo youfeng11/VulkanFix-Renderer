@@ -44,7 +44,7 @@ static inline VkPipelineStageFlags stage_flags2_to_stage_flags(VkPipelineStageFl
         out |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     }
 
-    if (out == 0 && flags2 == 0) {
+    if (out == 0) {
         out = is_dst ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     }
     return out;
