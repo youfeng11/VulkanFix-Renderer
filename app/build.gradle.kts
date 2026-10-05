@@ -120,46 +120,41 @@ android {
                         )
                         selectable(
                             key = "VULKAN_FIX_EMULATE_DYNAMIC_RENDERING",
-                            check = null,
                             items = RendererConfig.EnvItems(
                                 defaultValue = "auto",
-                                values = listOf("auto", "force", "skip")
+                                values = listOf("force", "skip")
                             ),
                             title = RendererConfig.MetaString("title_emulate_dynamic_rendering_ext")
                         )
                         selectable(
                             key = "VULKAN_FIX_EMULATE_DYNAMIC_RENDERING_FEATURE",
-                            check = null,
                             items = RendererConfig.EnvItems(
                                 defaultValue = "auto",
-                                values = listOf("auto", "force", "skip")
+                                values = listOf("force", "skip")
                             ),
                             title = RendererConfig.MetaString("title_emulate_dynamic_rendering_feat")
                         )
                         selectable(
                             key = "VULKAN_FIX_EMULATE_PUSH_DESCRIPTOR",
-                            check = null,
                             items = RendererConfig.EnvItems(
                                 defaultValue = "auto",
-                                values = listOf("auto", "force", "skip")
+                                values = listOf("force", "skip")
                             ),
                             title = RendererConfig.MetaString("title_emulate_push_descriptor_ext")
                         )
                         selectable(
                             key = "VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID_FEATURE",
-                            check = null,
                             items = RendererConfig.EnvItems(
                                 defaultValue = "auto",
-                                values = listOf("auto", "force", "skip")
+                                values = listOf("force", "skip")
                             ),
                             title = RendererConfig.MetaString("title_emulate_fill_mode_non_solid_feat")
                         )
                         selectable(
                             key = "VULKAN_FIX_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE_FEATURE",
-                            check = null,
                             items = RendererConfig.EnvItems(
                                 defaultValue = "auto",
-                                values = listOf("auto", "force", "skip")
+                                values = listOf("force", "skip")
                             ),
                             title = RendererConfig.MetaString("title_emulate_draw_indirect_first_instance_feat")
                         )
