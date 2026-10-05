@@ -345,9 +345,19 @@ VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     VkSampleCountFlagBits samples,
     uint32_t viewMask
 ) {
+    uint32_t effectiveColorCount = 0;
+    if (pColorAttachmentFormats != NULL) {
+        for (uint32_t i = colorAttachmentCount; i > 0; --i) {
+            if (pColorAttachmentFormats[i - 1] != VK_FORMAT_UNDEFINED) {
+                effectiveColorCount = i;
+                break;
+            }
+        }
+    }
+
     PipelineRenderPassKey key;
-    if (colorAttachmentCount > 0 && pColorAttachmentFormats != NULL) {
-        key.colorFormats.assign(pColorAttachmentFormats, pColorAttachmentFormats + colorAttachmentCount);
+    if (effectiveColorCount > 0 && pColorAttachmentFormats != NULL) {
+        key.colorFormats.assign(pColorAttachmentFormats, pColorAttachmentFormats + effectiveColorCount);
     }
     key.depthFormat = depthAttachmentFormat;
     key.stencilFormat = stencilAttachmentFormat;
@@ -367,7 +377,7 @@ VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     VkAttachmentReference depthRef{};
     bool has_depth = false;
 
-    for (uint32_t i = 0; i < colorAttachmentCount; ++i) {
+    for (uint32_t i = 0; i < effectiveColorCount; ++i) {
         VkFormat fmt = pColorAttachmentFormats ? pColorAttachmentFormats[i] : VK_FORMAT_UNDEFINED;
         if (fmt != VK_FORMAT_UNDEFINED) {
             VkAttachmentDescription desc{};
@@ -617,6 +627,9 @@ void DynamicRenderingModule::on_post_create_image_view(
             meta.extent.width = it->second.extent.width;
             meta.extent.height = it->second.extent.height;
             meta.usage = it->second.usage;
+            if (meta.format == VK_FORMAT_UNDEFINED) {
+                meta.format = it->second.format;
+            }
         }
 
         m_image_views[(uint64_t)(uintptr_t)imageView] = meta;
@@ -693,7 +706,18 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     VkDevice device = get_device_for_cmd(commandBuffer);
     if (is_device_native(device) || !pRenderingInfo) return false;
 
-    const uint32_t colorCount = pRenderingInfo->colorAttachmentCount;
+    uint32_t effectiveColorCount = 0;
+    if (pRenderingInfo->pColorAttachments != NULL) {
+        for (uint32_t i = pRenderingInfo->colorAttachmentCount; i > 0; --i) {
+            if (pRenderingInfo->pColorAttachments[i - 1].imageView != VK_NULL_HANDLE ||
+                pRenderingInfo->pColorAttachments[i - 1].resolveImageView != VK_NULL_HANDLE) {
+                effectiveColorCount = i;
+                break;
+            }
+        }
+    }
+
+    const uint32_t colorCount = effectiveColorCount;
     const uint32_t maxAttCount = colorCount * 2 + 1;
 
     DynamicRenderPassKey rpKey;
@@ -794,7 +818,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         DynamicRenderPassKey::AttachmentDesc& dsDesc = rpKey.depthStencilAttachment;
         auto it = m_image_views.find((uint64_t)(uintptr_t)dsView);
         dsDesc.format = (it != m_image_views.end() && it->second.format != VK_FORMAT_UNDEFINED) ?
-                        it->second.format : VK_FORMAT_R8G8B8A8_UNORM;
+                        it->second.format : VK_FORMAT_D32_SFLOAT;
         dsDesc.samples = (it != m_image_views.end()) ?
                          it->second.samples : VK_SAMPLE_COUNT_1_BIT;
 
@@ -892,27 +916,41 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     }
 
     // Framebuffer dimensions calculation
-    uint32_t fb_w = 0;
-    uint32_t fb_h = 0;
+    // Must NOT exceed the minimum dimension of any attachment (VUID-VkFramebufferCreateInfo-width-01570).
+    uint32_t min_att_w = 0;
+    uint32_t min_att_h = 0;
     for (VkImageView v : fbViews) {
         auto it = m_image_views.find((uint64_t)(uintptr_t)v);
         if (it != m_image_views.end() && it->second.extent.width > 0 && it->second.extent.height > 0) {
-            fb_w = (fb_w == 0) ? it->second.extent.width : std::min(fb_w, it->second.extent.width);
-            fb_h = (fb_h == 0) ? it->second.extent.height : std::min(fb_h, it->second.extent.height);
+            min_att_w = (min_att_w == 0) ? it->second.extent.width : std::min(min_att_w, it->second.extent.width);
+            min_att_h = (min_att_h == 0) ? it->second.extent.height : std::min(min_att_h, it->second.extent.height);
         }
     }
     uint32_t area_w = pRenderingInfo->renderArea.offset.x + pRenderingInfo->renderArea.extent.width;
     uint32_t area_h = pRenderingInfo->renderArea.offset.y + pRenderingInfo->renderArea.extent.height;
-    if (fb_w == 0 || fb_h == 0) {
-        fb_w = area_w;
-        fb_h = area_h;
-    } else {
-        fb_w = std::max(fb_w, area_w);
-        fb_h = std::max(fb_h, area_h);
-    }
+
+    uint32_t fb_w = (min_att_w > 0) ? min_att_w : area_w;
+    uint32_t fb_h = (min_att_h > 0) ? min_att_h : area_h;
     if (fb_w == 0) fb_w = 1;
     if (fb_h == 0) fb_h = 1;
     uint32_t fb_layers = (pRenderingInfo->layerCount > 0) ? pRenderingInfo->layerCount : 1;
+
+    // Clamp renderArea to within framebuffer extents to satisfy VUID-VkRenderPassBeginInfo-renderArea-00171
+    VkRect2D clampedRenderArea = pRenderingInfo->renderArea;
+    if (clampedRenderArea.offset.x < 0) clampedRenderArea.offset.x = 0;
+    if (clampedRenderArea.offset.y < 0) clampedRenderArea.offset.y = 0;
+    if ((uint32_t)clampedRenderArea.offset.x >= fb_w) {
+        clampedRenderArea.offset.x = 0;
+        clampedRenderArea.extent.width = fb_w;
+    } else if ((uint32_t)clampedRenderArea.offset.x + clampedRenderArea.extent.width > fb_w) {
+        clampedRenderArea.extent.width = fb_w - (uint32_t)clampedRenderArea.offset.x;
+    }
+    if ((uint32_t)clampedRenderArea.offset.y >= fb_h) {
+        clampedRenderArea.offset.y = 0;
+        clampedRenderArea.extent.height = fb_h;
+    } else if ((uint32_t)clampedRenderArea.offset.y + clampedRenderArea.extent.height > fb_h) {
+        clampedRenderArea.extent.height = fb_h - (uint32_t)clampedRenderArea.offset.y;
+    }
 
     // 4. Cache Lookup
     VkRenderPass renderPass = VK_NULL_HANDLE;
@@ -954,7 +992,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         beginInfo.renderPass = renderPass;
         beginInfo.framebuffer = framebuffer;
-        beginInfo.renderArea = pRenderingInfo->renderArea;
+        beginInfo.renderArea = clampedRenderArea;
         beginInfo.clearValueCount = (uint32_t) clearValues.size();
         beginInfo.pClearValues = clearValues.empty() ? NULL : clearValues.data();
 
@@ -1074,7 +1112,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     beginInfo.renderPass = renderPass;
     beginInfo.framebuffer = framebuffer;
-    beginInfo.renderArea = pRenderingInfo->renderArea;
+    beginInfo.renderArea = clampedRenderArea;
     beginInfo.clearValueCount = (uint32_t) clearValues.size();
     beginInfo.pClearValues = clearValues.empty() ? NULL : clearValues.data();
 

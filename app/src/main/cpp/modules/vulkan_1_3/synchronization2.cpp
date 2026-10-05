@@ -10,6 +10,13 @@
 
 REGISTER_LAYER_MODULE(Synchronization2Module);
 
+#ifndef VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT
+#define VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT 0x00200000ULL
+#endif
+#ifndef VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT_KHR
+#define VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT_KHR 0x00200000ULL
+#endif
+
 static inline VkPipelineStageFlags stage_flags2_to_stage_flags(VkPipelineStageFlags2 flags2, bool is_dst = false) {
     // Bits 0..16 match standard VkPipelineStageFlagBits in Vulkan 1.0:
     // TOP_OF_PIPE (0x1), DRAW_INDIRECT (0x2), VERTEX_INPUT (0x4), VERTEX_SHADER (0x8),
@@ -23,7 +30,9 @@ static inline VkPipelineStageFlags stage_flags2_to_stage_flags(VkPipelineStageFl
     if (flags2 & (VK_PIPELINE_STAGE_2_COPY_BIT |
                   VK_PIPELINE_STAGE_2_RESOLVE_BIT |
                   VK_PIPELINE_STAGE_2_BLIT_BIT |
-                  VK_PIPELINE_STAGE_2_CLEAR_BIT)) {
+                  VK_PIPELINE_STAGE_2_CLEAR_BIT |
+                  VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
+                  VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT_KHR)) {
         out |= VK_PIPELINE_STAGE_TRANSFER_BIT;
     }
     if (flags2 & (VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
@@ -40,12 +49,14 @@ static inline VkPipelineStageFlags stage_flags2_to_stage_flags(VkPipelineStageFl
                   VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR |
                   VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
                   VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |
-                  VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT)) {
+                  VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT |
+                  VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT |
+                  0x000100000000ULL)) {
         out |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     }
 
-    if (out == 0) {
-        out = is_dst ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    if (out == 0 && flags2 != 0) {
+        out = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     }
     return out;
 }
@@ -72,6 +83,18 @@ static inline VkAccessFlags access_flags2_to_access_flags(VkAccessFlags2 flags2)
                   VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR |
                   VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)) {
         out |= VK_ACCESS_MEMORY_WRITE_BIT;
+    }
+    if (out == 0 && flags2 != 0) {
+        // Fallback for extended 64-bit access flags: check write vs read
+        const VkAccessFlags2 write_mask =
+            VK_ACCESS_2_SHADER_WRITE_BIT |
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+            VK_ACCESS_2_TRANSFER_WRITE_BIT |
+            VK_ACCESS_2_HOST_WRITE_BIT |
+            VK_ACCESS_2_MEMORY_WRITE_BIT |
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        out = (flags2 & write_mask) ? VK_ACCESS_MEMORY_WRITE_BIT : VK_ACCESS_MEMORY_READ_BIT;
     }
     return out;
 }
@@ -535,8 +558,30 @@ bool Synchronization2Module::on_cmd_pipeline_barrier2(
         ib.subresourceRange = b.subresourceRange;
     }
 
-    if (combinedSrc == 0) combinedSrc = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    if (combinedDst == 0) combinedDst = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    if (combinedSrc == 0) combinedSrc = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    if (combinedDst == 0) combinedDst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+    // Vulkan specification VUID: If access mask != 0, stage mask cannot be TOP_OF_PIPE / BOTTOM_OF_PIPE
+    bool has_src_access = false;
+    bool has_dst_access = false;
+    for (uint32_t i = 0; i < pDependencyInfo->memoryBarrierCount; ++i) {
+        if (v1MemBarriers[i].srcAccessMask) has_src_access = true;
+        if (v1MemBarriers[i].dstAccessMask) has_dst_access = true;
+    }
+    for (uint32_t i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; ++i) {
+        if (v1BufBarriers[i].srcAccessMask) has_src_access = true;
+        if (v1BufBarriers[i].dstAccessMask) has_dst_access = true;
+    }
+    for (uint32_t i = 0; i < pDependencyInfo->imageMemoryBarrierCount; ++i) {
+        if (v1ImgBarriers[i].srcAccessMask) has_src_access = true;
+        if (v1ImgBarriers[i].dstAccessMask) has_dst_access = true;
+    }
+    if (has_src_access && (combinedSrc == VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT || combinedSrc == 0)) {
+        combinedSrc = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
+    if (has_dst_access && (combinedDst == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT || combinedDst == 0)) {
+        combinedDst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     if (dt.CmdPipelineBarrier) {

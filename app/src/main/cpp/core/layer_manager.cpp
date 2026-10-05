@@ -948,6 +948,8 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
         if (m_divisor_mod && m_divisor_mod->is_enabled()) {
             m_divisor_mod->on_post_create_graphics_pipelines(device, createInfoCount, modInfos, pPipelines);
         }
+    } else if (res != VK_SUCCESS) {
+        LOGE("vkCreateGraphicsPipelines failed with VkResult: %d", res);
     }
 
     for (void* ptr : allocationsToFree) {

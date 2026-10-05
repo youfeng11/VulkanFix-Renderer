@@ -8,11 +8,32 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <stdio.h>
+#include <stdarg.h>
+
+static inline void file_log(const char* level, const char* fmt, ...) {
+    static FILE* s_fp = nullptr;
+    static bool s_tried = false;
+    if (!s_tried) {
+        s_tried = true;
+        s_fp = fopen("/storage/emulated/0/其它/vulkanfix.log", "w");
+    }
+    if (s_fp) {
+        va_list args;
+        va_start(args, fmt);
+        fprintf(s_fp, "[%s] ", level);
+        vfprintf(s_fp, fmt, args);
+        fprintf(s_fp, "\n");
+        fflush(s_fp);
+        va_end(args);
+    }
+}
+
 #define LOG_TAG "VulkanLayer"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGI(...) do { __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__); file_log("INFO", __VA_ARGS__); } while(0)
+#define LOGW(...) do { __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__); file_log("WARN", __VA_ARGS__); } while(0)
+#define LOGE(...) do { __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); file_log("ERROR", __VA_ARGS__); } while(0)
+#define LOGD(...) do { __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__); } while(0)
 
 static inline bool is_debug_logging() {
     static int s_debug = -1;
