@@ -130,7 +130,6 @@ std::string PipelineCacheManager::resolve_cache_path(
     const uint8_t* uuid
 ) {
     const char* custom_path = getenv("VULKAN_FIX_PIPELINE_CACHE_PATH");
-    if (!custom_path) custom_path = getenv("PIPELINE_CACHE_PATH");
     if (custom_path && custom_path[0] != '\0') {
         if (test_file_writable(custom_path)) {
             LOGI("PipelineCacheManager: Using custom cache path: %s", custom_path);

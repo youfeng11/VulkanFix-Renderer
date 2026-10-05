@@ -92,13 +92,8 @@ static inline void file_log(const char* level, const char* fmt, ...) {
 static inline bool is_debug_logging() {
     static int s_debug = -1;
     if (__builtin_expect(s_debug == -1, 0)) {
-        const char* env1 = getenv("VK_LAYER_DEBUG");
-        const char* env2 = getenv("VK_DEBUG");
-        const char* env3 = getenv("VK_FIX_DEBUG");
-        bool enabled = (env1 && (strcmp(env1, "1") == 0 || strcmp(env1, "true") == 0)) ||
-                       (env2 && (strcmp(env2, "1") == 0 || strcmp(env2, "true") == 0)) ||
-                       (env3 && (strcmp(env3, "1") == 0 || strcmp(env3, "true") == 0));
-        s_debug = enabled ? 1 : 0;
+        const char* env = getenv("VULKAN_FIX_DEBUG");
+        s_debug = (env && (strcmp(env, "1") == 0 || strcasecmp(env, "true") == 0)) ? 1 : 0;
     }
     return s_debug == 1;
 }

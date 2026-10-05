@@ -19,8 +19,7 @@ void init_real_vulkan() {
     void* handle = nullptr;
 
     // 1. Check custom path from environment
-    const char* custom_path = getenv("POJAV_REAL_VULKAN_PATH");
-    if (!custom_path) custom_path = getenv("DRIVER_PATH");
+    const char* custom_path = getenv("VULKAN_FIX_DRIVER_PATH");
     if (custom_path && custom_path[0] != '\0') {
         handle = dlopen(custom_path, RTLD_NOW | RTLD_LOCAL);
         if (handle) {

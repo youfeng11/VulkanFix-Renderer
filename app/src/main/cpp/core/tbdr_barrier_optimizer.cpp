@@ -39,9 +39,7 @@ TBDRBarrierOptimizer& TBDRBarrierOptimizer::get() {
 
 TBDRBarrierOptimizer::TBDRBarrierOptimizer() {
     const char* env_opt = getenv("VULKAN_FIX_OPTIMIZE_BARRIER");
-    const char* env_tbdr = getenv("VULKAN_FIX_OPTIMIZE_TBDR");
-    if ((env_opt && (strcmp(env_opt, "1") == 0 || strcasecmp(env_opt, "true") == 0)) ||
-        (env_tbdr && (strcmp(env_tbdr, "1") == 0 || strcasecmp(env_tbdr, "true") == 0))) {
+    if (env_opt && (strcmp(env_opt, "1") == 0 || strcasecmp(env_opt, "true") == 0)) {
         m_enabled.store(true, std::memory_order_relaxed);
         LOGI("TBDRBarrierOptimizer: initialized and ENABLED via environment variable");
     } else {
