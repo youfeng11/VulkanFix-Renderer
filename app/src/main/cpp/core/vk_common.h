@@ -11,29 +11,83 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-static inline void file_log(const char* level, const char* fmt, ...) {
+static inline FILE* get_writable_log_file() {
     static FILE* s_fp = nullptr;
-    static bool s_tried = false;
-    if (!s_tried) {
-        s_tried = true;
-        s_fp = fopen("/storage/emulated/0/其它/vulkanfix.log", "w");
+    static bool s_initialized = false;
+    if (!s_initialized) {
+        s_initialized = true;
+
+        // 1. Custom environment variable
+        const char* custom_log = getenv("VULKAN_FIX_LOG_PATH");
+        if (custom_log && custom_log[0] != '\0') {
+            s_fp = fopen(custom_log, "w");
+        }
+
+        // 2. App internal sandboxed directory (HOME env, 100% guaranteed writable by process)
+        if (!s_fp) {
+            const char* home = getenv("HOME");
+            if (home && home[0] != '\0') {
+                char path[1024];
+                snprintf(path, sizeof(path), "%s/vulkanfix.log", home);
+                s_fp = fopen(path, "w");
+                if (!s_fp) {
+                    snprintf(path, sizeof(path), "%s/.minecraft/vulkanfix.log", home);
+                    s_fp = fopen(path, "w");
+                }
+            }
+        }
+
+        // 3. Current working directory
+        if (!s_fp) {
+            s_fp = fopen("./vulkanfix.log", "w");
+        }
+
+        // 4. External storage app-private directories
+        if (!s_fp) {
+            const char* ext = getenv("EXTERNAL_STORAGE");
+            if (ext && ext[0] != '\0') {
+                const char* subpaths[] = {
+                    "/Android/data/net.kdt.pojavlaunch/files/vulkanfix.log",
+                    "/Android/data/org.pojavlauncher.mobile/files/vulkanfix.log",
+                    "/vulkanfix.log"
+                };
+                for (const char* sub : subpaths) {
+                    char path[1024];
+                    snprintf(path, sizeof(path), "%s%s", ext, sub);
+                    s_fp = fopen(path, "w");
+                    if (s_fp) break;
+                }
+            }
+        }
+
+        // 5. Fallback paths
+        if (!s_fp) {
+            s_fp = fopen("/data/local/tmp/vulkanfix.log", "w");
+        }
+        if (!s_fp) {
+            s_fp = fopen("/sdcard/vulkanfix.log", "w");
+        }
     }
-    if (s_fp) {
+    return s_fp;
+}
+
+static inline void file_log(const char* level, const char* fmt, ...) {
+    FILE* fp = get_writable_log_file();
+    if (fp) {
         va_list args;
         va_start(args, fmt);
-        fprintf(s_fp, "[%s] ", level);
-        vfprintf(s_fp, fmt, args);
-        fprintf(s_fp, "\n");
-        fflush(s_fp);
+        fprintf(fp, "[%s] ", level);
+        vfprintf(fp, fmt, args);
+        fprintf(fp, "\n");
+        fflush(fp);
         va_end(args);
     }
 }
 
-#define LOG_TAG "VulkanLayer"
-#define LOGI(...) do { __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__); file_log("INFO", __VA_ARGS__); } while(0)
-#define LOGW(...) do { __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__); file_log("WARN", __VA_ARGS__); } while(0)
-#define LOGE(...) do { __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); file_log("ERROR", __VA_ARGS__); } while(0)
-#define LOGD(...) do { __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__); } while(0)
+#define LOGI(...) do { file_log("INFO", __VA_ARGS__); } while(0)
+#define LOGW(...) do { file_log("WARN", __VA_ARGS__); } while(0)
+#define LOGE(...) do { file_log("ERROR", __VA_ARGS__); } while(0)
+#define LOGD(...) do { file_log("DEBUG", __VA_ARGS__); } while(0)
 
 static inline bool is_debug_logging() {
     static int s_debug = -1;
