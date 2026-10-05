@@ -313,9 +313,12 @@ void DynamicRenderingModule::on_destroy_device(VkDevice device) {
     }
 
     m_device_native_support.erase((uint64_t)(uintptr_t)device);
-    m_pipeline_rp_cache.clear();
-    m_dynamic_rp_cache.clear();
-    m_framebuffer_cache.clear();
+    if (m_device_resources.empty()) {
+        m_pipeline_rp_cache.clear();
+        m_dynamic_rp_cache.clear();
+        m_framebuffer_cache.clear();
+        m_image_view_to_framebuffers.clear();
+    }
 }
 
 bool DynamicRenderingModule::needs_pipeline_interception(
@@ -643,25 +646,21 @@ void DynamicRenderingModule::on_destroy_image_view(
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_image_views.erase((uint64_t)(uintptr_t)imageView);
 
-    PFN_vkDestroyFramebuffer real_destroy_fb = (PFN_vkDestroyFramebuffer)
-        get_real_proc(get_last_instance(), device, "vkDestroyFramebuffer");
+    auto listIt = m_image_view_to_framebuffers.find((uint64_t)(uintptr_t)imageView);
+    if (listIt != m_image_view_to_framebuffers.end()) {
+        PFN_vkDestroyFramebuffer real_destroy_fb = (PFN_vkDestroyFramebuffer)
+            get_real_proc(get_last_instance(), device, "vkDestroyFramebuffer");
 
-    for (auto it = m_framebuffer_cache.begin(); it != m_framebuffer_cache.end(); ) {
-        bool uses_view = false;
-        for (VkImageView v : it->first.views) {
-            if (v == imageView) {
-                uses_view = true;
-                break;
+        for (const FramebufferKey& fbKey : listIt->second) {
+            auto fbIt = m_framebuffer_cache.find(fbKey);
+            if (fbIt != m_framebuffer_cache.end()) {
+                if (real_destroy_fb) {
+                    real_destroy_fb(device, fbIt->second, NULL);
+                }
+                m_framebuffer_cache.erase(fbIt);
             }
         }
-        if (uses_view) {
-            if (real_destroy_fb) {
-                real_destroy_fb(device, it->second, NULL);
-            }
-            it = m_framebuffer_cache.erase(it);
-        } else {
-            ++it;
-        }
+        m_image_view_to_framebuffers.erase(listIt);
     }
 }
 
@@ -720,22 +719,45 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     const uint32_t colorCount = effectiveColorCount;
     const uint32_t maxAttCount = colorCount * 2 + 1;
 
-    DynamicRenderPassKey rpKey;
+    struct ThreadScratchBuffers {
+        DynamicRenderPassKey rpKey;
+        std::vector<VkAttachmentDescription> attachments;
+        std::vector<VkAttachmentReference> colorRefs;
+        std::vector<VkAttachmentReference> resolveRefs;
+        std::vector<VkImageView> fbViews;
+        std::vector<VkClearValue> clearValues;
+
+        void clear() {
+            rpKey.colorAttachments.clear();
+            rpKey.has_depth_stencil = false;
+            rpKey.depthStencilAttachment = {};
+            rpKey.resolveAttachments.clear();
+            attachments.clear();
+            colorRefs.clear();
+            resolveRefs.clear();
+            fbViews.clear();
+            clearValues.clear();
+        }
+    };
+    thread_local ThreadScratchBuffers scratch;
+    scratch.clear();
+
+    DynamicRenderPassKey& rpKey = scratch.rpKey;
     rpKey.colorAttachments.reserve(colorCount);
 
-    std::vector<VkAttachmentDescription> attachments;
+    std::vector<VkAttachmentDescription>& attachments = scratch.attachments;
     attachments.reserve(maxAttCount);
 
-    std::vector<VkAttachmentReference> colorRefs;
+    std::vector<VkAttachmentReference>& colorRefs = scratch.colorRefs;
     colorRefs.reserve(colorCount);
 
-    std::vector<VkAttachmentReference> resolveRefs;
+    std::vector<VkAttachmentReference>& resolveRefs = scratch.resolveRefs;
     VkAttachmentReference depthRef{};
 
-    std::vector<VkImageView> fbViews;
+    std::vector<VkImageView>& fbViews = scratch.fbViews;
     fbViews.reserve(maxAttCount);
 
-    std::vector<VkClearValue> clearValues;
+    std::vector<VkClearValue>& clearValues = scratch.clearValues;
     clearValues.reserve(maxAttCount);
 
     VkImageView dsView = VK_NULL_HANDLE;
@@ -1101,6 +1123,11 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                     framebuffer = it->second;
                 } else {
                     m_device_resources[(uint64_t)(uintptr_t)device].framebuffers.push_back(framebuffer);
+                    for (VkImageView v : fbKey.views) {
+                        if (v != VK_NULL_HANDLE) {
+                            m_image_view_to_framebuffers[(uint64_t)(uintptr_t)v].push_back(fbKey);
+                        }
+                    }
                 }
             }
             LOG_OPT_DEBUG("DynamicRendering: created framebuffer %p (%ux%u)", (void*)(uintptr_t)framebuffer, fb_w, fb_h);

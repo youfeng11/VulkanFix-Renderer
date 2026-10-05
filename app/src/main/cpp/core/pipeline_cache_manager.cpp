@@ -411,51 +411,47 @@ VkPipelineCache PipelineCacheManager::prepare_pipeline_cache(VkDevice device, Vk
         return diskCache;
     }
 
-    // If application specified its own cache, merge our disk cache into the app's cache so it benefits from pre-warmed pipelines!
-    const auto& dt = LayerManager::get().get_dispatch_table(device);
-    PFN_vkMergePipelineCaches real_merge = dt.MergePipelineCaches ? dt.MergePipelineCaches :
-        (PFN_vkMergePipelineCaches) get_real_proc(get_last_instance(), device, "vkMergePipelineCaches");
-    if (real_merge) {
-        real_merge(device, appCache, 1, &diskCache);
-    }
-
+    // App provided its own cache: it was pre-warmed upon creation via on_post_create_app_pipeline_cache.
+    // Return appCache directly without repeating expensive vkMergePipelineCaches calls on every pipeline creation!
     return appCache;
 }
 
 void PipelineCacheManager::on_pipelines_created(VkDevice device, VkPipelineCache usedCache, uint32_t count) {
     if (!m_enabled.load(std::memory_order_relaxed) || count == 0 || device == VK_NULL_HANDLE) return;
 
-    VkPipelineCache diskCache = get_disk_cache(device);
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    auto it = m_devices.find((uint64_t)(uintptr_t)device);
+    if (it == m_devices.end() || !it->second) return;
+
+    DevicePipelineCacheState* state = it->second.get();
+    VkPipelineCache diskCache = state->disk_cache;
     if (diskCache == VK_NULL_HANDLE) return;
 
-    // If pipelines were created using an app cache, merge the newly created pipelines back into diskCache
+    // If pipelines were created using an app cache, merge the newly created pipelines back into diskCache safely under lock
     if (usedCache != VK_NULL_HANDLE && usedCache != diskCache) {
         const auto& dt = LayerManager::get().get_dispatch_table(device);
         PFN_vkMergePipelineCaches real_merge = dt.MergePipelineCaches ? dt.MergePipelineCaches :
             (PFN_vkMergePipelineCaches) get_real_proc(get_last_instance(), device, "vkMergePipelineCaches");
         if (real_merge) {
+            std::lock_guard<std::mutex> api_lock(state->cache_api_mutex);
             real_merge(device, diskCache, 1, &usedCache);
         }
     }
 
-    std::shared_lock<std::shared_mutex> lock(m_mutex);
-    auto it = m_devices.find((uint64_t)(uintptr_t)device);
-    if (it != m_devices.end() && it->second) {
-        it->second->pending_pipelines_count.fetch_add(count, std::memory_order_relaxed);
-        it->second->is_dirty.store(true, std::memory_order_release);
+    state->pending_pipelines_count.fetch_add(count, std::memory_order_relaxed);
+    state->is_dirty.store(true, std::memory_order_release);
 
-        int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        m_last_pipeline_created_time_ms.store(now_ms, std::memory_order_release);
-        m_has_pending_flush.store(true, std::memory_order_release);
-        m_flusher_cv.notify_one();
-    }
+    int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    m_last_pipeline_created_time_ms.store(now_ms, std::memory_order_release);
+    m_has_pending_flush.store(true, std::memory_order_release);
+    m_flusher_cv.notify_one();
 }
 
 bool PipelineCacheManager::sync_device_cache_to_disk(VkDevice device, bool force_sync) {
     if (!m_enabled.load(std::memory_order_relaxed) || device == VK_NULL_HANDLE) return false;
 
-    VkPipelineCache disk_cache = VK_NULL_HANDLE;
+    DevicePipelineCacheState* state_ptr = nullptr;
     std::string cache_path;
     bool is_dirty = false;
 
@@ -463,41 +459,45 @@ bool PipelineCacheManager::sync_device_cache_to_disk(VkDevice device, bool force
         std::shared_lock<std::shared_mutex> lock(m_mutex);
         auto it = m_devices.find((uint64_t)(uintptr_t)device);
         if (it == m_devices.end() || !it->second) return false;
-        disk_cache = it->second->disk_cache;
-        cache_path = it->second->cache_file_path;
-        is_dirty = it->second->is_dirty.load(std::memory_order_acquire);
+        state_ptr = it->second.get();
+        cache_path = state_ptr->cache_file_path;
+        is_dirty = state_ptr->is_dirty.load(std::memory_order_acquire);
     }
 
     if (!force_sync && !is_dirty) {
         return true;
     }
 
+    VkPipelineCache disk_cache = state_ptr->disk_cache;
+    if (disk_cache == VK_NULL_HANDLE) return false;
+
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     PFN_vkGetPipelineCacheData real_get_data = dt.GetPipelineCacheData ? dt.GetPipelineCacheData :
         (PFN_vkGetPipelineCacheData) get_real_proc(get_last_instance(), device, "vkGetPipelineCacheData");
     if (!real_get_data) return false;
 
+    std::vector<uint8_t> buffer;
     size_t dataSize = 0;
-    VkResult res = real_get_data(device, disk_cache, &dataSize, nullptr);
-    if (res != VK_SUCCESS || dataSize <= sizeof(VkPipelineCacheHeaderVersionOne)) {
-        return false;
-    }
+    {
+        // Host Synchronization requirement: protect vkGetPipelineCacheData against concurrent vkMergePipelineCaches
+        std::lock_guard<std::mutex> api_lock(state_ptr->cache_api_mutex);
+        VkResult res = real_get_data(device, disk_cache, &dataSize, nullptr);
+        if (res != VK_SUCCESS || dataSize <= sizeof(VkPipelineCacheHeaderVersionOne)) {
+            return false;
+        }
 
-    std::vector<uint8_t> buffer(dataSize);
-    res = real_get_data(device, disk_cache, &dataSize, buffer.data());
-    if (res != VK_SUCCESS) {
-        LOGE("PipelineCacheManager: vkGetPipelineCacheData failed with code %d", res);
-        return false;
+        buffer.resize(dataSize);
+        res = real_get_data(device, disk_cache, &dataSize, buffer.data());
+        if (res != VK_SUCCESS) {
+            LOGE("PipelineCacheManager: vkGetPipelineCacheData failed with code %d", res);
+            return false;
+        }
     }
 
     bool success = write_cache_data_to_file(cache_path, buffer.data(), dataSize);
     if (success) {
-        std::shared_lock<std::shared_mutex> lock(m_mutex);
-        auto it = m_devices.find((uint64_t)(uintptr_t)device);
-        if (it != m_devices.end() && it->second) {
-            it->second->is_dirty.store(false, std::memory_order_release);
-            it->second->pending_pipelines_count.store(0, std::memory_order_relaxed);
-        }
+        state_ptr->is_dirty.store(false, std::memory_order_release);
+        state_ptr->pending_pipelines_count.store(0, std::memory_order_relaxed);
     }
 
     return success;
@@ -505,34 +505,46 @@ bool PipelineCacheManager::sync_device_cache_to_disk(VkDevice device, bool force
 
 void PipelineCacheManager::on_post_create_app_pipeline_cache(VkDevice device, VkPipelineCache appCache) {
     if (!m_enabled.load(std::memory_order_relaxed) || appCache == VK_NULL_HANDLE) return;
-    VkPipelineCache diskCache = get_disk_cache(device);
+
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    auto it = m_devices.find((uint64_t)(uintptr_t)device);
+    if (it == m_devices.end() || !it->second) return;
+
+    DevicePipelineCacheState* state = it->second.get();
+    VkPipelineCache diskCache = state->disk_cache;
     if (diskCache == VK_NULL_HANDLE || diskCache == appCache) return;
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     PFN_vkMergePipelineCaches real_merge = dt.MergePipelineCaches ? dt.MergePipelineCaches :
         (PFN_vkMergePipelineCaches) get_real_proc(get_last_instance(), device, "vkMergePipelineCaches");
     if (real_merge) {
+        std::lock_guard<std::mutex> api_lock(state->cache_api_mutex);
         real_merge(device, appCache, 1, &diskCache);
-        LOGI("PipelineCacheManager: Merged persistent disk cache into newly created app pipeline cache %p", (void*)appCache);
+        LOGI("PipelineCacheManager: Safely merged persistent disk cache into newly created app pipeline cache %p", (void*)appCache);
     }
 }
 
 void PipelineCacheManager::on_pre_destroy_app_pipeline_cache(VkDevice device, VkPipelineCache appCache) {
     if (!m_enabled.load(std::memory_order_relaxed) || appCache == VK_NULL_HANDLE) return;
-    VkPipelineCache diskCache = get_disk_cache(device);
+
+    std::shared_lock<std::shared_mutex> lock(m_mutex);
+    auto it = m_devices.find((uint64_t)(uintptr_t)device);
+    if (it == m_devices.end() || !it->second) return;
+
+    DevicePipelineCacheState* state = it->second.get();
+    VkPipelineCache diskCache = state->disk_cache;
     if (diskCache == VK_NULL_HANDLE || diskCache == appCache) return;
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     PFN_vkMergePipelineCaches real_merge = dt.MergePipelineCaches ? dt.MergePipelineCaches :
         (PFN_vkMergePipelineCaches) get_real_proc(get_last_instance(), device, "vkMergePipelineCaches");
     if (real_merge) {
-        real_merge(device, diskCache, 1, &appCache);
-        std::shared_lock<std::shared_mutex> lock(m_mutex);
-        auto it = m_devices.find((uint64_t)(uintptr_t)device);
-        if (it != m_devices.end() && it->second) {
-            it->second->is_dirty.store(true, std::memory_order_release);
-            m_has_pending_flush.store(true, std::memory_order_release);
-            m_flusher_cv.notify_one();
+        {
+            std::lock_guard<std::mutex> api_lock(state->cache_api_mutex);
+            real_merge(device, diskCache, 1, &appCache);
         }
+        state->is_dirty.store(true, std::memory_order_release);
+        m_has_pending_flush.store(true, std::memory_order_release);
+        m_flusher_cv.notify_one();
     }
 }

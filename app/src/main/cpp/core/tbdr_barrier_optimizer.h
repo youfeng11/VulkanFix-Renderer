@@ -72,11 +72,7 @@ public:
     // High-frequency action notification (called on draw, dispatch, copy, clear, blit)
     // Marks that rendering/state commands occurred on this command buffer since last barrier.
     inline void on_cmd_action(VkCommandBuffer cmd) {
-        if (!m_enabled.load(std::memory_order_relaxed)) return;
-        if (m_primary_cmd.load(std::memory_order_relaxed) == cmd && m_primary_had_action) {
-            m_primary_had_action->store(true, std::memory_order_relaxed);
-            return;
-        }
+        if (!m_enabled.load(std::memory_order_relaxed) || cmd == VK_NULL_HANDLE) return;
         notify_action_slow(cmd);
     }
 
@@ -126,10 +122,6 @@ private:
     std::atomic<bool> m_narrow_stages{false};
     std::atomic<bool> m_dedup_consecutive{false};
     std::atomic<bool> m_strip_noops{false};
-
-    // Primary command buffer fast-path cache (eliminates map lookups on hot draw calls)
-    std::atomic<VkCommandBuffer> m_primary_cmd{VK_NULL_HANDLE};
-    std::atomic<bool>* m_primary_had_action = nullptr;
 
     mutable std::mutex m_tracker_mutex;
     std::unordered_map<uint64_t, std::unique_ptr<CmdTracker>> m_trackers;

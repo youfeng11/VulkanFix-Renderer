@@ -21,6 +21,7 @@ struct DevicePipelineCacheState {
     uint8_t driver_uuid[VK_UUID_SIZE]{};
     uint32_t vendor_id = 0;
     uint32_t device_id = 0;
+    mutable std::mutex cache_api_mutex;
 };
 
 /**

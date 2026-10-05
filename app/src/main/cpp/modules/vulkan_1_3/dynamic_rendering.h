@@ -361,6 +361,7 @@ private:
     std::unordered_map<PipelineRenderPassKey, VkRenderPass, PipelineRenderPassKeyHash> m_pipeline_rp_cache;
     std::unordered_map<DynamicRenderPassKey, VkRenderPass, DynamicRenderPassKeyHash> m_dynamic_rp_cache;
     std::unordered_map<FramebufferKey, VkFramebuffer, FramebufferKeyHash> m_framebuffer_cache;
+    std::unordered_map<uint64_t, std::vector<FramebufferKey>> m_image_view_to_framebuffers;
 
     std::unordered_map<uint64_t, CmdRenderingState> m_cmd_rendering_states;
     std::unordered_map<uint64_t, DeviceResources> m_device_resources;

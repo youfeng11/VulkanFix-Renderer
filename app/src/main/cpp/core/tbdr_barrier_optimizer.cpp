@@ -73,9 +73,6 @@ TBDRBarrierOptimizer::CmdTracker& TBDRBarrierOptimizer::get_or_create_tracker(Vk
     auto tracker = std::make_unique<CmdTracker>();
     CmdTracker& ref = *tracker;
     m_trackers[(uint64_t)(uintptr_t)cmd] = std::move(tracker);
-
-    m_primary_cmd.store(cmd, std::memory_order_release);
-    m_primary_had_action = &ref.hadAction;
     return ref;
 }
 
@@ -104,10 +101,6 @@ void TBDRBarrierOptimizer::on_cmd_reset(VkCommandBuffer cmd) {
 void TBDRBarrierOptimizer::on_cmd_free(VkCommandBuffer cmd) {
     std::lock_guard<std::mutex> lock(m_tracker_mutex);
     m_trackers.erase((uint64_t)(uintptr_t)cmd);
-    if (m_primary_cmd.load(std::memory_order_relaxed) == cmd) {
-        m_primary_cmd.store(VK_NULL_HANDLE, std::memory_order_release);
-        m_primary_had_action = nullptr;
-    }
 }
 
 bool TBDRBarrierOptimizer::optimize_dependency_info(
@@ -143,14 +136,15 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             VkImageMemoryBarrier2 b = pSrc->pImageMemoryBarriers[i];
 
             // Check for No-Op Image Barrier:
-            // Same layout, same queue family, and either identical access masks or read-only access on both sides.
+            // Same layout, same queue family, identical stages, and read-only access on both sides.
             if (strip_noops) {
                 if (b.oldLayout == b.newLayout &&
-                    b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
+                    b.srcQueueFamilyIndex == b.dstQueueFamilyIndex &&
+                    b.srcStageMask == b.dstStageMask) {
                     if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
                         is_read_only_access2(b.srcAccessMask) && is_read_only_access2(b.dstAccessMask)) {
                         m_stat_stripped_img.fetch_add(1, std::memory_order_relaxed);
-                        continue; // Strip redundant read-only image barrier!
+                        continue; // Strip strictly redundant read-only image barrier!
                     }
                 }
             }
@@ -346,7 +340,8 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
             const auto& b = pInOutImgBarriers[i];
             if (strip_noops) {
                 if (b.oldLayout == b.newLayout &&
-                    b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
+                    b.srcQueueFamilyIndex == b.dstQueueFamilyIndex &&
+                    inOutSrcStageMask == inOutDstStageMask) {
                     if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
                         is_read_only_access1(b.srcAccessMask) && is_read_only_access1(b.dstAccessMask)) {
                         m_stat_stripped_img.fetch_add(1, std::memory_order_relaxed);
