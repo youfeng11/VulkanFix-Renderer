@@ -127,11 +127,16 @@ bool Synchronization2Module::is_phys_device_native(VkPhysicalDevice physDev) {
         return it->second;
     }
 
-    const char* force_emu = getenv("FORCE_EMULATE_SYNCHRONIZATION2");
-    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
-        LOGI("FORCE_EMULATE_SYNCHRONIZATION2 set, enabling emulation for physical device %p", physDev);
+    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_SYNCHRONIZATION2", "FORCE_EMULATE_SYNCHRONIZATION2");
+    if (mode == EmulationMode::ForceEmulate) {
+        LOGI("Synchronization2: FORCE EMULATE enabled for physical device %p", physDev);
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
         return false;
+    }
+    if (mode == EmulationMode::Skip) {
+        LOGI("Synchronization2: SKIP/BYPASS enabled for physical device %p", physDev);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = true;
+        return true;
     }
 
     bool native = false;

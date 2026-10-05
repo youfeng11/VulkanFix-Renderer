@@ -100,6 +100,33 @@ static inline bool is_debug_logging() {
 
 #define LOG_OPT_DEBUG(...) do { if (__builtin_expect(is_debug_logging(), 0)) LOGI(__VA_ARGS__); } while(0)
 
+enum class EmulationMode {
+    Auto = 0,        // 自动：根据驱动原生扩展支持自动选择 Native 或 Emulation
+    ForceEmulate,    // 强制模拟：忽略原生扩展，强行使用模块软件/层级模拟
+    Skip             // 跳过/直通：强行禁用模拟，直通原生驱动（Bypass）
+};
+
+static inline EmulationMode parse_emulation_mode(const char* env1, const char* env2 = nullptr) {
+    const char* val = getenv(env1);
+    if ((!val || val[0] == '\0') && env2) {
+        val = getenv(env2);
+    }
+    if (!val || val[0] == '\0') return EmulationMode::Auto;
+
+    if (strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0 ||
+        strcasecmp(val, "force") == 0 || strcasecmp(val, "emulate") == 0 || strcasecmp(val, "on") == 0) {
+        return EmulationMode::ForceEmulate;
+    }
+
+    if (strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0 ||
+        strcasecmp(val, "skip") == 0 || strcasecmp(val, "bypass") == 0 ||
+        strcasecmp(val, "off") == 0 || strcasecmp(val, "native") == 0) {
+        return EmulationMode::Skip;
+    }
+
+    return EmulationMode::Auto;
+}
+
 #define VK_EXPORT __attribute__((visibility("default")))
 #define VK_LAYER_EXPORT __attribute__((visibility("default")))
 

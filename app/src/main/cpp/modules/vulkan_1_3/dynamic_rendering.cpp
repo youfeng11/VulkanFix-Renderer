@@ -122,12 +122,18 @@ bool DynamicRenderingModule::is_phys_device_native(VkPhysicalDevice physDev) {
         }
     }
 
-    const char* force_emu = getenv("FORCE_EMULATE_DYNAMIC_RENDERING");
-    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
-        LOGI("FORCE_EMULATE_DYNAMIC_RENDERING set, enabling emulation for physical device %p", physDev);
+    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_DYNAMIC_RENDERING", "FORCE_EMULATE_DYNAMIC_RENDERING");
+    if (mode == EmulationMode::ForceEmulate) {
+        LOGI("Dynamic Rendering: FORCE EMULATE enabled for physical device %p", physDev);
         std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
         return false;
+    }
+    if (mode == EmulationMode::Skip) {
+        LOGI("Dynamic Rendering: SKIP/BYPASS enabled for physical device %p", physDev);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = true;
+        return true;
     }
 
     bool native = false;
@@ -213,7 +219,18 @@ void DynamicRenderingModule::on_post_get_features2(
     void* pUserData
 ) {
     if (!pFeatures) return;
-    if (is_phys_device_native(physicalDevice)) return;
+
+    EmulationMode featMode = parse_emulation_mode("VULKAN_FIX_EMULATE_DYNAMIC_RENDERING_FEATURE", "FORCE_EMULATE_DYNAMIC_RENDERING_FEATURE");
+    bool should_inject_feature = false;
+    if (featMode == EmulationMode::ForceEmulate) {
+        should_inject_feature = true;
+    } else if (featMode == EmulationMode::Skip) {
+        should_inject_feature = false;
+    } else {
+        should_inject_feature = !is_phys_device_native(physicalDevice);
+    }
+
+    if (!should_inject_feature) return;
 
     if (pUserData) {
         auto* dynFeatures = vku::relink_pnext<VkPhysicalDeviceDynamicRenderingFeaturesKHR>(

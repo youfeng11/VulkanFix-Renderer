@@ -20,12 +20,18 @@ bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
         }
     }
 
-    const char* force_emu = getenv("FORCE_EMULATE_PUSH_DESCRIPTOR");
-    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
-        LOGI("FORCE_EMULATE_PUSH_DESCRIPTOR set, enabling emulation for physical device %p", physDev);
+    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_PUSH_DESCRIPTOR", "FORCE_EMULATE_PUSH_DESCRIPTOR");
+    if (mode == EmulationMode::ForceEmulate) {
+        LOGI("Push Descriptor: FORCE EMULATE enabled for physical device %p", physDev);
         std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
         return false;
+    }
+    if (mode == EmulationMode::Skip) {
+        LOGI("Push Descriptor: SKIP/BYPASS enabled for physical device %p", physDev);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = true;
+        return true;
     }
 
     PFN_vkEnumerateDeviceExtensionProperties real_fn =

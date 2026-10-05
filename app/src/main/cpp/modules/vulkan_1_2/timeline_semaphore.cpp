@@ -60,10 +60,14 @@ void TimelineSemaphoreModule::on_post_get_features2(
 }
 
 bool TimelineSemaphoreModule::query_native_support(VkPhysicalDevice physDev) {
-    const char* force_emu = getenv("FORCE_EMULATE_TIMELINE_SEMAPHORE");
-    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
-        LOGI("FORCE_EMULATE_TIMELINE_SEMAPHORE set, enabling emulation for physical device %p", physDev);
+    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_TIMELINE_SEMAPHORE", "FORCE_EMULATE_TIMELINE_SEMAPHORE");
+    if (mode == EmulationMode::ForceEmulate) {
+        LOGI("Timeline Semaphore: FORCE EMULATE enabled for physical device %p", physDev);
         return false;
+    }
+    if (mode == EmulationMode::Skip) {
+        LOGI("Timeline Semaphore: SKIP/BYPASS enabled for physical device %p", physDev);
+        return true;
     }
 
     PFN_vkGetPhysicalDeviceProperties real_props =

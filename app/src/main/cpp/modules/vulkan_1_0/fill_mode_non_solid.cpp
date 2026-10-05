@@ -16,11 +16,16 @@ bool FillModeNonSolidModule::is_phys_device_native(VkPhysicalDevice physDev) {
         return it->second;
     }
 
-    const char* force_emu = getenv("FORCE_EMULATE_FILL_MODE_NON_SOLID");
-    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
-        LOGI("FORCE_EMULATE_FILL_MODE_NON_SOLID set, enabling emulation for physical device %p", physDev);
+    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID", "FORCE_EMULATE_FILL_MODE_NON_SOLID");
+    if (mode == EmulationMode::ForceEmulate) {
+        LOGI("Fill Mode Non Solid: FORCE EMULATE enabled for physical device %p", physDev);
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
         return false;
+    }
+    if (mode == EmulationMode::Skip) {
+        LOGI("Fill Mode Non Solid: SKIP/BYPASS enabled for physical device %p", physDev);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = true;
+        return true;
     }
 
     PFN_vkGetPhysicalDeviceFeatures real_fn =
@@ -60,7 +65,17 @@ void FillModeNonSolidModule::on_get_features(
     VkPhysicalDeviceFeatures* pFeatures
 ) {
     if (!pFeatures) return;
-    if (!is_phys_device_native(physicalDevice)) {
+    EmulationMode featMode = parse_emulation_mode("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID_FEATURE", "FORCE_EMULATE_FILL_MODE_NON_SOLID_FEATURE");
+    bool should_inject = false;
+    if (featMode == EmulationMode::ForceEmulate) {
+        should_inject = true;
+    } else if (featMode == EmulationMode::Skip) {
+        should_inject = false;
+    } else {
+        should_inject = !is_phys_device_native(physicalDevice);
+    }
+
+    if (should_inject) {
         pFeatures->fillModeNonSolid = VK_TRUE;
         LOG_OPT_DEBUG("Emulated fillModeNonSolid = VK_TRUE in vkGetPhysicalDeviceFeatures");
     }
@@ -72,7 +87,17 @@ void FillModeNonSolidModule::on_post_get_features2(
     void* pUserData
 ) {
     if (!pFeatures) return;
-    if (!is_phys_device_native(physicalDevice)) {
+    EmulationMode featMode = parse_emulation_mode("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID_FEATURE", "FORCE_EMULATE_FILL_MODE_NON_SOLID_FEATURE");
+    bool should_inject = false;
+    if (featMode == EmulationMode::ForceEmulate) {
+        should_inject = true;
+    } else if (featMode == EmulationMode::Skip) {
+        should_inject = false;
+    } else {
+        should_inject = !is_phys_device_native(physicalDevice);
+    }
+
+    if (should_inject) {
         pFeatures->features.fillModeNonSolid = VK_TRUE;
         LOG_OPT_DEBUG("Emulated fillModeNonSolid = VK_TRUE in vkGetPhysicalDeviceFeatures2");
     }

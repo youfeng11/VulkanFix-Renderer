@@ -58,13 +58,20 @@ bool Vulkan12CoreModule::is_phys_device_native(VkPhysicalDevice physDev) {
         realApiVer = props.apiVersion;
     }
 
-    const char* force_emu = getenv("FORCE_EMULATE_VULKAN_1_2");
-    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
-        LOGI("FORCE_EMULATE_VULKAN_1_2 set, enabling emulation for physical device %p (real api: 0x%x)", physDev, realApiVer);
+    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_VULKAN_1_2", "FORCE_EMULATE_VULKAN_1_2");
+    if (mode == EmulationMode::ForceEmulate) {
+        LOGI("Vulkan 1.2 Core: FORCE EMULATE enabled for physical device %p (real api: 0x%x)", physDev, realApiVer);
         std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_phys_real_api_version[(uint64_t)(uintptr_t)physDev] = realApiVer;
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
         return false;
+    }
+    if (mode == EmulationMode::Skip) {
+        LOGI("Vulkan 1.2 Core: SKIP/BYPASS enabled for physical device %p (real api: 0x%x)", physDev, realApiVer);
+        std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+        m_phys_real_api_version[(uint64_t)(uintptr_t)physDev] = realApiVer;
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = true;
+        return true;
     }
 
     bool native = (realApiVer >= VK_API_VERSION_1_2);

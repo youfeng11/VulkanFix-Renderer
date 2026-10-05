@@ -16,11 +16,16 @@ bool DrawIndirectFirstInstanceModule::is_phys_device_native(VkPhysicalDevice phy
         return it->second;
     }
 
-    const char* force_emu = getenv("FORCE_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE");
-    if (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0)) {
-        LOGI("FORCE_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE set, enabling emulation for physical device %p", physDev);
+    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE", "FORCE_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE");
+    if (mode == EmulationMode::ForceEmulate) {
+        LOGI("Draw Indirect First Instance: FORCE EMULATE enabled for physical device %p", physDev);
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
         return false;
+    }
+    if (mode == EmulationMode::Skip) {
+        LOGI("Draw Indirect First Instance: SKIP/BYPASS enabled for physical device %p", physDev);
+        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = true;
+        return true;
     }
 
     PFN_vkGetPhysicalDeviceFeatures real_fn =
@@ -70,7 +75,17 @@ void DrawIndirectFirstInstanceModule::on_get_features(
     VkPhysicalDeviceFeatures* pFeatures
 ) {
     if (!pFeatures) return;
-    if (!is_phys_device_native(physicalDevice)) {
+    EmulationMode featMode = parse_emulation_mode("VULKAN_FIX_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE_FEATURE", "FORCE_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE_FEATURE");
+    bool should_inject = false;
+    if (featMode == EmulationMode::ForceEmulate) {
+        should_inject = true;
+    } else if (featMode == EmulationMode::Skip) {
+        should_inject = false;
+    } else {
+        should_inject = !is_phys_device_native(physicalDevice);
+    }
+
+    if (should_inject) {
         pFeatures->drawIndirectFirstInstance = VK_TRUE;
         LOG_OPT_DEBUG("Emulated drawIndirectFirstInstance = VK_TRUE in vkGetPhysicalDeviceFeatures");
     }
@@ -82,7 +97,17 @@ void DrawIndirectFirstInstanceModule::on_post_get_features2(
     void* pUserData
 ) {
     if (!pFeatures) return;
-    if (!is_phys_device_native(physicalDevice)) {
+    EmulationMode featMode = parse_emulation_mode("VULKAN_FIX_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE_FEATURE", "FORCE_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE_FEATURE");
+    bool should_inject = false;
+    if (featMode == EmulationMode::ForceEmulate) {
+        should_inject = true;
+    } else if (featMode == EmulationMode::Skip) {
+        should_inject = false;
+    } else {
+        should_inject = !is_phys_device_native(physicalDevice);
+    }
+
+    if (should_inject) {
         pFeatures->features.drawIndirectFirstInstance = VK_TRUE;
         LOG_OPT_DEBUG("Emulated drawIndirectFirstInstance = VK_TRUE in vkGetPhysicalDeviceFeatures2");
     }

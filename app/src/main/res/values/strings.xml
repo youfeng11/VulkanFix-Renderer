@@ -2,4 +2,9 @@
 <resources>
     <string name="app_name">Vulkan Fix</string>
     <string name="title_enable_debug">启用调试日志</string>
+    <string name="title_emulate_dynamic_rendering_ext">动态渲染扩展模拟 (Dynamic Rendering Ext)</string>
+    <string name="title_emulate_dynamic_rendering_feat">动态渲染特性模拟 (Dynamic Rendering Feature)</string>
+    <string name="title_emulate_push_descriptor_ext">推送描述符扩展模拟 (Push Descriptor Ext)</string>
+    <string name="title_emulate_fill_mode_non_solid_feat">非实心填充特性模拟 (Fill Mode Non Solid Feature)</string>
+    <string name="title_emulate_draw_indirect_first_instance_feat">首实例间接绘制特性模拟 (Draw Indirect First Instance Feature)</string>
 </resources>

@@ -48,10 +48,14 @@ VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe
     }
 
     // 2. Probe native feature support (vertexAttributeInstanceRateDivisor and zeroDivisor)
-    const char* force_emu = getenv("FORCE_EMULATE_DIVISOR");
-    bool forced = (force_emu && (strcmp(force_emu, "1") == 0 || strcasecmp(force_emu, "true") == 0));
+    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_DIVISOR", "FORCE_EMULATE_DIVISOR");
+    bool forced = (mode == EmulationMode::ForceEmulate);
+    bool skip = (mode == EmulationMode::Skip);
 
-    if (!forced && (info.native_has_ext || info.native_has_khr)) {
+    if (skip) {
+        info.native_has_rate_divisor = true;
+        info.native_has_zero_divisor = true;
+    } else if (!forced && (info.native_has_ext || info.native_has_khr)) {
         PFN_vkGetPhysicalDeviceFeatures2 real_gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)
             get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2");
         if (!real_gpf2) {
