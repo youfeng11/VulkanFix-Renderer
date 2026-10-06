@@ -23,6 +23,30 @@
         <meta-data
             android:name="title_enable_debug"
             android:resource="@string/title_enable_debug" />
+        <meta-data
+            android:name="title_emulate_dynamic_rendering_ext"
+            android:resource="@string/title_emulate_dynamic_rendering_ext" />
+        <meta-data
+            android:name="title_emulate_dynamic_rendering_feat"
+            android:resource="@string/title_emulate_dynamic_rendering_feat" />
+        <meta-data
+            android:name="title_emulate_push_descriptor_ext"
+            android:resource="@string/title_emulate_push_descriptor_ext" />
+        <meta-data
+            android:name="title_emulate_fill_mode_non_solid_feat"
+            android:resource="@string/title_emulate_fill_mode_non_solid_feat" />
+        <meta-data
+            android:name="title_emulate_draw_indirect_first_instance_feat"
+            android:resource="@string/title_emulate_draw_indirect_first_instance_feat" />
+        <meta-data
+            android:name="title_optimize_barrier"
+            android:resource="@string/title_optimize_barrier" />
+        <meta-data
+            android:name="title_disable_pipeline_cache"
+            android:resource="@string/title_disable_pipeline_cache" />
+        <meta-data
+            android:name="title_emulate_divisor"
+            android:resource="@string/title_emulate_divisor" />
 
         <!--    兼容旧版渲染器插件架构    -->
         <meta-data

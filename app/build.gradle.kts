@@ -158,6 +158,26 @@ android {
                             ),
                             title = RendererConfig.MetaString("title_emulate_draw_indirect_first_instance_feat")
                         )
+                        selectable(
+                            key = "VULKAN_FIX_EMULATE_DIVISOR",
+                            items = RendererConfig.EnvItems(
+                                defaultValue = "auto",
+                                values = listOf("force", "skip")
+                            ),
+                            title = RendererConfig.MetaString("title_emulate_divisor")
+                        )
+                        toggleable(
+                            key = "VULKAN_FIX_OPTIMIZE_BARRIER",
+                            value = "1",
+                            toggle = false,
+                            title = RendererConfig.MetaString("title_optimize_barrier")
+                        )
+                        toggleable(
+                            key = "VULKAN_FIX_DISABLE_PIPELINE_CACHE",
+                            value = "1",
+                            toggle = false,
+                            title = RendererConfig.MetaString("title_disable_pipeline_cache")
+                        )
                     },
                     minMCVer = null,
                     maxMCVer = null,
