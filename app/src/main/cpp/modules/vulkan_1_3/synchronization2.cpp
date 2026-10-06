@@ -392,9 +392,48 @@ bool Synchronization2Module::on_cmd_wait_events2(
     VkPipelineStageFlags combinedSrc = 0;
     VkPipelineStageFlags combinedDst = 0;
 
-    std::vector<VkMemoryBarrier> v1MemBarriers;
-    std::vector<VkBufferMemoryBarrier> v1BufBarriers;
-    std::vector<VkImageMemoryBarrier> v1ImgBarriers;
+    constexpr uint32_t SBO_LIMIT = 16;
+    VkMemoryBarrier sMemBarriers[SBO_LIMIT];
+    std::vector<VkMemoryBarrier> hMemBarriers;
+    VkBufferMemoryBarrier sBufBarriers[SBO_LIMIT];
+    std::vector<VkBufferMemoryBarrier> hBufBarriers;
+    VkImageMemoryBarrier sImgBarriers[SBO_LIMIT];
+    std::vector<VkImageMemoryBarrier> hImgBarriers;
+
+    uint32_t memCount = 0;
+    uint32_t bufCount = 0;
+    uint32_t imgCount = 0;
+
+    if (pDependencyInfos) {
+        for (uint32_t e = 0; e < eventCount; ++e) {
+            const auto& dep = pDependencyInfos[e];
+            memCount += dep.memoryBarrierCount;
+            bufCount += dep.bufferMemoryBarrierCount;
+            imgCount += dep.imageMemoryBarrierCount;
+        }
+    }
+
+    VkMemoryBarrier* pMemData = sMemBarriers;
+    if (memCount > SBO_LIMIT) {
+        hMemBarriers.resize(memCount);
+        pMemData = hMemBarriers.data();
+    }
+
+    VkBufferMemoryBarrier* pBufData = sBufBarriers;
+    if (bufCount > SBO_LIMIT) {
+        hBufBarriers.resize(bufCount);
+        pBufData = hBufBarriers.data();
+    }
+
+    VkImageMemoryBarrier* pImgData = sImgBarriers;
+    if (imgCount > SBO_LIMIT) {
+        hImgBarriers.resize(imgCount);
+        pImgData = hImgBarriers.data();
+    }
+
+    uint32_t curMem = 0;
+    uint32_t curBuf = 0;
+    uint32_t curImg = 0;
 
     if (pDependencyInfos) {
         for (uint32_t e = 0; e < eventCount; ++e) {
@@ -404,19 +443,18 @@ bool Synchronization2Module::on_cmd_wait_events2(
                 combinedSrc |= stage_flags2_to_stage_flags(b.srcStageMask, false);
                 combinedDst |= stage_flags2_to_stage_flags(b.dstStageMask, true);
 
-                VkMemoryBarrier mb{};
+                auto& mb = pMemData[curMem++];
                 mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
                 mb.pNext = nullptr;
                 mb.srcAccessMask = access_flags2_to_access_flags(b.srcAccessMask);
                 mb.dstAccessMask = access_flags2_to_access_flags(b.dstAccessMask);
-                v1MemBarriers.push_back(mb);
             }
             for (uint32_t i = 0; i < dep.bufferMemoryBarrierCount; ++i) {
                 const auto& b = dep.pBufferMemoryBarriers[i];
                 combinedSrc |= stage_flags2_to_stage_flags(b.srcStageMask, false);
                 combinedDst |= stage_flags2_to_stage_flags(b.dstStageMask, true);
 
-                VkBufferMemoryBarrier bb{};
+                auto& bb = pBufData[curBuf++];
                 bb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
                 bb.pNext = nullptr;
                 bb.srcAccessMask = access_flags2_to_access_flags(b.srcAccessMask);
@@ -426,14 +464,13 @@ bool Synchronization2Module::on_cmd_wait_events2(
                 bb.buffer = b.buffer;
                 bb.offset = b.offset;
                 bb.size = b.size;
-                v1BufBarriers.push_back(bb);
             }
             for (uint32_t i = 0; i < dep.imageMemoryBarrierCount; ++i) {
                 const auto& b = dep.pImageMemoryBarriers[i];
                 combinedSrc |= stage_flags2_to_stage_flags(b.srcStageMask, false);
                 combinedDst |= stage_flags2_to_stage_flags(b.dstStageMask, true);
 
-                VkImageMemoryBarrier ib{};
+                auto& ib = pImgData[curImg++];
                 ib.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
                 ib.pNext = nullptr;
                 ib.srcAccessMask = access_flags2_to_access_flags(b.srcAccessMask);
@@ -444,7 +481,6 @@ bool Synchronization2Module::on_cmd_wait_events2(
                 ib.dstQueueFamilyIndex = b.dstQueueFamilyIndex;
                 ib.image = b.image;
                 ib.subresourceRange = b.subresourceRange;
-                v1ImgBarriers.push_back(ib);
             }
         }
     }
@@ -461,12 +497,12 @@ bool Synchronization2Module::on_cmd_wait_events2(
             pEvents,
             combinedSrc,
             combinedDst,
-            (uint32_t)v1MemBarriers.size(),
-            v1MemBarriers.data(),
-            (uint32_t)v1BufBarriers.size(),
-            v1BufBarriers.data(),
-            (uint32_t)v1ImgBarriers.size(),
-            v1ImgBarriers.data()
+            curMem,
+            curMem > 0 ? pMemData : nullptr,
+            curBuf,
+            curBuf > 0 ? pBufData : nullptr,
+            curImg,
+            curImg > 0 ? pImgData : nullptr
         );
     }
     return true;

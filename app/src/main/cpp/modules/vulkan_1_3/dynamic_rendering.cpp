@@ -13,8 +13,8 @@ static inline void hash_combine(size_t& seed, size_t v) {
 
 size_t DynamicRenderingModule::PipelineRenderPassKeyHash::operator()(const PipelineRenderPassKey& k) const {
     size_t seed = 0;
-    for (VkFormat f : k.colorFormats) {
-        hash_combine(seed, std::hash<uint32_t>()((uint32_t)f));
+    for (uint32_t i = 0; i < k.colorAttachmentCount; ++i) {
+        hash_combine(seed, std::hash<uint32_t>()((uint32_t)k.colorFormats[i]));
     }
     hash_combine(seed, std::hash<uint32_t>()((uint32_t)k.depthFormat));
     hash_combine(seed, std::hash<uint32_t>()((uint32_t)k.stencilFormat));
@@ -25,7 +25,8 @@ size_t DynamicRenderingModule::PipelineRenderPassKeyHash::operator()(const Pipel
 
 size_t DynamicRenderingModule::DynamicRenderPassKeyHash::operator()(const DynamicRenderPassKey& k) const {
     size_t seed = 0;
-    for (const auto& a : k.colorAttachments) {
+    for (uint32_t i = 0; i < k.colorAttachmentCount; ++i) {
+        const auto& a = k.colorAttachments[i];
         hash_combine(seed, (size_t)a.format);
         hash_combine(seed, (size_t)a.samples);
         hash_combine(seed, (size_t)a.loadOp);
@@ -43,7 +44,8 @@ size_t DynamicRenderingModule::DynamicRenderPassKeyHash::operator()(const Dynami
         hash_combine(seed, (size_t)k.depthStencilAttachment.initialLayout);
         hash_combine(seed, (size_t)k.depthStencilAttachment.finalLayout);
     }
-    for (const auto& a : k.resolveAttachments) {
+    for (uint32_t i = 0; i < k.resolveAttachmentCount; ++i) {
+        const auto& a = k.resolveAttachments[i];
         hash_combine(seed, (size_t)a.format);
         hash_combine(seed, (size_t)a.initialLayout);
     }
@@ -53,8 +55,8 @@ size_t DynamicRenderingModule::DynamicRenderPassKeyHash::operator()(const Dynami
 size_t DynamicRenderingModule::FramebufferKeyHash::operator()(const FramebufferKey& k) const {
     size_t seed = 0;
     hash_combine(seed, (size_t)(uintptr_t)k.renderPass);
-    for (VkImageView v : k.views) {
-        hash_combine(seed, (size_t)(uintptr_t)v);
+    for (uint32_t i = 0; i < k.viewCount; ++i) {
+        hash_combine(seed, (size_t)(uintptr_t)k.views[i]);
     }
     hash_combine(seed, (size_t)k.width);
     hash_combine(seed, (size_t)k.height);
@@ -376,8 +378,11 @@ VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     }
 
     PipelineRenderPassKey key;
+    key.colorAttachmentCount = std::min(effectiveColorCount, MAX_KEY_ATTACHMENTS);
     if (effectiveColorCount > 0 && pColorAttachmentFormats != NULL) {
-        key.colorFormats.assign(pColorAttachmentFormats, pColorAttachmentFormats + effectiveColorCount);
+        for (uint32_t i = 0; i < key.colorAttachmentCount; ++i) {
+            key.colorFormats[i] = pColorAttachmentFormats[i];
+        }
     }
     key.depthFormat = depthAttachmentFormat;
     key.stencilFormat = stencilAttachmentFormat;
@@ -745,10 +750,10 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         std::vector<VkClearValue> clearValues;
 
         void clear() {
-            rpKey.colorAttachments.clear();
+            rpKey.colorAttachmentCount = 0;
             rpKey.has_depth_stencil = false;
             rpKey.depthStencilAttachment = {};
-            rpKey.resolveAttachments.clear();
+            rpKey.resolveAttachmentCount = 0;
             attachments.clear();
             colorRefs.clear();
             resolveRefs.clear();
@@ -760,7 +765,6 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     scratch.clear();
 
     DynamicRenderPassKey& rpKey = scratch.rpKey;
-    rpKey.colorAttachments.reserve(colorCount);
 
     std::vector<VkAttachmentDescription>& attachments = scratch.attachments;
     attachments.reserve(maxAttCount);
@@ -792,7 +796,6 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         }
     }
     if (has_resolves) {
-        rpKey.resolveAttachments.reserve(colorCount);
         resolveRefs.reserve(colorCount);
     }
 
@@ -819,7 +822,9 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             aDesc.refLayout = (sanitized == VK_IMAGE_LAYOUT_UNDEFINED) ?
                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : sanitized;
             aDesc.finalLayout = aDesc.refLayout;
-            rpKey.colorAttachments.push_back(aDesc);
+            if (rpKey.colorAttachmentCount < MAX_KEY_ATTACHMENTS) {
+                rpKey.colorAttachments[rpKey.colorAttachmentCount++] = aDesc;
+            }
 
             VkAttachmentDescription vkDesc{};
             vkDesc.format = aDesc.format;
@@ -842,7 +847,9 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         } else {
             DynamicRenderPassKey::AttachmentDesc aDesc;
             aDesc.format = VK_FORMAT_UNDEFINED;
-            rpKey.colorAttachments.push_back(aDesc);
+            if (rpKey.colorAttachmentCount < MAX_KEY_ATTACHMENTS) {
+                rpKey.colorAttachments[rpKey.colorAttachmentCount++] = aDesc;
+            }
 
             VkAttachmentReference ref{};
             ref.attachment = VK_ATTACHMENT_UNUSED;
@@ -925,7 +932,9 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                 rDesc.refLayout = (sanitized == VK_IMAGE_LAYOUT_UNDEFINED) ?
                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : sanitized;
                 rDesc.finalLayout = rDesc.refLayout;
-                rpKey.resolveAttachments.push_back(rDesc);
+                if (rpKey.resolveAttachmentCount < MAX_KEY_ATTACHMENTS) {
+                    rpKey.resolveAttachments[rpKey.resolveAttachmentCount++] = rDesc;
+                }
 
                 VkAttachmentDescription vkDesc{};
                 vkDesc.format = rDesc.format;
@@ -1002,7 +1011,10 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     FramebufferKey fbKey;
     if (renderPass != VK_NULL_HANDLE) {
         fbKey.renderPass = renderPass;
-        fbKey.views = fbViews;
+        fbKey.viewCount = std::min((uint32_t)fbViews.size(), MAX_KEY_ATTACHMENTS);
+        for (uint32_t i = 0; i < fbKey.viewCount; ++i) {
+            fbKey.views[i] = fbViews[i];
+        }
         fbKey.width = fb_w;
         fbKey.height = fb_h;
         fbKey.layers = fb_layers;
@@ -1097,7 +1109,10 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
 
     if (framebuffer == VK_NULL_HANDLE) {
         fbKey.renderPass = renderPass;
-        fbKey.views = fbViews;
+        fbKey.viewCount = std::min((uint32_t)fbViews.size(), MAX_KEY_ATTACHMENTS);
+        for (uint32_t i = 0; i < fbKey.viewCount; ++i) {
+            fbKey.views[i] = fbViews[i];
+        }
         fbKey.width = fb_w;
         fbKey.height = fb_h;
         fbKey.layers = fb_layers;
@@ -1140,7 +1155,8 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                     framebuffer = it->second;
                 } else {
                     m_device_resources[(uint64_t)(uintptr_t)device].framebuffers.push_back(framebuffer);
-                    for (VkImageView v : fbKey.views) {
+                    for (uint32_t i = 0; i < fbKey.viewCount; ++i) {
+                        VkImageView v = fbKey.views[i];
                         if (v != VK_NULL_HANDLE) {
                             m_image_view_to_framebuffers[(uint64_t)(uintptr_t)v].push_back(fbKey);
                         }

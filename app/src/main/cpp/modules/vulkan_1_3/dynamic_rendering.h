@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <array>
 #include <mutex>
 #include <shared_mutex>
 #include <atomic>
@@ -253,19 +254,26 @@ private:
         VkImageUsageFlags usage = 0;
     };
 
+    static constexpr uint32_t MAX_KEY_ATTACHMENTS = 16;
+
     struct PipelineRenderPassKey {
-        std::vector<VkFormat> colorFormats;
+        std::array<VkFormat, MAX_KEY_ATTACHMENTS> colorFormats{};
+        uint32_t colorAttachmentCount = 0;
         VkFormat depthFormat = VK_FORMAT_UNDEFINED;
         VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
         VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
         uint32_t viewMask = 0;
 
         bool operator==(const PipelineRenderPassKey& o) const {
-            return colorFormats == o.colorFormats &&
-                   depthFormat == o.depthFormat &&
-                   stencilFormat == o.stencilFormat &&
-                   samples == o.samples &&
-                   viewMask == o.viewMask;
+            if (colorAttachmentCount != o.colorAttachmentCount ||
+                depthFormat != o.depthFormat ||
+                stencilFormat != o.stencilFormat ||
+                samples != o.samples ||
+                viewMask != o.viewMask) return false;
+            for (uint32_t i = 0; i < colorAttachmentCount; ++i) {
+                if (colorFormats[i] != o.colorFormats[i]) return false;
+            }
+            return true;
         }
     };
 
@@ -298,16 +306,25 @@ private:
             }
         };
 
-        std::vector<AttachmentDesc> colorAttachments;
+        std::array<AttachmentDesc, MAX_KEY_ATTACHMENTS> colorAttachments{};
+        uint32_t colorAttachmentCount = 0;
         bool has_depth_stencil = false;
         AttachmentDesc depthStencilAttachment{};
-        std::vector<AttachmentDesc> resolveAttachments;
+        std::array<AttachmentDesc, MAX_KEY_ATTACHMENTS> resolveAttachments{};
+        uint32_t resolveAttachmentCount = 0;
 
         bool operator==(const DynamicRenderPassKey& o) const {
-            return colorAttachments == o.colorAttachments &&
-                   has_depth_stencil == o.has_depth_stencil &&
-                   (!has_depth_stencil || depthStencilAttachment == o.depthStencilAttachment) &&
-                   resolveAttachments == o.resolveAttachments;
+            if (colorAttachmentCount != o.colorAttachmentCount ||
+                resolveAttachmentCount != o.resolveAttachmentCount ||
+                has_depth_stencil != o.has_depth_stencil) return false;
+            if (has_depth_stencil && !(depthStencilAttachment == o.depthStencilAttachment)) return false;
+            for (uint32_t i = 0; i < colorAttachmentCount; ++i) {
+                if (!(colorAttachments[i] == o.colorAttachments[i])) return false;
+            }
+            for (uint32_t i = 0; i < resolveAttachmentCount; ++i) {
+                if (!(resolveAttachments[i] == o.resolveAttachments[i])) return false;
+            }
+            return true;
         }
     };
 
@@ -317,17 +334,22 @@ private:
 
     struct FramebufferKey {
         VkRenderPass renderPass = VK_NULL_HANDLE;
-        std::vector<VkImageView> views;
+        std::array<VkImageView, MAX_KEY_ATTACHMENTS> views{};
+        uint32_t viewCount = 0;
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t layers = 1;
 
         bool operator==(const FramebufferKey& o) const {
-            return renderPass == o.renderPass &&
-                   views == o.views &&
-                   width == o.width &&
-                   height == o.height &&
-                   layers == o.layers;
+            if (renderPass != o.renderPass ||
+                viewCount != o.viewCount ||
+                width != o.width ||
+                height != o.height ||
+                layers != o.layers) return false;
+            for (uint32_t i = 0; i < viewCount; ++i) {
+                if (views[i] != o.views[i]) return false;
+            }
+            return true;
         }
     };
 

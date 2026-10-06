@@ -41,25 +41,31 @@ TBDRBarrierOptimizer::TBDRBarrierOptimizer() {
     const char* env_opt = getenv("VULKAN_FIX_OPTIMIZE_BARRIER");
     if (env_opt && (strcmp(env_opt, "1") == 0 || strcasecmp(env_opt, "true") == 0)) {
         m_enabled.store(true, std::memory_order_relaxed);
-        LOGI("TBDRBarrierOptimizer: initialized and ENABLED via environment variable");
+        LOGI("TBDRBarrierOptimizer: ENABLED via environment variable (experimental barrier optimization)");
     } else {
         m_enabled.store(false, std::memory_order_relaxed);
-        LOGI("TBDRBarrierOptimizer: disabled by default (pass-through for zero-overhead native stability)");
+        LOGI("TBDRBarrierOptimizer: disabled by default (pass-through for 100%% exact native driver barrier stability)");
     }
 
     const char* env_narrow = getenv("VULKAN_FIX_BARRIER_NARROW");
     if (env_narrow && (strcmp(env_narrow, "1") == 0 || strcasecmp(env_narrow, "true") == 0)) {
         m_narrow_stages.store(true, std::memory_order_relaxed);
+    } else {
+        m_narrow_stages.store(false, std::memory_order_relaxed);
     }
 
     const char* env_dedup = getenv("VULKAN_FIX_BARRIER_DEDUP");
     if (env_dedup && (strcmp(env_dedup, "1") == 0 || strcasecmp(env_dedup, "true") == 0)) {
         m_dedup_consecutive.store(true, std::memory_order_relaxed);
+    } else {
+        m_dedup_consecutive.store(false, std::memory_order_relaxed);
     }
 
     const char* env_strip = getenv("VULKAN_FIX_BARRIER_STRIP");
     if (env_strip && (strcmp(env_strip, "1") == 0 || strcasecmp(env_strip, "true") == 0)) {
         m_strip_noops.store(true, std::memory_order_relaxed);
+    } else {
+        m_strip_noops.store(false, std::memory_order_relaxed);
     }
 }
 
@@ -74,12 +80,12 @@ TBDRBarrierOptimizer::CmdTracker& TBDRBarrierOptimizer::get_or_create_tracker(Vk
     return ref;
 }
 
-void TBDRBarrierOptimizer::notify_action_slow(VkCommandBuffer cmd) {
+void TBDRBarrierOptimizer::notify_action_slow(VkCommandBuffer cmd, VkCommandBuffer& out_cached_cmd, CmdTracker*& out_cached_tracker) {
     std::lock_guard<std::mutex> lock(m_tracker_mutex);
-    auto it = m_trackers.find((uint64_t)(uintptr_t)cmd);
-    if (it != m_trackers.end()) {
-        it->second->hadAction.store(true, std::memory_order_relaxed);
-    }
+    CmdTracker& tracker = get_or_create_tracker(cmd);
+    tracker.hadAction.store(true, std::memory_order_relaxed);
+    out_cached_cmd = cmd;
+    out_cached_tracker = &tracker;
 }
 
 void TBDRBarrierOptimizer::on_cmd_begin(VkCommandBuffer cmd) {
@@ -164,8 +170,9 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
                 }
 
                 if (b.dstStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    if (b.dstAccessMask & (VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT)) {
-                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+                    if (b.dstAccessMask & (VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT)) {
+                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
+                                         (VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT);
                         m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                     } else if (b.dstAccessMask & VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) {
                         b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -208,14 +215,9 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
 
             if (narrow_stages) {
                 if (b.dstStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    if (b.dstAccessMask & VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT) {
-                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT;
-                        m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-                    } else if (b.dstAccessMask & VK_ACCESS_2_INDEX_READ_BIT) {
-                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT;
-                        m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-                    } else if (b.dstAccessMask & VK_ACCESS_2_UNIFORM_READ_BIT) {
-                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | (VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+                    if (b.dstAccessMask & (VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT | VK_ACCESS_2_UNIFORM_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT)) {
+                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
+                                         (VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
                         m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                     }
                 }

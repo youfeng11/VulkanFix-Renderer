@@ -69,11 +69,35 @@ public:
         ScratchStorage1& storage
     );
 
+    struct BarrierFingerprint {
+        uint64_t hash = 0;
+        VkPipelineStageFlags2 srcStageMask = 0;
+        VkPipelineStageFlags2 dstStageMask = 0;
+        VkDependencyFlags dependencyFlags = 0;
+        uint32_t memCount = 0;
+        uint32_t bufCount = 0;
+        uint32_t imgCount = 0;
+    };
+
+    struct CmdTracker {
+        BarrierFingerprint lastBarrier{};
+        std::atomic<bool> hadAction{false};
+        bool hasLastBarrier = false;
+    };
+
     // High-frequency action notification (called on draw, dispatch, copy, clear, blit)
     // Marks that rendering/state commands occurred on this command buffer since last barrier.
     inline void on_cmd_action(VkCommandBuffer cmd) {
         if (!m_enabled.load(std::memory_order_relaxed) || cmd == VK_NULL_HANDLE) return;
-        notify_action_slow(cmd);
+        thread_local VkCommandBuffer t_cached_cmd = VK_NULL_HANDLE;
+        thread_local CmdTracker* t_cached_tracker = nullptr;
+
+        if (__builtin_expect(cmd == t_cached_cmd && t_cached_tracker != nullptr, 1)) {
+            t_cached_tracker->hadAction.store(true, std::memory_order_relaxed);
+            return;
+        }
+
+        notify_action_slow(cmd, t_cached_cmd, t_cached_tracker);
     }
 
     // Command buffer lifecycle hooks
@@ -99,23 +123,7 @@ private:
     TBDRBarrierOptimizer();
     ~TBDRBarrierOptimizer() = default;
 
-    struct BarrierFingerprint {
-        uint64_t hash = 0;
-        VkPipelineStageFlags2 srcStageMask = 0;
-        VkPipelineStageFlags2 dstStageMask = 0;
-        VkDependencyFlags dependencyFlags = 0;
-        uint32_t memCount = 0;
-        uint32_t bufCount = 0;
-        uint32_t imgCount = 0;
-    };
-
-    struct CmdTracker {
-        BarrierFingerprint lastBarrier{};
-        std::atomic<bool> hadAction{false};
-        bool hasLastBarrier = false;
-    };
-
-    void notify_action_slow(VkCommandBuffer cmd);
+    void notify_action_slow(VkCommandBuffer cmd, VkCommandBuffer& out_cached_cmd, CmdTracker*& out_cached_tracker);
     CmdTracker& get_or_create_tracker(VkCommandBuffer cmd);
 
     std::atomic<bool> m_enabled{false};

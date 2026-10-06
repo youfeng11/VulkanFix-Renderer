@@ -389,21 +389,45 @@ public:
         if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
             return m_primary_device.load(std::memory_order_relaxed);
         }
-        return get_device_for_cmd_slow(cmd);
+        thread_local VkCommandBuffer t_last_cmd = VK_NULL_HANDLE;
+        thread_local VkDevice t_last_dev = VK_NULL_HANDLE;
+        if (__builtin_expect(cmd == t_last_cmd && t_last_dev != VK_NULL_HANDLE, 1)) {
+            return t_last_dev;
+        }
+        VkDevice dev = get_device_for_cmd_slow(cmd);
+        t_last_cmd = cmd;
+        t_last_dev = dev;
+        return dev;
     }
 
     inline VkDevice get_device_for_queue(VkQueue queue) {
         if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
             return m_primary_device.load(std::memory_order_relaxed);
         }
-        return get_device_for_queue_slow(queue);
+        thread_local VkQueue t_last_queue = VK_NULL_HANDLE;
+        thread_local VkDevice t_last_queue_dev = VK_NULL_HANDLE;
+        if (__builtin_expect(queue == t_last_queue && t_last_queue_dev != VK_NULL_HANDLE, 1)) {
+            return t_last_queue_dev;
+        }
+        VkDevice dev = get_device_for_queue_slow(queue);
+        t_last_queue = queue;
+        t_last_queue_dev = dev;
+        return dev;
     }
 
     inline const DeviceDispatchTable& get_dispatch_table(VkDevice device) {
         if (__builtin_expect(device == m_primary_device.load(std::memory_order_relaxed) && m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             return m_primary_table;
         }
-        return get_dispatch_table_slow(device);
+        thread_local VkDevice t_last_table_dev = VK_NULL_HANDLE;
+        thread_local const DeviceDispatchTable* t_last_table_ptr = nullptr;
+        if (__builtin_expect(device == t_last_table_dev && t_last_table_ptr != nullptr, 1)) {
+            return *t_last_table_ptr;
+        }
+        const DeviceDispatchTable& dt = get_dispatch_table_slow(device);
+        t_last_table_dev = device;
+        t_last_table_ptr = &dt;
+        return dt;
     }
 
     void init_device_dispatch_table(VkDevice device);

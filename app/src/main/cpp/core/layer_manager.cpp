@@ -1331,6 +1331,8 @@ void LayerManager::dispatch_cmd_push_descriptor_set(
     uint32_t descriptorWriteCount,
     const VkWriteDescriptorSet* pDescriptorWrites
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
         if (m_push_desc_mod->on_cmd_push_descriptor_set(
                 commandBuffer, pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites)) {
@@ -1352,6 +1354,8 @@ void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
     uint32_t set,
     const void* pData
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
         if (m_push_desc_mod->on_cmd_push_descriptor_set_with_template(
                 commandBuffer, descriptorUpdateTemplate, layout, set, pData)) {
@@ -1499,6 +1503,8 @@ void LayerManager::dispatch_cmd_begin_rendering(
     VkCommandBuffer commandBuffer,
     const VkRenderingInfo* pRenderingInfo
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
         if (m_dyn_rendering_mod->on_cmd_begin_rendering(commandBuffer, pRenderingInfo)) {
             return;
@@ -1515,6 +1521,8 @@ void LayerManager::dispatch_cmd_begin_rendering(
 void LayerManager::dispatch_cmd_end_rendering(
     VkCommandBuffer commandBuffer
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
         if (m_dyn_rendering_mod->on_cmd_end_rendering(commandBuffer)) {
             return;
@@ -1548,6 +1556,8 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     VkPipelineBindPoint pipelineBindPoint,
     VkPipeline pipeline
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             m_primary_table.CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
@@ -1573,6 +1583,8 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers(
     const VkBuffer* pBuffers,
     const VkDeviceSize* pOffsets
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             m_primary_table.CmdBindVertexBuffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
@@ -1600,6 +1612,8 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
     const VkDeviceSize* pSizes,
     const VkDeviceSize* pStrides
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             if (m_primary_table.CmdBindVertexBuffers2) {
