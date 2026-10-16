@@ -20,7 +20,7 @@ bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
         }
     }
 
-    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_PUSH_DESCRIPTOR", "FORCE_EMULATE_PUSH_DESCRIPTOR");
+    EmulationMode mode = parse_emulation_mode("VULKAN_FIX_EMULATE_PUSH_DESCRIPTOR", "FORCE_EMULATE_PUSH_DESCRIPTOR", "emulate_push_descriptor_ext");
     if (mode == EmulationMode::ForceEmulate) {
         LOGI("Push Descriptor: FORCE EMULATE enabled for physical device %p", physDev);
         std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
@@ -48,6 +48,26 @@ bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
                         break;
                     }
                 }
+            }
+        }
+    }
+
+    // Workaround for ARM Mali GPU driver crash:
+    // ARM Mali proprietary Vulkan drivers (vendor ID 0x13B5) advertise VK_KHR_push_descriptor,
+    // but suffer from a fatal driver crash (SIGSEGV at offset 0x64) in libGLES_mali.so during
+    // vkCmdPushDescriptorSetKHR when pushing to a descriptor set index that is not defined in
+    // the command buffer's previously bound pipeline layout (e.g. multi-pass shader pipelines in Iris).
+    // Unless the user explicitly forced Skip/Bypass, automatically force emulation on Mali.
+    if (native) {
+        PFN_vkGetPhysicalDeviceProperties real_props =
+            (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+        if (real_props) {
+            VkPhysicalDeviceProperties props{};
+            real_props(physDev, &props);
+            if (props.vendorID == 0x13B5 || strstr(props.deviceName, "Mali") != nullptr) {
+                LOGI("Physical device %p (%s, vendor 0x%x) has known Mali driver crash bug in native VK_KHR_push_descriptor; forcing emulation layer!",
+                     physDev, props.deviceName, props.vendorID);
+                native = false;
             }
         }
     }
@@ -414,20 +434,26 @@ VkDescriptorSet PushDescriptorModule::allocate_push_set(VkDevice device, VkComma
         return set;
     }
 
-    if (state.current_pool_idx + 1 < state.pools.size()) {
+    while (state.current_pool_idx + 1 < state.pools.size()) {
         state.current_pool_idx++;
         state.current_pool_allocated = 0;
-    } else {
-        VkDescriptorPool new_pool = create_pool(device, MAX_SETS_PER_POOL);
-        if (new_pool == VK_NULL_HANDLE) return VK_NULL_HANDLE;
-        state.pools.push_back(new_pool);
-        state.current_pool_idx = state.pools.size() - 1;
-        state.current_pool_allocated = 0;
+        allocInfo.descriptorPool = state.pools[state.current_pool_idx];
+        res = real_alloc(device, &allocInfo, &set);
+        if (res == VK_SUCCESS && set != VK_NULL_HANDLE) {
+            state.current_pool_allocated++;
+            return set;
+        }
     }
+
+    VkDescriptorPool new_pool = create_pool(device, MAX_SETS_PER_POOL);
+    if (new_pool == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    state.pools.push_back(new_pool);
+    state.current_pool_idx = state.pools.size() - 1;
+    state.current_pool_allocated = 0;
 
     allocInfo.descriptorPool = state.pools[state.current_pool_idx];
     res = real_alloc(device, &allocInfo, &set);
-    if (res == VK_SUCCESS) {
+    if (res == VK_SUCCESS && set != VK_NULL_HANDLE) {
         state.current_pool_allocated++;
         return set;
     }
@@ -464,7 +490,7 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set(
     }
     if (setLayout == VK_NULL_HANDLE) {
         LOGE("PushDescriptor: no descriptor set layout registered for pipeline layout %p set %u", (void*)(uintptr_t)layout, set);
-        return false;
+        return true;
     }
 
     VkDescriptorSet descSet = allocate_push_set(device, commandBuffer, setLayout);
@@ -536,7 +562,10 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set_with_template(
             s_last_set_layout = setLayout;
         }
     }
-    if (setLayout == VK_NULL_HANDLE) return false;
+    if (setLayout == VK_NULL_HANDLE) {
+        LOGE("PushDescriptor: no descriptor set layout registered for pipeline layout %p set %u (template)", (void*)(uintptr_t)layout, set);
+        return true;
+    }
 
     VkDescriptorSet descSet = allocate_push_set(device, commandBuffer, setLayout);
     if (descSet == VK_NULL_HANDLE) return true;

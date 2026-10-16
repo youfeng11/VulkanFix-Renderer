@@ -42,7 +42,7 @@ fun getGitCommitCount(): Int {
 android {
     namespace = "com.launchers_plugin.renderer"
     compileSdk = 34
-    ndkVersion = "30.0.14904198"
+    ndkVersion = "25.2.9519653"
 
     defaultConfig {
         applicationId = "com.youfeng.plugin.vulkanfix"
@@ -157,6 +157,14 @@ android {
                                 values = listOf("force", "skip")
                             ),
                             title = RendererConfig.MetaString("title_emulate_draw_indirect_first_instance_feat")
+                        )
+                        selectable(
+                            key = "VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE",
+                            items = RendererConfig.EnvItems(
+                                defaultValue = "auto",
+                                values = listOf("force", "skip")
+                            ),
+                            title = RendererConfig.MetaString("title_emulate_vertex_pipeline_stores_and_atomics_feat")
                         )
                         selectable(
                             key = "VULKAN_FIX_EMULATE_DIVISOR",

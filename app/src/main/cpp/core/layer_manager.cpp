@@ -652,6 +652,12 @@ void LayerManager::dispatch_get_physical_device_features2(
         if (real_fn1) {
             real_fn1(physicalDevice, &pFeatures->features);
         }
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_get_features(physicalDevice, &pFeatures->features);
+                mod->on_post_get_features2(physicalDevice, pFeatures, nullptr);
+            }
+        }
         return;
     }
 
@@ -697,6 +703,13 @@ void LayerManager::dispatch_get_physical_device_properties2(
         if (real_fn1) {
             real_fn1(physicalDevice, &pProperties->properties);
         }
+        for (auto& mod : m_modules) {
+            if (mod->is_enabled()) {
+                mod->on_get_properties(physicalDevice, &pProperties->properties);
+                mod->on_post_get_properties2(physicalDevice, pProperties, nullptr);
+            }
+        }
+        return;
     } else {
         const size_t mod_count = m_modules.size();
         void* stack_user_data[32] = {nullptr};

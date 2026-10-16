@@ -8,6 +8,7 @@
 #include <shared_mutex>
 #include <atomic>
 #include <unordered_set>
+#include <unordered_map>
 
 struct DeviceDispatchTable {
     PFN_vkCmdDraw CmdDraw = nullptr;

@@ -39,6 +39,9 @@
             android:name="title_emulate_draw_indirect_first_instance_feat"
             android:resource="@string/title_emulate_draw_indirect_first_instance_feat" />
         <meta-data
+            android:name="title_emulate_vertex_pipeline_stores_and_atomics_feat"
+            android:resource="@string/title_emulate_vertex_pipeline_stores_and_atomics_feat" />
+        <meta-data
             android:name="title_optimize_barrier"
             android:resource="@string/title_optimize_barrier" />
         <meta-data

@@ -3,6 +3,32 @@
 
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_android.h>
+
+#ifndef VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR
+#define VK_PIPELINE_STAGE_2_VIDEO_DECODE_BIT_KHR 0x04000000ULL
+#endif
+#ifndef VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR
+#define VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR 0x08000000ULL
+#endif
+#ifndef VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
+#define VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT 0x00080000ULL
+#endif
+#ifndef VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT
+#define VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT 0x00100000ULL
+#endif
+#ifndef VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR
+#define VK_ACCESS_2_VIDEO_DECODE_READ_BIT_KHR 0x800000000ULL
+#endif
+#ifndef VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR
+#define VK_ACCESS_2_VIDEO_DECODE_WRITE_BIT_KHR 0x1000000000ULL
+#endif
+#ifndef VK_ACCESS_2_VIDEO_ENCODE_READ_BIT_KHR
+#define VK_ACCESS_2_VIDEO_ENCODE_READ_BIT_KHR 0x2000000000ULL
+#endif
+#ifndef VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR
+#define VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR 0x4000000000ULL
+#endif
+
 #include <android/log.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -106,10 +132,13 @@ enum class EmulationMode {
     Skip             // 跳过/直通：强行禁用模拟，直通原生驱动（Bypass）
 };
 
-static inline EmulationMode parse_emulation_mode(const char* env1, const char* env2 = nullptr) {
+static inline EmulationMode parse_emulation_mode(const char* env1, const char* env2 = nullptr, const char* env3 = nullptr) {
     const char* val = getenv(env1);
     if ((!val || val[0] == '\0') && env2) {
         val = getenv(env2);
+    }
+    if ((!val || val[0] == '\0') && env3) {
+        val = getenv(env3);
     }
     if (!val || val[0] == '\0') return EmulationMode::Auto;
 

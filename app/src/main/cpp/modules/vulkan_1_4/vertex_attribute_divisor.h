@@ -72,6 +72,52 @@ typedef VkVertexInputBindingDivisorDescriptionEXT VkVertexInputBindingDivisorDes
 #define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES ((VkStructureType)55)
 #endif
 
+#ifndef VK_VERSION_1_4
+struct VkPhysicalDeviceVulkan14Features {
+    VkStructureType sType;
+    void* pNext;
+    VkBool32 globalPriorityQuery;
+    VkBool32 shaderSubgroupExtendedTypes;
+    VkBool32 shaderSubgroupRotate;
+    VkBool32 shaderSubgroupRotateClustered;
+    VkBool32 shaderFloatControls2;
+    VkBool32 shaderExpectAssume;
+    VkBool32 rectangularLines;
+    VkBool32 bresenhamLines;
+    VkBool32 smoothLines;
+    VkBool32 stippledRectangularLines;
+    VkBool32 stippledBresenhamLines;
+    VkBool32 stippledSmoothLines;
+    VkBool32 vertexAttributeInstanceRateDivisor;
+    VkBool32 vertexAttributeInstanceRateZeroDivisor;
+    VkBool32 indexTypeUint8;
+    VkBool32 dynamicRenderingLocalRead;
+    VkBool32 maintenance5;
+    VkBool32 maintenance6;
+    VkBool32 pipelineProtectedAccess;
+    VkBool32 pipelineRobustness;
+    VkBool32 hostImageCopy;
+    VkBool32 pushDescriptor;
+};
+
+struct VkPhysicalDeviceVulkan14Properties {
+    VkStructureType sType;
+    void* pNext;
+    uint32_t lineSubPixelPrecisionBits;
+    uint32_t maxVertexAttribDivisor;
+    VkBool32 supportsNonZeroFirstInstance;
+    uint32_t maxPushDescriptors;
+    VkBool32 dynamicRenderingLocalReadDepthStencilAttachments;
+    VkBool32 dynamicRenderingLocalReadMultisampledAttachments;
+    VkBool32 earlyFragmentMultisampleCoverageAfterSampleCounting;
+    VkBool32 earlyFragmentSampleMaskTestBeforeSampleCounting;
+    VkBool32 depthStencilSwizzleOneSupport;
+    VkBool32 polygonModePointSize;
+    VkBool32 nonStrictSinglePixelWideLinesUseSensibleDefaults;
+    VkBool32 nonStrictWideLinesUseSensibleDefaults;
+};
+#endif
+
 class VertexAttributeDivisorModule : public IVulkanLayerModule {
 public:
     VertexAttributeDivisorModule();
