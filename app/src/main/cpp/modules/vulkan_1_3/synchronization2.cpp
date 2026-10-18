@@ -10,13 +10,6 @@
 
 REGISTER_LAYER_MODULE(Synchronization2Module);
 
-#ifndef VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT
-#define VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT 0x00200000ULL
-#endif
-#ifndef VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT_KHR
-#define VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT_KHR 0x00200000ULL
-#endif
-
 static inline VkPipelineStageFlags stage_flags2_to_stage_flags(VkPipelineStageFlags2 flags2, bool is_dst = false) {
     // Bits 0..16 match standard VkPipelineStageFlagBits in Vulkan 1.0:
     // TOP_OF_PIPE (0x1), DRAW_INDIRECT (0x2), VERTEX_INPUT (0x4), VERTEX_SHADER (0x8),
@@ -101,13 +94,13 @@ static inline VkAccessFlags access_flags2_to_access_flags(VkAccessFlags2 flags2)
 
 static inline VkImageLayout sanitize_barrier_layout(VkImageLayout layout, VkImageAspectFlags aspectMask) {
     // Map synchronization2 generic layouts to standard Vulkan 1.0 layouts
-    if ((int32_t)layout == 1000314000 /* VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL */) {
+    if (layout == VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL) {
         if (aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
             return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         }
         return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
-    if ((int32_t)layout == 1000314001 /* VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL */) {
+    if (layout == VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL) {
         if (aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
             return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         }

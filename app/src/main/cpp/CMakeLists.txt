@@ -33,6 +33,9 @@ add_compile_definitions(
     PROJECT_VERSION_CODE="${PROJECT_VERSION_CODE}"
 )
 
+# Vulkan-Headers submodule
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../../Vulkan-Headers ${CMAKE_CURRENT_BINARY_DIR}/Vulkan-Headers EXCLUDE_FROM_ALL)
+
 # Automatically discover all core and module sources
 file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS core/*.cpp)
 file(GLOB_RECURSE MODULE_SOURCES CONFIGURE_DEPENDS modules/*.cpp)
@@ -42,6 +45,11 @@ add_library(vulkan_fix SHARED
     ${MODULE_SOURCES}
     vulkan_entry.cpp
     egl_stubs.c
+)
+
+# Ensure Vulkan-Headers include directory comes BEFORE NDK system Vulkan headers
+target_include_directories(vulkan_fix BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../Vulkan-Headers/include
 )
 
 target_include_directories(vulkan_fix PRIVATE
@@ -59,6 +67,7 @@ find_library(LOG_LIB log)
 find_library(ANDROID_LIB android)
 
 target_link_libraries(vulkan_fix PRIVATE
+    Vulkan::Headers
     ${LOG_LIB}
     ${ANDROID_LIB}
     dl

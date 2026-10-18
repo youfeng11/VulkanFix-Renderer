@@ -9,37 +9,6 @@
 #include <shared_mutex>
 #include <atomic>
 
-#ifndef VK_KHR_push_descriptor
-#define VK_KHR_push_descriptor 1
-#define VK_KHR_PUSH_DESCRIPTOR_SPEC_VERSION 2
-#define VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME "VK_KHR_push_descriptor"
-
-#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR ((VkStructureType)1000080000)
-#define VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR ((VkDescriptorSetLayoutCreateFlags)0x00000001)
-#define VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR ((VkDescriptorUpdateTemplateType)1)
-
-typedef struct VkPhysicalDevicePushDescriptorPropertiesKHR {
-    VkStructureType sType;
-    void*           pNext;
-    uint32_t        maxPushDescriptors;
-} VkPhysicalDevicePushDescriptorPropertiesKHR;
-
-typedef void (VKAPI_PTR *PFN_vkCmdPushDescriptorSetKHR)(
-    VkCommandBuffer commandBuffer,
-    VkPipelineBindPoint pipelineBindPoint,
-    VkPipelineLayout layout,
-    uint32_t set,
-    uint32_t descriptorWriteCount,
-    const VkWriteDescriptorSet* pDescriptorWrites);
-
-typedef void (VKAPI_PTR *PFN_vkCmdPushDescriptorSetWithTemplateKHR)(
-    VkCommandBuffer commandBuffer,
-    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-    VkPipelineLayout layout,
-    uint32_t set,
-    const void* pData);
-#endif
-
 class PushDescriptorModule : public IVulkanLayerModule {
 public:
     PushDescriptorModule();

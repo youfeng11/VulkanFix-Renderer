@@ -6,12 +6,12 @@
 REGISTER_LAYER_MODULE(RenderPass2Module);
 
 static inline VkImageLayout sanitize_layout(VkImageLayout layout) {
-    if ((int32_t)layout == 1000241000 /* VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL */ ||
-        (int32_t)layout == 1000241002 /* VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL */) {
+    if (layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL ||
+        layout == VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL) {
         return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
-    if ((int32_t)layout == 1000241001 /* VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL */ ||
-        (int32_t)layout == 1000241003 /* VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL */) {
+    if (layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL ||
+        layout == VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL) {
         return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     }
     return layout;

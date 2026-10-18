@@ -835,7 +835,6 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceVersion(
 ) {
     if (!pApiVersion) return VK_ERROR_INITIALIZATION_FAILED;
     init_real_vulkan();
-    typedef VkResult (VKAPI_PTR *PFN_vkEnumerateInstanceVersion)(uint32_t*);
     PFN_vkEnumerateInstanceVersion real_fn =
         (PFN_vkEnumerateInstanceVersion) get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
     if (real_fn) {

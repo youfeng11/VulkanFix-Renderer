@@ -229,7 +229,6 @@ void VertexAttributeDivisorModule::on_post_get_features2(
         }
     }
 
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
     auto* v14 = vku::find_pnext_mut<VkPhysicalDeviceVulkan14Features>(
         pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES);
     if (v14) {
@@ -237,7 +236,6 @@ void VertexAttributeDivisorModule::on_post_get_features2(
         v14->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
         LOG_OPT_DEBUG("Supplied vertexAttributeInstanceRateDivisor = VK_TRUE in VkPhysicalDeviceVulkan14Features");
     }
-#endif
 }
 
 void VertexAttributeDivisorModule::on_pre_get_properties2(
@@ -284,14 +282,12 @@ void VertexAttributeDivisorModule::on_post_get_properties2(
         }
     }
 
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES
     auto* v14Props = vku::find_pnext_mut<VkPhysicalDeviceVulkan14Properties>(
         pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES);
     if (v14Props && v14Props->maxVertexAttribDivisor == 0) {
         v14Props->maxVertexAttribDivisor = UINT32_MAX;
         LOG_OPT_DEBUG("Supplied maxVertexAttribDivisor = UINT32_MAX in VkPhysicalDeviceVulkan14Properties");
     }
-#endif
 }
 
 void VertexAttributeDivisorModule::on_pre_create_device(
@@ -353,7 +349,6 @@ void VertexAttributeDivisorModule::on_pre_create_device(
     }
 
     // 3. Disable divisor features in Vulkan 1.4 features if chained and driver lacks hardware support
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES
     if (!info.native_has_rate_divisor) {
         auto* v14 = vku::find_pnext_mut<VkPhysicalDeviceVulkan14Features>(
             pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES);
@@ -365,7 +360,6 @@ void VertexAttributeDivisorModule::on_pre_create_device(
             LOGI("vkCreateDevice: disabled vertexAttributeInstanceRateDivisor in VkPhysicalDeviceVulkan14Features");
         }
     }
-#endif
 }
 
 void VertexAttributeDivisorModule::on_post_create_device(
