@@ -2,6 +2,7 @@
 #include "driver_loader.h"
 #include "layer_manager.h"
 #include "vk_pnext.h"
+#include "vk_debug_utils.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -336,6 +337,7 @@ void PushDescriptorModule::reset_cmd_pools(VkCommandBuffer cmd) {
     }
     it->second.current_pool_idx = 0;
     it->second.current_pool_allocated = 0;
+    it->second.reset_batch();
 }
 
 void PushDescriptorModule::on_pre_create_descriptor_update_template(
@@ -395,13 +397,33 @@ VkDescriptorPool PushDescriptorModule::create_pool(VkDevice device, uint32_t max
         LOGE("PushDescriptor: failed to create internal descriptor pool: %d", res);
         return VK_NULL_HANDLE;
     }
+    vku::set_object_name(device, VK_OBJECT_TYPE_DESCRIPTOR_POOL, (uint64_t)pool, "[VulkanFix] PushDescriptor Pool");
     return pool;
 }
 
 VkDescriptorSet PushDescriptorModule::allocate_push_set(VkDevice device, VkCommandBuffer cmd, VkDescriptorSetLayout setLayout) {
+    // Zero-overhead thread-local fast path (host access to VkCommandBuffer is externally synchronized per Vulkan spec)
+    thread_local VkCommandBuffer t_last_cmd = VK_NULL_HANDLE;
+    thread_local CmdPushState* t_last_state = nullptr;
+
+    if (__builtin_expect(cmd == t_last_cmd && t_last_state != nullptr, 1)) {
+        if (__builtin_expect(t_last_state->cached_layout == setLayout && t_last_state->cached_index < t_last_state->cached_count, 1)) {
+            return t_last_state->cached_sets[t_last_state->cached_index++];
+        }
+    }
+
     std::lock_guard<std::mutex> lock(m_cmd_mutex);
     CmdPushState& state = m_cmd_states[(uint64_t)(uintptr_t)cmd];
     state.device = device;
+    t_last_cmd = cmd;
+    t_last_state = &state;
+
+    // Fast-path: return from pre-allocated batch if matching setLayout
+    if (__builtin_expect(state.cached_layout == setLayout && state.cached_index < state.cached_count, 1)) {
+        return state.cached_sets[state.cached_index++];
+    }
+
+    state.reset_batch();
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     PFN_vkAllocateDescriptorSets real_alloc = dt.AllocateDescriptorSets;
@@ -421,26 +443,53 @@ VkDescriptorSet PushDescriptorModule::allocate_push_set(VkDevice device, VkComma
         state.current_pool_allocated = 0;
     }
 
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = state.pools[state.current_pool_idx];
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &setLayout;
+    auto try_alloc_batch = [&](size_t pool_idx) -> VkDescriptorSet {
+        if (state.current_pool_allocated >= MAX_SETS_PER_POOL) return VK_NULL_HANDLE;
+        uint32_t remaining = MAX_SETS_PER_POOL - state.current_pool_allocated;
+        uint32_t batch_size = std::min((uint32_t)CmdPushState::BATCH_CAPACITY, remaining);
 
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    VkResult res = real_alloc(device, &allocInfo, &set);
-    if (res == VK_SUCCESS && set != VK_NULL_HANDLE) {
-        state.current_pool_allocated++;
+        VkDescriptorSetLayout layouts[CmdPushState::BATCH_CAPACITY];
+        for (uint32_t i = 0; i < batch_size; ++i) {
+            layouts[i] = setLayout;
+        }
+
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = state.pools[pool_idx];
+        allocInfo.descriptorSetCount = batch_size;
+        allocInfo.pSetLayouts = layouts;
+
+        VkResult res = real_alloc(device, &allocInfo, state.cached_sets);
+        if (res == VK_SUCCESS) {
+            state.cached_layout = setLayout;
+            state.cached_count = batch_size;
+            state.cached_index = 1;
+            state.current_pool_allocated += batch_size;
+            return state.cached_sets[0];
+        }
+
+        // Fallback to single set if batch allocation failed
+        if (batch_size > 1) {
+            allocInfo.descriptorSetCount = 1;
+            VkDescriptorSet singleSet = VK_NULL_HANDLE;
+            if (real_alloc(device, &allocInfo, &singleSet) == VK_SUCCESS && singleSet != VK_NULL_HANDLE) {
+                state.current_pool_allocated++;
+                return singleSet;
+            }
+        }
+        return VK_NULL_HANDLE;
+    };
+
+    VkDescriptorSet set = try_alloc_batch(state.current_pool_idx);
+    if (set != VK_NULL_HANDLE) {
         return set;
     }
 
     while (state.current_pool_idx + 1 < state.pools.size()) {
         state.current_pool_idx++;
         state.current_pool_allocated = 0;
-        allocInfo.descriptorPool = state.pools[state.current_pool_idx];
-        res = real_alloc(device, &allocInfo, &set);
-        if (res == VK_SUCCESS && set != VK_NULL_HANDLE) {
-            state.current_pool_allocated++;
+        set = try_alloc_batch(state.current_pool_idx);
+        if (set != VK_NULL_HANDLE) {
             return set;
         }
     }
@@ -451,14 +500,12 @@ VkDescriptorSet PushDescriptorModule::allocate_push_set(VkDevice device, VkComma
     state.current_pool_idx = state.pools.size() - 1;
     state.current_pool_allocated = 0;
 
-    allocInfo.descriptorPool = state.pools[state.current_pool_idx];
-    res = real_alloc(device, &allocInfo, &set);
-    if (res == VK_SUCCESS && set != VK_NULL_HANDLE) {
-        state.current_pool_allocated++;
+    set = try_alloc_batch(state.current_pool_idx);
+    if (set != VK_NULL_HANDLE) {
         return set;
     }
 
-    LOGE("PushDescriptor: failed to allocate descriptor set: %d", res);
+    LOGE("PushDescriptor: failed to allocate descriptor set");
     return VK_NULL_HANDLE;
 }
 

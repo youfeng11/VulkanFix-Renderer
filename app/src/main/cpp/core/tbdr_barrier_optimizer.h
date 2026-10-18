@@ -82,6 +82,8 @@ public:
     struct CmdTracker {
         BarrierFingerprint lastBarrier{};
         std::atomic<bool> hadAction{false};
+        std::atomic<bool> valid{true};
+        std::atomic<uint32_t> generation{1};
         bool hasLastBarrier = false;
     };
 
@@ -91,13 +93,16 @@ public:
         if (!m_enabled.load(std::memory_order_relaxed) || cmd == VK_NULL_HANDLE) return;
         thread_local VkCommandBuffer t_cached_cmd = VK_NULL_HANDLE;
         thread_local CmdTracker* t_cached_tracker = nullptr;
+        thread_local uint32_t t_cached_gen = 0;
 
-        if (__builtin_expect(cmd == t_cached_cmd && t_cached_tracker != nullptr, 1)) {
+        if (__builtin_expect(cmd == t_cached_cmd && t_cached_tracker != nullptr &&
+                             t_cached_tracker->valid.load(std::memory_order_relaxed) &&
+                             t_cached_tracker->generation.load(std::memory_order_relaxed) == t_cached_gen, 1)) {
             t_cached_tracker->hadAction.store(true, std::memory_order_relaxed);
             return;
         }
 
-        notify_action_slow(cmd, t_cached_cmd, t_cached_tracker);
+        notify_action_slow(cmd, t_cached_cmd, t_cached_tracker, t_cached_gen);
     }
 
     // Command buffer lifecycle hooks
@@ -123,7 +128,7 @@ private:
     TBDRBarrierOptimizer();
     ~TBDRBarrierOptimizer() = default;
 
-    void notify_action_slow(VkCommandBuffer cmd, VkCommandBuffer& out_cached_cmd, CmdTracker*& out_cached_tracker);
+    void notify_action_slow(VkCommandBuffer cmd, VkCommandBuffer& out_cached_cmd, CmdTracker*& out_cached_tracker, uint32_t& out_cached_gen);
     CmdTracker& get_or_create_tracker(VkCommandBuffer cmd);
 
     std::atomic<bool> m_enabled{false};
@@ -132,7 +137,8 @@ private:
     std::atomic<bool> m_strip_noops{false};
 
     mutable std::mutex m_tracker_mutex;
-    std::unordered_map<uint64_t, std::unique_ptr<CmdTracker>> m_trackers;
+    std::unordered_map<uint64_t, std::shared_ptr<CmdTracker>> m_trackers;
+    std::vector<std::shared_ptr<CmdTracker>> m_graveyard;
 
     std::atomic<uint64_t> m_stat_total{0};
     std::atomic<uint64_t> m_stat_eliminated{0};

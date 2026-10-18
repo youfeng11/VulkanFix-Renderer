@@ -73,9 +73,18 @@ static inline FILE* get_writable_log_file() {
 }
 
 static inline void file_log(const char* level, const char* fmt, ...) {
+    int prio = ANDROID_LOG_INFO;
+    if (strcmp(level, "WARN") == 0) prio = ANDROID_LOG_WARN;
+    else if (strcmp(level, "ERROR") == 0) prio = ANDROID_LOG_ERROR;
+    else if (strcmp(level, "DEBUG") == 0) prio = ANDROID_LOG_DEBUG;
+
+    va_list args;
+    va_start(args, fmt);
+    __android_log_vprint(prio, "VulkanFix", fmt, args);
+    va_end(args);
+
     FILE* fp = get_writable_log_file();
     if (fp) {
-        va_list args;
         va_start(args, fmt);
         fprintf(fp, "[%s] ", level);
         vfprintf(fp, fmt, args);

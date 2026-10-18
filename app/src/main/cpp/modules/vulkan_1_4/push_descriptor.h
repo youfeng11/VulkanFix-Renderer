@@ -130,6 +130,18 @@ private:
         std::vector<VkDescriptorPool> pools;
         size_t current_pool_idx = 0;
         uint32_t current_pool_allocated = 0;
+
+        static constexpr uint32_t BATCH_CAPACITY = 8;
+        VkDescriptorSetLayout cached_layout = VK_NULL_HANDLE;
+        VkDescriptorSet cached_sets[BATCH_CAPACITY]{};
+        uint32_t cached_count = 0;
+        uint32_t cached_index = 0;
+
+        void reset_batch() {
+            cached_layout = VK_NULL_HANDLE;
+            cached_count = 0;
+            cached_index = 0;
+        }
     };
 
     mutable std::shared_mutex m_rw_mutex;

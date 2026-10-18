@@ -39,33 +39,35 @@ TBDRBarrierOptimizer& TBDRBarrierOptimizer::get() {
 
 TBDRBarrierOptimizer::TBDRBarrierOptimizer() {
     const char* env_opt = getenv("VULKAN_FIX_OPTIMIZE_BARRIER");
-    if (env_opt && (strcmp(env_opt, "1") == 0 || strcasecmp(env_opt, "true") == 0)) {
-        m_enabled.store(true, std::memory_order_relaxed);
-        LOGI("TBDRBarrierOptimizer: ENABLED via environment variable (experimental barrier optimization)");
+    if (!env_opt || env_opt[0] == '\0') env_opt = getenv("OPTIMIZE_BARRIER");
+    if (!env_opt || env_opt[0] == '\0') env_opt = getenv("optimize_barrier");
+    bool opt_enabled = (env_opt && (strcmp(env_opt, "1") == 0 || strcasecmp(env_opt, "true") == 0));
+    m_enabled.store(opt_enabled, std::memory_order_relaxed);
+    if (opt_enabled) {
+        LOGI("TBDRBarrierOptimizer: ENABLED (TBDR mobile barrier stage narrowing & deduplication active)");
     } else {
-        m_enabled.store(false, std::memory_order_relaxed);
         LOGI("TBDRBarrierOptimizer: disabled by default (pass-through for 100%% exact native driver barrier stability)");
     }
 
     const char* env_narrow = getenv("VULKAN_FIX_BARRIER_NARROW");
-    if (env_narrow && (strcmp(env_narrow, "1") == 0 || strcasecmp(env_narrow, "true") == 0)) {
-        m_narrow_stages.store(true, std::memory_order_relaxed);
+    if (env_narrow) {
+        m_narrow_stages.store(strcmp(env_narrow, "1") == 0 || strcasecmp(env_narrow, "true") == 0, std::memory_order_relaxed);
     } else {
-        m_narrow_stages.store(false, std::memory_order_relaxed);
+        m_narrow_stages.store(opt_enabled, std::memory_order_relaxed);
     }
 
     const char* env_dedup = getenv("VULKAN_FIX_BARRIER_DEDUP");
-    if (env_dedup && (strcmp(env_dedup, "1") == 0 || strcasecmp(env_dedup, "true") == 0)) {
-        m_dedup_consecutive.store(true, std::memory_order_relaxed);
+    if (env_dedup) {
+        m_dedup_consecutive.store(strcmp(env_dedup, "1") == 0 || strcasecmp(env_dedup, "true") == 0, std::memory_order_relaxed);
     } else {
-        m_dedup_consecutive.store(false, std::memory_order_relaxed);
+        m_dedup_consecutive.store(opt_enabled, std::memory_order_relaxed);
     }
 
     const char* env_strip = getenv("VULKAN_FIX_BARRIER_STRIP");
-    if (env_strip && (strcmp(env_strip, "1") == 0 || strcasecmp(env_strip, "true") == 0)) {
-        m_strip_noops.store(true, std::memory_order_relaxed);
+    if (env_strip) {
+        m_strip_noops.store(strcmp(env_strip, "1") == 0 || strcasecmp(env_strip, "true") == 0, std::memory_order_relaxed);
     } else {
-        m_strip_noops.store(false, std::memory_order_relaxed);
+        m_strip_noops.store(opt_enabled, std::memory_order_relaxed);
     }
 }
 
@@ -74,18 +76,27 @@ TBDRBarrierOptimizer::CmdTracker& TBDRBarrierOptimizer::get_or_create_tracker(Vk
     if (it != m_trackers.end()) {
         return *it->second;
     }
-    auto tracker = std::make_unique<CmdTracker>();
+    static std::atomic<uint32_t> s_global_gen{1};
+    auto tracker = std::make_shared<CmdTracker>();
+    tracker->generation.store(s_global_gen.fetch_add(1, std::memory_order_relaxed), std::memory_order_relaxed);
+    tracker->valid.store(true, std::memory_order_relaxed);
     CmdTracker& ref = *tracker;
     m_trackers[(uint64_t)(uintptr_t)cmd] = std::move(tracker);
     return ref;
 }
 
-void TBDRBarrierOptimizer::notify_action_slow(VkCommandBuffer cmd, VkCommandBuffer& out_cached_cmd, CmdTracker*& out_cached_tracker) {
+void TBDRBarrierOptimizer::notify_action_slow(
+    VkCommandBuffer cmd,
+    VkCommandBuffer& out_cached_cmd,
+    CmdTracker*& out_cached_tracker,
+    uint32_t& out_cached_gen
+) {
     std::lock_guard<std::mutex> lock(m_tracker_mutex);
     CmdTracker& tracker = get_or_create_tracker(cmd);
     tracker.hadAction.store(true, std::memory_order_relaxed);
     out_cached_cmd = cmd;
     out_cached_tracker = &tracker;
+    out_cached_gen = tracker.generation.load(std::memory_order_relaxed);
 }
 
 void TBDRBarrierOptimizer::on_cmd_begin(VkCommandBuffer cmd) {
@@ -95,6 +106,7 @@ void TBDRBarrierOptimizer::on_cmd_begin(VkCommandBuffer cmd) {
     if (it != m_trackers.end()) {
         it->second->hasLastBarrier = false;
         it->second->hadAction.store(false, std::memory_order_relaxed);
+        it->second->generation.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -104,7 +116,16 @@ void TBDRBarrierOptimizer::on_cmd_reset(VkCommandBuffer cmd) {
 
 void TBDRBarrierOptimizer::on_cmd_free(VkCommandBuffer cmd) {
     std::lock_guard<std::mutex> lock(m_tracker_mutex);
-    m_trackers.erase((uint64_t)(uintptr_t)cmd);
+    auto it = m_trackers.find((uint64_t)(uintptr_t)cmd);
+    if (it != m_trackers.end()) {
+        it->second->valid.store(false, std::memory_order_relaxed);
+        it->second->hasLastBarrier = false;
+        m_graveyard.push_back(it->second);
+        if (m_graveyard.size() > 64) {
+            m_graveyard.erase(m_graveyard.begin(), m_graveyard.begin() + 16);
+        }
+        m_trackers.erase(it);
+    }
 }
 
 bool TBDRBarrierOptimizer::optimize_dependency_info(
@@ -133,11 +154,24 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
     uint64_t barrier_hash = 14695981039346656037ULL; // FNV offset basis
     hash_combine_64(barrier_hash, (uint64_t)pSrc->dependencyFlags);
 
+    bool has_layout_transition = false;
+    bool has_present_barrier = false;
+
     // 1. Process and narrow Image Memory Barriers
     if (pSrc->imageMemoryBarrierCount > 0 && pSrc->pImageMemoryBarriers != nullptr) {
         storage.imageBarriers.reserve(pSrc->imageMemoryBarrierCount);
         for (uint32_t i = 0; i < pSrc->imageMemoryBarrierCount; ++i) {
             VkImageMemoryBarrier2 b = pSrc->pImageMemoryBarriers[i];
+
+            if (b.oldLayout != b.newLayout) {
+                has_layout_transition = true;
+            }
+            if (b.newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ||
+                b.oldLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ||
+                b.newLayout == VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR ||
+                b.oldLayout == VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR) {
+                has_present_barrier = true;
+            }
 
             // Check for No-Op Image Barrier:
             // Same layout, same queue family, identical stages, and read-only access on both sides.
@@ -154,37 +188,22 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             }
 
             // TBDR Stage Narrowing:
-            // Replace over-broad ALL_COMMANDS_BIT / ALL_GRAPHICS_BIT with fine-grained stages.
-            if (narrow_stages) {
+            // Replace over-broad ALL_COMMANDS_BIT with safe GPU pipeline stages (graphics, transfer, compute).
+            // NEVER narrow presentation barriers to preserve SurfaceFlinger display sync!
+            if (narrow_stages && !has_present_barrier) {
                 if (b.srcStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    if (b.srcAccessMask & (VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT)) {
-                        b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-                        m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-                    } else if (b.srcAccessMask & (VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT)) {
-                        b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
-                        m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-                    } else if (b.srcAccessMask & VK_ACCESS_2_TRANSFER_WRITE_BIT) {
-                        b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
-                        m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-                    }
+                    b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
+                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                    m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
-
                 if (b.dstStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    if (b.dstAccessMask & (VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT)) {
-                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
-                                         (VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT);
-                        m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-                    } else if (b.dstAccessMask & VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) {
-                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-                        m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-                    } else if (b.dstAccessMask & VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT) {
-                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT;
-                        m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-                    }
+                    b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
+                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                    m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
             }
 
-            // Accumulate hash for deduplication
+            // Accumulate robust hash for deduplication (including all subresource and queue details)
             hash_combine_64(barrier_hash, (uint64_t)(uintptr_t)b.image);
             hash_combine_64(barrier_hash, (uint64_t)b.oldLayout);
             hash_combine_64(barrier_hash, (uint64_t)b.newLayout);
@@ -192,6 +211,13 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             hash_combine_64(barrier_hash, (uint64_t)b.dstStageMask);
             hash_combine_64(barrier_hash, (uint64_t)b.srcAccessMask);
             hash_combine_64(barrier_hash, (uint64_t)b.dstAccessMask);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.aspectMask);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.baseMipLevel);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.levelCount);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.baseArrayLayer);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.layerCount);
+            hash_combine_64(barrier_hash, (uint64_t)b.srcQueueFamilyIndex);
+            hash_combine_64(barrier_hash, (uint64_t)b.dstQueueFamilyIndex);
 
             storage.imageBarriers.push_back(b);
         }
@@ -204,7 +230,7 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             VkBufferMemoryBarrier2 b = pSrc->pBufferMemoryBarriers[i];
 
             if (strip_noops) {
-                if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
+                if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex && b.srcStageMask == b.dstStageMask) {
                     if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
                         is_read_only_access2(b.srcAccessMask) && is_read_only_access2(b.dstAccessMask)) {
                         m_stat_stripped_buf.fetch_add(1, std::memory_order_relaxed);
@@ -214,12 +240,15 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             }
 
             if (narrow_stages) {
+                if (b.srcStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
+                    b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
+                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                    m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
+                }
                 if (b.dstStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    if (b.dstAccessMask & (VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT | VK_ACCESS_2_UNIFORM_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT)) {
-                        b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
-                                         (VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-                        m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-                    }
+                    b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
+                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                    m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
             }
 
@@ -230,6 +259,8 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             hash_combine_64(barrier_hash, (uint64_t)b.dstStageMask);
             hash_combine_64(barrier_hash, (uint64_t)b.srcAccessMask);
             hash_combine_64(barrier_hash, (uint64_t)b.dstAccessMask);
+            hash_combine_64(barrier_hash, (uint64_t)b.srcQueueFamilyIndex);
+            hash_combine_64(barrier_hash, (uint64_t)b.dstQueueFamilyIndex);
 
             storage.bufferBarriers.push_back(b);
         }
@@ -241,17 +272,22 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
         for (uint32_t i = 0; i < pSrc->memoryBarrierCount; ++i) {
             VkMemoryBarrier2 b = pSrc->pMemoryBarriers[i];
             if (strip_noops) {
-                if (b.srcAccessMask == 0 && b.dstAccessMask == 0) {
+                // Only strip if stages are also identical! If stages differ, it's a critical execution barrier.
+                if (b.srcAccessMask == 0 && b.dstAccessMask == 0 && b.srcStageMask == b.dstStageMask) {
                     continue;
                 }
             }
 
             if (narrow_stages) {
                 if (b.srcStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+                    b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
+                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                    m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
                 if (b.dstStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+                    b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
+                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                    m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
             }
 
@@ -269,15 +305,19 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
         std::lock_guard<std::mutex> lock(m_tracker_mutex);
         CmdTracker& tracker = get_or_create_tracker(cmd);
 
-        if (tracker.hasLastBarrier && !tracker.hadAction.load(std::memory_order_relaxed)) {
-            if (tracker.lastBarrier.hash == barrier_hash &&
-                tracker.lastBarrier.imgCount == (uint32_t)storage.imageBarriers.size() &&
-                tracker.lastBarrier.bufCount == (uint32_t)storage.bufferBarriers.size() &&
-                tracker.lastBarrier.memCount == (uint32_t)storage.memoryBarriers.size()) {
-                m_stat_eliminated.fetch_add(1, std::memory_order_relaxed);
-                LOG_OPT_DEBUG("TBDRBarrierOptimizer: eliminated consecutive duplicate barrier for cmd %p (hash %llx)",
-                              cmd, (unsigned long long)barrier_hash);
-                return false; // COMPLETELY DROPPED!
+        // SAFETY RULE: NEVER drop or deduplicate barriers containing layout transitions or presentation!
+        // Dropping layout transitions desynchronizes tile compression (AFBC/UBWC) and causes screen flickering.
+        if (!has_layout_transition && !has_present_barrier) {
+            if (tracker.hasLastBarrier && !tracker.hadAction.load(std::memory_order_relaxed)) {
+                if (tracker.lastBarrier.hash == barrier_hash &&
+                    tracker.lastBarrier.imgCount == (uint32_t)storage.imageBarriers.size() &&
+                    tracker.lastBarrier.bufCount == (uint32_t)storage.bufferBarriers.size() &&
+                    tracker.lastBarrier.memCount == (uint32_t)storage.memoryBarriers.size()) {
+                    m_stat_eliminated.fetch_add(1, std::memory_order_relaxed);
+                    LOG_OPT_DEBUG("TBDRBarrierOptimizer: eliminated consecutive duplicate barrier for cmd %p (hash %llx)",
+                                  cmd, (unsigned long long)barrier_hash);
+                    return false; // Safely dropped only when NO layout transitions or present operations exist!
+                }
             }
         }
 
@@ -333,11 +373,25 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
     hash_combine_64(barrier_hash, (uint64_t)inOutDstStageMask);
     hash_combine_64(barrier_hash, (uint64_t)inOutDependencyFlags);
 
+    bool has_layout_transition = false;
+    bool has_present_barrier = false;
+
     // 1. Process Image Barriers
     if (inOutImgCount > 0 && pInOutImgBarriers != nullptr) {
         storage.imageBarriers.reserve(inOutImgCount);
         for (uint32_t i = 0; i < inOutImgCount; ++i) {
             const auto& b = pInOutImgBarriers[i];
+
+            if (b.oldLayout != b.newLayout) {
+                has_layout_transition = true;
+            }
+            if (b.newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ||
+                b.oldLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ||
+                b.newLayout == VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR ||
+                b.oldLayout == VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR) {
+                has_present_barrier = true;
+            }
+
             if (strip_noops) {
                 if (b.oldLayout == b.newLayout &&
                     b.srcQueueFamilyIndex == b.dstQueueFamilyIndex &&
@@ -350,11 +404,20 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
                 }
             }
 
+            // Accumulate robust hash for deduplication
             hash_combine_64(barrier_hash, (uint64_t)(uintptr_t)b.image);
             hash_combine_64(barrier_hash, (uint64_t)b.oldLayout);
             hash_combine_64(barrier_hash, (uint64_t)b.newLayout);
             hash_combine_64(barrier_hash, (uint64_t)b.srcAccessMask);
             hash_combine_64(barrier_hash, (uint64_t)b.dstAccessMask);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.aspectMask);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.baseMipLevel);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.levelCount);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.baseArrayLayer);
+            hash_combine_64(barrier_hash, (uint64_t)b.subresourceRange.layerCount);
+            hash_combine_64(barrier_hash, (uint64_t)b.srcQueueFamilyIndex);
+            hash_combine_64(barrier_hash, (uint64_t)b.dstQueueFamilyIndex);
+
             storage.imageBarriers.push_back(b);
         }
     }
@@ -365,7 +428,7 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
         for (uint32_t i = 0; i < inOutBufCount; ++i) {
             const auto& b = pInOutBufBarriers[i];
             if (strip_noops) {
-                if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
+                if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex && inOutSrcStageMask == inOutDstStageMask) {
                     if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
                         is_read_only_access1(b.srcAccessMask) && is_read_only_access1(b.dstAccessMask)) {
                         m_stat_stripped_buf.fetch_add(1, std::memory_order_relaxed);
@@ -379,6 +442,9 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
             hash_combine_64(barrier_hash, (uint64_t)b.size);
             hash_combine_64(barrier_hash, (uint64_t)b.srcAccessMask);
             hash_combine_64(barrier_hash, (uint64_t)b.dstAccessMask);
+            hash_combine_64(barrier_hash, (uint64_t)b.srcQueueFamilyIndex);
+            hash_combine_64(barrier_hash, (uint64_t)b.dstQueueFamilyIndex);
+
             storage.bufferBarriers.push_back(b);
         }
     }
@@ -388,8 +454,11 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
         storage.memoryBarriers.reserve(inOutMemCount);
         for (uint32_t i = 0; i < inOutMemCount; ++i) {
             const auto& b = pInOutMemBarriers[i];
-            if (strip_noops && b.srcAccessMask == 0 && b.dstAccessMask == 0) {
-                continue;
+            if (strip_noops) {
+                // Only strip if stages are also identical!
+                if (b.srcAccessMask == 0 && b.dstAccessMask == 0 && inOutSrcStageMask == inOutDstStageMask) {
+                    continue;
+                }
             }
             hash_combine_64(barrier_hash, (uint64_t)b.srcAccessMask);
             hash_combine_64(barrier_hash, (uint64_t)b.dstAccessMask);
@@ -397,18 +466,21 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
         }
     }
 
-    // Deduplication check
+    // 4. Deduplication check
     if (dedup) {
         std::lock_guard<std::mutex> lock(m_tracker_mutex);
         CmdTracker& tracker = get_or_create_tracker(cmd);
 
-        if (tracker.hasLastBarrier && !tracker.hadAction.load(std::memory_order_relaxed)) {
-            if (tracker.lastBarrier.hash == barrier_hash &&
-                tracker.lastBarrier.imgCount == (uint32_t)storage.imageBarriers.size() &&
-                tracker.lastBarrier.bufCount == (uint32_t)storage.bufferBarriers.size() &&
-                tracker.lastBarrier.memCount == (uint32_t)storage.memoryBarriers.size()) {
-                m_stat_eliminated.fetch_add(1, std::memory_order_relaxed);
-                return false; // DROPPED!
+        // SAFETY RULE: NEVER drop or deduplicate barriers containing layout transitions or swapchain presentation!
+        if (!has_layout_transition && !has_present_barrier) {
+            if (tracker.hasLastBarrier && !tracker.hadAction.load(std::memory_order_relaxed)) {
+                if (tracker.lastBarrier.hash == barrier_hash &&
+                    tracker.lastBarrier.imgCount == (uint32_t)storage.imageBarriers.size() &&
+                    tracker.lastBarrier.bufCount == (uint32_t)storage.bufferBarriers.size() &&
+                    tracker.lastBarrier.memCount == (uint32_t)storage.memoryBarriers.size()) {
+                    m_stat_eliminated.fetch_add(1, std::memory_order_relaxed);
+                    return false; // Safely dropped only when NO layout transitions or present operations exist!
+                }
             }
         }
 
@@ -421,36 +493,20 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
         tracker.hadAction.store(false, std::memory_order_relaxed);
     }
 
-    // TBDR Stage Narrowing for Vulkan 1.0 barriers
-    if (narrow_stages) {
+    // 5. TBDR Stage Narrowing for Vulkan 1.0 barriers
+    // Safely narrow ALL_COMMANDS_BIT to ALL_GRAPHICS_BIT + TRANSFER_BIT + COMPUTE_SHADER_BIT, avoiding host/CPU bubbles.
+    // NEVER narrow presentation barriers to preserve display sync!
+    if (narrow_stages && !has_present_barrier) {
         if (inOutSrcStageMask & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) {
-            bool only_color = !storage.imageBarriers.empty();
-            for (const auto& ib : storage.imageBarriers) {
-                if (ib.srcAccessMask & (VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT)) {
-                    continue;
-                }
-                only_color = false;
-                break;
-            }
-            if (only_color) {
-                inOutSrcStageMask = (inOutSrcStageMask & ~VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-                m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-            }
+            inOutSrcStageMask = (inOutSrcStageMask & ~VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) |
+                                (VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
         }
 
         if (inOutDstStageMask & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) {
-            bool only_fragment_sampling = !storage.imageBarriers.empty();
-            for (const auto& ib : storage.imageBarriers) {
-                if (ib.dstAccessMask & VK_ACCESS_SHADER_READ_BIT) {
-                    continue;
-                }
-                only_fragment_sampling = false;
-                break;
-            }
-            if (only_fragment_sampling) {
-                inOutDstStageMask = (inOutDstStageMask & ~VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-                m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
-            }
+            inOutDstStageMask = (inOutDstStageMask & ~VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) |
+                                (VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
         }
     }
 

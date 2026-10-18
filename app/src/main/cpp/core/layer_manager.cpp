@@ -2,6 +2,7 @@
 #include "driver_loader.h"
 #include "pipeline_cache_manager.h"
 #include "tbdr_barrier_optimizer.h"
+#include "renderdoc_manager.h"
 
 LayerManager& LayerManager::get() {
     static LayerManager s_instance;
@@ -21,6 +22,7 @@ void LayerManager::init_registered_modules() {
     for (const auto& factory : get_registered_factories()) {
         register_module(factory());
     }
+    RenderDocManager::get().init();
 }
 
 void LayerManager::register_custom_proc(const char* name, PFN_vkVoidFunction proc) {
@@ -266,6 +268,20 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     LOAD_PROC(ResetFences);
     LOAD_PROC(CmdResetQueryPool);
     LOAD_PROC(DestroyCommandPool);
+    LOAD_PROC_OPT(CmdBeginDebugUtilsLabelEXT, "vkCmdBeginDebugUtilsLabelEXT");
+    LOAD_PROC_OPT(CmdEndDebugUtilsLabelEXT, "vkCmdEndDebugUtilsLabelEXT");
+    LOAD_PROC_OPT(CmdInsertDebugUtilsLabelEXT, "vkCmdInsertDebugUtilsLabelEXT");
+    LOAD_PROC_OPT(SetDebugUtilsObjectNameEXT, "vkSetDebugUtilsObjectNameEXT");
+    LOAD_PROC_OPT(SetDebugUtilsObjectTagEXT, "vkSetDebugUtilsObjectTagEXT");
+    LOAD_PROC_OPT(CmdDispatch, "vkCmdDispatch");
+    LOAD_PROC_OPT(CmdDispatchIndirect, "vkCmdDispatchIndirect");
+    LOAD_PROC_OPT(CmdCopyBuffer, "vkCmdCopyBuffer");
+    LOAD_PROC_OPT(CmdCopyImage, "vkCmdCopyImage");
+    LOAD_PROC_OPT(CmdBlitImage, "vkCmdBlitImage");
+    LOAD_PROC_OPT(CmdClearAttachments, "vkCmdClearAttachments");
+    LOAD_PROC_OPT(CmdClearColorImage, "vkCmdClearColorImage");
+    LOAD_PROC_OPT(CmdClearDepthStencilImage, "vkCmdClearDepthStencilImage");
+    LOAD_PROC_OPT(CmdExecuteCommands, "vkCmdExecuteCommands");
 
     #undef LOAD_PROC
     #undef LOAD_PROC_OPT
@@ -277,6 +293,7 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
         m_primary_device.store(device, std::memory_order_release);
         m_has_primary_table.store(true, std::memory_order_release);
     }
+    RenderDocManager::get().on_device_created(device);
 }
 
 void LayerManager::remove_device_dispatch_table(VkDevice device) {
@@ -378,30 +395,34 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
         const char* cmd = pName + 5; // e.g. "DrawIndexed", "BindPipeline", "PipelineBarrier2", etc.
         const char c0 = cmd[0];
 
-        if (flags.bypass_draw && (c0 == 'D' || c0 == 'B')) {
-            if (strcmp(cmd, "DrawIndexed") == 0 ||
-                strcmp(cmd, "Draw") == 0 ||
-                strcmp(cmd, "BindPipeline") == 0 ||
-                strcmp(cmd, "BindVertexBuffers") == 0 ||
-                strcmp(cmd, "BindVertexBuffers2") == 0 ||
-                strcmp(cmd, "BindVertexBuffers2EXT") == 0) {
-                return false; // Direct bypass! Driver native!
+        bool tbdr_active = TBDRBarrierOptimizer::get().is_enabled();
+
+        if (!tbdr_active) {
+            if (flags.bypass_draw && (c0 == 'D' || c0 == 'B')) {
+                if (strcmp(cmd, "DrawIndexed") == 0 ||
+                    strcmp(cmd, "Draw") == 0 ||
+                    strcmp(cmd, "BindPipeline") == 0 ||
+                    strcmp(cmd, "BindVertexBuffers") == 0 ||
+                    strcmp(cmd, "BindVertexBuffers2") == 0 ||
+                    strcmp(cmd, "BindVertexBuffers2EXT") == 0) {
+                    return false; // Direct bypass! Driver native!
+                }
             }
-        }
-        if (flags.bypass_multi_draw && c0 == 'D') {
-            if (strcmp(cmd, "DrawIndirect") == 0 ||
-                strcmp(cmd, "DrawIndexedIndirect") == 0) {
-                return false; // Direct bypass! Driver native!
+            if (flags.bypass_multi_draw && c0 == 'D') {
+                if (strcmp(cmd, "DrawIndirect") == 0 ||
+                    strcmp(cmd, "DrawIndexedIndirect") == 0) {
+                    return false; // Direct bypass! Driver native!
+                }
             }
         }
         // Pipeline barriers are intercepted for TBDR Tile flush optimization when optimizer is active
-        if (c0 == 'P' && !TBDRBarrierOptimizer::get().is_enabled()) {
+        if (c0 == 'P' && !tbdr_active) {
             if (strcmp(cmd, "PipelineBarrier") == 0) {
                 return false;
             }
         }
         if (flags.bypass_sync2) {
-            if (c0 == 'P' && !TBDRBarrierOptimizer::get().is_enabled()) {
+            if (c0 == 'P' && !tbdr_active) {
                 if (strcmp(cmd, "PipelineBarrier2") == 0 ||
                     strcmp(cmd, "PipelineBarrier2KHR") == 0) {
                     return false;
@@ -420,46 +441,48 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
                 }
             }
         }
-        if (flags.bypass_dynamic_rendering && (c0 == 'B' || c0 == 'E')) {
-            if (strcmp(cmd, "BeginRendering") == 0 ||
-                strcmp(cmd, "BeginRenderingKHR") == 0 ||
-                strcmp(cmd, "EndRendering") == 0 ||
-                strcmp(cmd, "EndRenderingKHR") == 0) {
-                return false;
+        if (!tbdr_active) {
+            if (flags.bypass_dynamic_rendering && (c0 == 'B' || c0 == 'E')) {
+                if (strcmp(cmd, "BeginRendering") == 0 ||
+                    strcmp(cmd, "BeginRenderingKHR") == 0 ||
+                    strcmp(cmd, "EndRendering") == 0 ||
+                    strcmp(cmd, "EndRenderingKHR") == 0) {
+                    return false;
+                }
             }
-        }
-        if (flags.bypass_push_descriptor && c0 == 'P') {
-            if (strcmp(cmd, "PushDescriptorSetKHR") == 0 ||
-                strcmp(cmd, "PushDescriptorSetWithTemplateKHR") == 0) {
-                return false;
+            if (flags.bypass_push_descriptor && c0 == 'P') {
+                if (strcmp(cmd, "PushDescriptorSetKHR") == 0 ||
+                    strcmp(cmd, "PushDescriptorSetWithTemplateKHR") == 0) {
+                    return false;
+                }
             }
-        }
-        if (flags.bypass_draw_indirect_count && c0 == 'D') {
-            if (strcmp(cmd, "DrawIndirectCount") == 0 ||
-                strcmp(cmd, "DrawIndirectCountKHR") == 0 ||
-                strcmp(cmd, "DrawIndirectCountAMD") == 0 ||
-                strcmp(cmd, "DrawIndexedIndirectCount") == 0 ||
-                strcmp(cmd, "DrawIndexedIndirectCountKHR") == 0 ||
-                strcmp(cmd, "DrawIndexedIndirectCountAMD") == 0) {
-                return false;
+            if (flags.bypass_draw_indirect_count && c0 == 'D') {
+                if (strcmp(cmd, "DrawIndirectCount") == 0 ||
+                    strcmp(cmd, "DrawIndirectCountKHR") == 0 ||
+                    strcmp(cmd, "DrawIndirectCountAMD") == 0 ||
+                    strcmp(cmd, "DrawIndexedIndirectCount") == 0 ||
+                    strcmp(cmd, "DrawIndexedIndirectCountKHR") == 0 ||
+                    strcmp(cmd, "DrawIndexedIndirectCountAMD") == 0) {
+                    return false;
+                }
             }
-        }
-        if (flags.bypass_renderpass2 && (c0 == 'B' || c0 == 'N' || c0 == 'E')) {
-            if (strcmp(cmd, "BeginRenderPass2") == 0 ||
-                strcmp(cmd, "BeginRenderPass2KHR") == 0 ||
-                strcmp(cmd, "NextSubpass2") == 0 ||
-                strcmp(cmd, "NextSubpass2KHR") == 0 ||
-                strcmp(cmd, "EndRenderPass2") == 0 ||
-                strcmp(cmd, "EndRenderPass2KHR") == 0) {
-                return false;
+            if (flags.bypass_renderpass2 && (c0 == 'B' || c0 == 'N' || c0 == 'E')) {
+                if (strcmp(cmd, "BeginRenderPass2") == 0 ||
+                    strcmp(cmd, "BeginRenderPass2KHR") == 0 ||
+                    strcmp(cmd, "NextSubpass2") == 0 ||
+                    strcmp(cmd, "NextSubpass2KHR") == 0 ||
+                    strcmp(cmd, "EndRenderPass2") == 0 ||
+                    strcmp(cmd, "EndRenderPass2KHR") == 0) {
+                    return false;
+                }
             }
-        }
-        if (flags.bypass_device_group && (c0 == 'S' || c0 == 'D')) {
-            if (strcmp(cmd, "SetDeviceMask") == 0 ||
-                strcmp(cmd, "SetDeviceMaskKHR") == 0 ||
-                strcmp(cmd, "DispatchBase") == 0 ||
-                strcmp(cmd, "DispatchBaseKHR") == 0) {
-                return false;
+            if (flags.bypass_device_group && (c0 == 'S' || c0 == 'D')) {
+                if (strcmp(cmd, "SetDeviceMask") == 0 ||
+                    strcmp(cmd, "SetDeviceMaskKHR") == 0 ||
+                    strcmp(cmd, "DispatchBase") == 0 ||
+                    strcmp(cmd, "DispatchBaseKHR") == 0) {
+                    return false;
+                }
             }
         }
         return true;
@@ -836,6 +859,7 @@ void LayerManager::dispatch_destroy_device(
     const VkAllocationCallbacks* pAllocator
 ) {
     PipelineCacheManager::get().on_destroy_device(device);
+    RenderDocManager::get().on_device_destroyed(device);
     m_device_count.fetch_sub(1, std::memory_order_relaxed);
     remove_device_bypass_flags(device);
     remove_device_dispatch_table(device);
@@ -1768,6 +1792,179 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect(
     }
 }
 
+void LayerManager::dispatch_cmd_begin_render_pass(
+    VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo* pRenderPassBegin,
+    VkSubpassContents contents
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdBeginRenderPass) {
+        dt.CmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
+    }
+}
+
+void LayerManager::dispatch_cmd_next_subpass(
+    VkCommandBuffer commandBuffer,
+    VkSubpassContents contents
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdNextSubpass) {
+        dt.CmdNextSubpass(commandBuffer, contents);
+    }
+}
+
+void LayerManager::dispatch_cmd_end_render_pass(
+    VkCommandBuffer commandBuffer
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdEndRenderPass) {
+        dt.CmdEndRenderPass(commandBuffer);
+    }
+}
+
+void LayerManager::dispatch_cmd_dispatch(
+    VkCommandBuffer commandBuffer,
+    uint32_t groupCountX,
+    uint32_t groupCountY,
+    uint32_t groupCountZ
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdDispatch) {
+        dt.CmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
+    }
+}
+
+void LayerManager::dispatch_cmd_dispatch_indirect(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdDispatchIndirect) {
+        dt.CmdDispatchIndirect(commandBuffer, buffer, offset);
+    }
+}
+
+void LayerManager::dispatch_cmd_copy_buffer(
+    VkCommandBuffer commandBuffer,
+    VkBuffer srcBuffer,
+    VkBuffer dstBuffer,
+    uint32_t regionCount,
+    const VkBufferCopy* pRegions
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdCopyBuffer) {
+        dt.CmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, regionCount, pRegions);
+    }
+}
+
+void LayerManager::dispatch_cmd_copy_image(
+    VkCommandBuffer commandBuffer,
+    VkImage srcImage,
+    VkImageLayout srcImageLayout,
+    VkImage dstImage,
+    VkImageLayout dstImageLayout,
+    uint32_t regionCount,
+    const VkImageCopy* pRegions
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdCopyImage) {
+        dt.CmdCopyImage(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions);
+    }
+}
+
+void LayerManager::dispatch_cmd_blit_image(
+    VkCommandBuffer commandBuffer,
+    VkImage srcImage,
+    VkImageLayout srcImageLayout,
+    VkImage dstImage,
+    VkImageLayout dstImageLayout,
+    uint32_t regionCount,
+    const VkImageBlit* pRegions,
+    VkFilter filter
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdBlitImage) {
+        dt.CmdBlitImage(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions, filter);
+    }
+}
+
+void LayerManager::dispatch_cmd_clear_attachments(
+    VkCommandBuffer commandBuffer,
+    uint32_t attachmentCount,
+    const VkClearAttachment* pAttachments,
+    uint32_t rectCount,
+    const VkClearRect* pRects
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdClearAttachments) {
+        dt.CmdClearAttachments(commandBuffer, attachmentCount, pAttachments, rectCount, pRects);
+    }
+}
+
+void LayerManager::dispatch_cmd_clear_color_image(
+    VkCommandBuffer commandBuffer,
+    VkImage image,
+    VkImageLayout imageLayout,
+    const VkClearColorValue* pColor,
+    uint32_t rangeCount,
+    const VkImageSubresourceRange* pRanges
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdClearColorImage) {
+        dt.CmdClearColorImage(commandBuffer, image, imageLayout, pColor, rangeCount, pRanges);
+    }
+}
+
+void LayerManager::dispatch_cmd_clear_depth_stencil_image(
+    VkCommandBuffer commandBuffer,
+    VkImage image,
+    VkImageLayout imageLayout,
+    const VkClearDepthStencilValue* pDepthStencil,
+    uint32_t rangeCount,
+    const VkImageSubresourceRange* pRanges
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdClearDepthStencilImage) {
+        dt.CmdClearDepthStencilImage(commandBuffer, image, imageLayout, pDepthStencil, rangeCount, pRanges);
+    }
+}
+
+void LayerManager::dispatch_cmd_execute_commands(
+    VkCommandBuffer commandBuffer,
+    uint32_t commandBufferCount,
+    const VkCommandBuffer* pCommandBuffers
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdExecuteCommands) {
+        dt.CmdExecuteCommands(commandBuffer, commandBufferCount, pCommandBuffers);
+    }
+}
+
 
 
 
@@ -2253,6 +2450,8 @@ void LayerManager::dispatch_cmd_begin_render_pass2(
     const VkRenderPassBeginInfo* pRenderPassBegin,
     const VkSubpassBeginInfo* pSubpassBeginInfo
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
         if (m_renderpass2_mod->on_cmd_begin_render_pass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo)) {
             return;
@@ -2273,6 +2472,8 @@ void LayerManager::dispatch_cmd_next_subpass2(
     const VkSubpassBeginInfo* pSubpassBeginInfo,
     const VkSubpassEndInfo* pSubpassEndInfo
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
         if (m_renderpass2_mod->on_cmd_next_subpass2(commandBuffer, pSubpassBeginInfo, pSubpassEndInfo)) {
             return;
@@ -2292,6 +2493,8 @@ void LayerManager::dispatch_cmd_end_render_pass2(
     VkCommandBuffer commandBuffer,
     const VkSubpassEndInfo* pSubpassEndInfo
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
         if (m_renderpass2_mod->on_cmd_end_render_pass2(commandBuffer, pSubpassEndInfo)) {
             return;
@@ -2315,6 +2518,8 @@ void LayerManager::dispatch_cmd_draw_indirect_count(
     uint32_t maxDrawCount,
     uint32_t stride
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_draw_indirect_count_mod && m_draw_indirect_count_mod->is_enabled()) {
         if (m_draw_indirect_count_mod->on_cmd_draw_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride)) {
             return;
@@ -2336,6 +2541,8 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect_count(
     uint32_t maxDrawCount,
     uint32_t stride
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_draw_indirect_count_mod && m_draw_indirect_count_mod->is_enabled()) {
         if (m_draw_indirect_count_mod->on_cmd_draw_indexed_indirect_count(commandBuffer, buffer, offset, countBuffer, countBufferOffset, maxDrawCount, stride)) {
             return;
@@ -2621,6 +2828,8 @@ void LayerManager::dispatch_cmd_dispatch_base(
     uint32_t groupCountY,
     uint32_t groupCountZ
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
     if (m_device_group_mod && m_device_group_mod->is_enabled()) {
         if (m_device_group_mod->on_cmd_dispatch_base(
                 commandBuffer, baseGroupX, baseGroupY, baseGroupZ, groupCountX, groupCountY, groupCountZ)) {
@@ -2928,22 +3137,28 @@ VkResult LayerManager::dispatch_queue_present(
     const VkPresentInfoKHR* pPresentInfo
 ) {
     VkResult res = VK_SUCCESS;
+    RenderDocManager::get().on_pre_present(queue, pPresentInfo);
     if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
         if (m_swapchain_mod->on_queue_present(queue, pPresentInfo, res)) {
+            RenderDocManager::get().on_post_present(queue, pPresentInfo);
             return res;
         }
     }
     VkDevice device = get_device_for_queue(queue);
     const auto& dt = get_dispatch_table(device);
     if (dt.QueuePresent) {
-        return dt.QueuePresent(queue, pPresentInfo);
+        res = dt.QueuePresent(queue, pPresentInfo);
+    } else {
+        PFN_vkQueuePresentKHR real_fn =
+            (PFN_vkQueuePresentKHR) get_real_proc(get_last_instance(), device, "vkQueuePresentKHR");
+        if (real_fn) {
+            res = real_fn(queue, pPresentInfo);
+        } else {
+            res = VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
     }
-    PFN_vkQueuePresentKHR real_fn =
-        (PFN_vkQueuePresentKHR) get_real_proc(get_last_instance(), device, "vkQueuePresentKHR");
-    if (real_fn) {
-        return real_fn(queue, pPresentInfo);
-    }
-    return VK_ERROR_EXTENSION_NOT_PRESENT;
+    RenderDocManager::get().on_post_present(queue, pPresentInfo);
+    return res;
 }
 
 VkResult LayerManager::dispatch_get_physical_device_surface_support(
@@ -3105,3 +3320,58 @@ void LayerManager::dispatch_destroy_surface(
         real_fn(instance, surface, pAllocator);
     }
 }
+
+void LayerManager::dispatch_cmd_begin_debug_utils_label(
+    VkCommandBuffer commandBuffer,
+    const VkDebugUtilsLabelEXT* pLabelInfo
+) {
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdBeginDebugUtilsLabelEXT) {
+        dt.CmdBeginDebugUtilsLabelEXT(commandBuffer, pLabelInfo);
+    }
+}
+
+void LayerManager::dispatch_cmd_end_debug_utils_label(
+    VkCommandBuffer commandBuffer
+) {
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdEndDebugUtilsLabelEXT) {
+        dt.CmdEndDebugUtilsLabelEXT(commandBuffer);
+    }
+}
+
+void LayerManager::dispatch_cmd_insert_debug_utils_label(
+    VkCommandBuffer commandBuffer,
+    const VkDebugUtilsLabelEXT* pLabelInfo
+) {
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.CmdInsertDebugUtilsLabelEXT) {
+        dt.CmdInsertDebugUtilsLabelEXT(commandBuffer, pLabelInfo);
+    }
+}
+
+VkResult LayerManager::dispatch_set_debug_utils_object_name(
+    VkDevice device,
+    const VkDebugUtilsObjectNameInfoEXT* pNameInfo
+) {
+    const auto& dt = get_dispatch_table(device);
+    if (dt.SetDebugUtilsObjectNameEXT) {
+        return dt.SetDebugUtilsObjectNameEXT(device, pNameInfo);
+    }
+    return VK_SUCCESS;
+}
+
+VkResult LayerManager::dispatch_set_debug_utils_object_tag(
+    VkDevice device,
+    const VkDebugUtilsObjectTagInfoEXT* pTagInfo
+) {
+    const auto& dt = get_dispatch_table(device);
+    if (dt.SetDebugUtilsObjectTagEXT) {
+        return dt.SetDebugUtilsObjectTagEXT(device, pTagInfo);
+    }
+    return VK_SUCCESS;
+}
+

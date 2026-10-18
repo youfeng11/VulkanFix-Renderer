@@ -102,6 +102,20 @@ struct DeviceDispatchTable {
     PFN_vkResetFences ResetFences = nullptr;
     PFN_vkCmdResetQueryPool CmdResetQueryPool = nullptr;
     PFN_vkDestroyCommandPool DestroyCommandPool = nullptr;
+    PFN_vkCmdBeginDebugUtilsLabelEXT CmdBeginDebugUtilsLabelEXT = nullptr;
+    PFN_vkCmdEndDebugUtilsLabelEXT CmdEndDebugUtilsLabelEXT = nullptr;
+    PFN_vkCmdInsertDebugUtilsLabelEXT CmdInsertDebugUtilsLabelEXT = nullptr;
+    PFN_vkSetDebugUtilsObjectNameEXT SetDebugUtilsObjectNameEXT = nullptr;
+    PFN_vkSetDebugUtilsObjectTagEXT SetDebugUtilsObjectTagEXT = nullptr;
+    PFN_vkCmdDispatch CmdDispatch = nullptr;
+    PFN_vkCmdDispatchIndirect CmdDispatchIndirect = nullptr;
+    PFN_vkCmdCopyBuffer CmdCopyBuffer = nullptr;
+    PFN_vkCmdCopyImage CmdCopyImage = nullptr;
+    PFN_vkCmdBlitImage CmdBlitImage = nullptr;
+    PFN_vkCmdClearAttachments CmdClearAttachments = nullptr;
+    PFN_vkCmdClearColorImage CmdClearColorImage = nullptr;
+    PFN_vkCmdClearDepthStencilImage CmdClearDepthStencilImage = nullptr;
+    PFN_vkCmdExecuteCommands CmdExecuteCommands = nullptr;
 };
 
 struct DeviceBypassFlags {
@@ -386,6 +400,83 @@ public:
         uint32_t drawCount,
         uint32_t stride);
 
+    void dispatch_cmd_begin_render_pass(
+        VkCommandBuffer commandBuffer,
+        const VkRenderPassBeginInfo* pRenderPassBegin,
+        VkSubpassContents contents);
+
+    void dispatch_cmd_next_subpass(
+        VkCommandBuffer commandBuffer,
+        VkSubpassContents contents);
+
+    void dispatch_cmd_end_render_pass(
+        VkCommandBuffer commandBuffer);
+
+    void dispatch_cmd_dispatch(
+        VkCommandBuffer commandBuffer,
+        uint32_t groupCountX,
+        uint32_t groupCountY,
+        uint32_t groupCountZ);
+
+    void dispatch_cmd_dispatch_indirect(
+        VkCommandBuffer commandBuffer,
+        VkBuffer buffer,
+        VkDeviceSize offset);
+
+    void dispatch_cmd_copy_buffer(
+        VkCommandBuffer commandBuffer,
+        VkBuffer srcBuffer,
+        VkBuffer dstBuffer,
+        uint32_t regionCount,
+        const VkBufferCopy* pRegions);
+
+    void dispatch_cmd_copy_image(
+        VkCommandBuffer commandBuffer,
+        VkImage srcImage,
+        VkImageLayout srcImageLayout,
+        VkImage dstImage,
+        VkImageLayout dstImageLayout,
+        uint32_t regionCount,
+        const VkImageCopy* pRegions);
+
+    void dispatch_cmd_blit_image(
+        VkCommandBuffer commandBuffer,
+        VkImage srcImage,
+        VkImageLayout srcImageLayout,
+        VkImage dstImage,
+        VkImageLayout dstImageLayout,
+        uint32_t regionCount,
+        const VkImageBlit* pRegions,
+        VkFilter filter);
+
+    void dispatch_cmd_clear_attachments(
+        VkCommandBuffer commandBuffer,
+        uint32_t attachmentCount,
+        const VkClearAttachment* pAttachments,
+        uint32_t rectCount,
+        const VkClearRect* pRects);
+
+    void dispatch_cmd_clear_color_image(
+        VkCommandBuffer commandBuffer,
+        VkImage image,
+        VkImageLayout imageLayout,
+        const VkClearColorValue* pColor,
+        uint32_t rangeCount,
+        const VkImageSubresourceRange* pRanges);
+
+    void dispatch_cmd_clear_depth_stencil_image(
+        VkCommandBuffer commandBuffer,
+        VkImage image,
+        VkImageLayout imageLayout,
+        const VkClearDepthStencilValue* pDepthStencil,
+        uint32_t rangeCount,
+        const VkImageSubresourceRange* pRanges);
+
+    void dispatch_cmd_execute_commands(
+        VkCommandBuffer commandBuffer,
+        uint32_t commandBufferCount,
+        const VkCommandBuffer* pCommandBuffers);
+
     inline VkDevice get_device_for_cmd(VkCommandBuffer cmd) {
         if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
             return m_primary_device.load(std::memory_order_relaxed);
@@ -620,6 +711,25 @@ public:
     VkResult dispatch_queue_present(
         VkQueue queue,
         const VkPresentInfoKHR* pPresentInfo);
+
+    void dispatch_cmd_begin_debug_utils_label(
+        VkCommandBuffer commandBuffer,
+        const VkDebugUtilsLabelEXT* pLabelInfo);
+
+    void dispatch_cmd_end_debug_utils_label(
+        VkCommandBuffer commandBuffer);
+
+    void dispatch_cmd_insert_debug_utils_label(
+        VkCommandBuffer commandBuffer,
+        const VkDebugUtilsLabelEXT* pLabelInfo);
+
+    VkResult dispatch_set_debug_utils_object_name(
+        VkDevice device,
+        const VkDebugUtilsObjectNameInfoEXT* pNameInfo);
+
+    VkResult dispatch_set_debug_utils_object_tag(
+        VkDevice device,
+        const VkDebugUtilsObjectTagInfoEXT* pTagInfo);
 
     VkResult dispatch_get_physical_device_surface_support(
         VkPhysicalDevice physicalDevice,

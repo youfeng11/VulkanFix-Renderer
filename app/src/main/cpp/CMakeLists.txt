@@ -97,3 +97,20 @@ target_link_options(vulkan_fix PRIVATE
         -flto=thin
     >
 )
+
+# Standalone Test Runner for Verification and RenderDoc Capture
+add_executable(vulkan_fix_test
+    tests/vulkan_fix_test.cpp
+)
+
+target_include_directories(vulkan_fix_test BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../Vulkan-Headers/include
+)
+
+target_link_libraries(vulkan_fix_test PRIVATE
+    vulkan_fix
+    ${LOG_LIB}
+    dl
+    vulkan
+)
+

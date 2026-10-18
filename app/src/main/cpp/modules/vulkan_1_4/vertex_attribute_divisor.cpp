@@ -2,6 +2,7 @@
 #include "driver_loader.h"
 #include "layer_manager.h"
 #include "vk_pnext.h"
+#include "vk_debug_utils.h"
 #include <string.h>
 #include <stdlib.h>
 #include <algorithm>
@@ -669,6 +670,8 @@ bool VertexAttributeDivisorModule::on_cmd_draw(
     uint32_t inst = firstInstance;
     uint32_t remaining = instanceCount;
 
+    vku::cmd_begin_label(commandBuffer, "[VulkanFix] Divisor Emulation Draw");
+
     while (remaining > 0) {
         // Calculate max instances in this chunk such that all divisor element indices remain constant
         uint32_t chunk_size = remaining;
@@ -709,6 +712,7 @@ bool VertexAttributeDivisorModule::on_cmd_draw(
         }
     }
 
+    vku::cmd_end_label(commandBuffer);
     return true;
 }
 
@@ -736,6 +740,8 @@ bool VertexAttributeDivisorModule::on_cmd_draw_indexed(
 
     uint32_t inst = firstInstance;
     uint32_t remaining = instanceCount;
+
+    vku::cmd_begin_label(commandBuffer, "[VulkanFix] Divisor Emulation DrawIndexed");
 
     while (remaining > 0) {
         uint32_t chunk_size = remaining;
@@ -775,5 +781,6 @@ bool VertexAttributeDivisorModule::on_cmd_draw_indexed(
         }
     }
 
+    vku::cmd_end_label(commandBuffer);
     return true;
 }

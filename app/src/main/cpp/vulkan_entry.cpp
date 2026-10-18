@@ -1,6 +1,7 @@
 #include "vk_common.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
+#include "renderdoc_manager.h"
 #include <string.h>
 #include <string>
 
@@ -39,6 +40,8 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateInstance(
         return real_fn(pCreateInfo, pAllocator, pInstance);
     }
 
+    RenderDocManager::get().init();
+
     // Check natively supported instance extensions
     PFN_vkEnumerateInstanceExtensionProperties real_enum =
         (PFN_vkEnumerateInstanceExtensionProperties) get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties");
@@ -51,6 +54,28 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateInstance(
                 for (const auto& e : ep) nativeExts.push_back(e.extensionName);
             }
         }
+    }
+
+    // Also include extensions provided by enabled layers (e.g. RenderDoc / validation layers)
+    if (pCreateInfo->enabledLayerCount > 0 && pCreateInfo->ppEnabledLayerNames && real_enum) {
+        for (uint32_t l = 0; l < pCreateInfo->enabledLayerCount; ++l) {
+            const char* layerName = pCreateInfo->ppEnabledLayerNames[l];
+            if (layerName) {
+                uint32_t lCount = 0;
+                if (real_enum(layerName, &lCount, NULL) == VK_SUCCESS && lCount > 0) {
+                    std::vector<VkExtensionProperties> lep(lCount);
+                    if (real_enum(layerName, &lCount, lep.data()) == VK_SUCCESS) {
+                        for (const auto& e : lep) nativeExts.push_back(e.extensionName);
+                    }
+                }
+            }
+        }
+    }
+
+    // Always preserve debug utils and debug report if RenderDoc is active or requested
+    if (RenderDocManager::get().is_available()) {
+        nativeExts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        nativeExts.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
     }
 
     VkInstanceCreateInfo modCI = *pCreateInfo;
@@ -451,17 +476,88 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdEndRenderingKHR(
 }
 
 // ============================================================================
+// VK_EXT_debug_utils Entry Points (RenderDoc & Tooling Markers)
+// ============================================================================
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBeginDebugUtilsLabelEXT(
+    VkCommandBuffer commandBuffer,
+    const VkDebugUtilsLabelEXT* pLabelInfo
+) {
+    LayerManager::get().dispatch_cmd_begin_debug_utils_label(commandBuffer, pLabelInfo);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdEndDebugUtilsLabelEXT(
+    VkCommandBuffer commandBuffer
+) {
+    LayerManager::get().dispatch_cmd_end_debug_utils_label(commandBuffer);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdInsertDebugUtilsLabelEXT(
+    VkCommandBuffer commandBuffer,
+    const VkDebugUtilsLabelEXT* pLabelInfo
+) {
+    LayerManager::get().dispatch_cmd_insert_debug_utils_label(commandBuffer, pLabelInfo);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkSetDebugUtilsObjectNameEXT(
+    VkDevice device,
+    const VkDebugUtilsObjectNameInfoEXT* pNameInfo
+) {
+    return LayerManager::get().dispatch_set_debug_utils_object_name(device, pNameInfo);
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkSetDebugUtilsObjectTagEXT(
+    VkDevice device,
+    const VkDebugUtilsObjectTagInfoEXT* pTagInfo
+) {
+    return LayerManager::get().dispatch_set_debug_utils_object_tag(device, pTagInfo);
+}
+
+// ============================================================================
+// RenderDoc External In-App Capture Triggers (C API)
+// ============================================================================
+
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vulkan_fix_trigger_capture(uint32_t num_frames) {
+    RenderDocManager::get().trigger_capture(num_frames);
+}
+
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vulkan_fix_start_capture(VkDevice device) {
+    RenderDocManager::get().start_capture(device);
+}
+
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vulkan_fix_end_capture(VkDevice device) {
+    RenderDocManager::get().end_capture(device);
+}
+
+VK_LAYER_EXPORT VKAPI_ATTR uint32_t VKAPI_CALL vulkan_fix_is_renderdoc_attached() {
+    return RenderDocManager::get().is_available() ? 1 : 0;
+}
+
+// ============================================================================
 // Dispatchers: vkGetInstanceProcAddr & vkGetDeviceProcAddr
 // ============================================================================
 
 static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_device_only) {
-    if (!pName || pName[0] != 'v' || pName[1] != 'k') return NULL;
+    if (!pName) return NULL;
 
-    #define MATCH(name) if (strcmp(pName, #name) == 0) return (PFN_vkVoidFunction) name
+    #define MATCH(name) if (strcmp(pName, #name) == 0) return (PFN_vkVoidFunction) (void*) name
+
+    if (strncmp(pName, "vulkan_fix_", 11) == 0) {
+        MATCH(vulkan_fix_trigger_capture);
+        MATCH(vulkan_fix_start_capture);
+        MATCH(vulkan_fix_end_capture);
+        MATCH(vulkan_fix_is_renderdoc_attached);
+        return NULL;
+    }
+
+    if (pName[0] != 'v' || pName[1] != 'k') return NULL;
 
     switch (pName[2]) {
     case 'C': {
         if (pName[3] == 'm' && pName[4] == 'd') { // vkCmd... (Highest frequency hot path)
+            MATCH(vkCmdBeginDebugUtilsLabelEXT);
+            MATCH(vkCmdEndDebugUtilsLabelEXT);
+            MATCH(vkCmdInsertDebugUtilsLabelEXT);
             MATCH(vkCmdDrawIndexed);
             MATCH(vkCmdDraw);
             MATCH(vkCmdBindPipeline);
@@ -503,6 +599,18 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCmdDispatchBaseKHR);
             MATCH(vkCmdSetDeviceMask);
             MATCH(vkCmdSetDeviceMaskKHR);
+            MATCH(vkCmdBeginRenderPass);
+            MATCH(vkCmdNextSubpass);
+            MATCH(vkCmdEndRenderPass);
+            MATCH(vkCmdDispatch);
+            MATCH(vkCmdDispatchIndirect);
+            MATCH(vkCmdCopyBuffer);
+            MATCH(vkCmdCopyImage);
+            MATCH(vkCmdBlitImage);
+            MATCH(vkCmdClearAttachments);
+            MATCH(vkCmdClearColorImage);
+            MATCH(vkCmdClearDepthStencilImage);
+            MATCH(vkCmdExecuteCommands);
             return NULL;
         }
         // vkCreate...
@@ -510,6 +618,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCreateInstance);
             MATCH(vkCreateDevice);
             MATCH(vkCreateAndroidSurfaceKHR);
+            MATCH(vkCreateDebugUtilsMessengerEXT);
         }
         MATCH(vkCreateGraphicsPipelines);
         MATCH(vkCreateComputePipelines);
@@ -547,6 +656,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         if (!is_device_only) {
             MATCH(vkDestroyInstance);
             MATCH(vkDestroySurfaceKHR);
+            MATCH(vkDestroyDebugUtilsMessengerEXT);
         }
         MATCH(vkDeviceWaitIdle);
         return NULL;
@@ -646,6 +756,11 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         return NULL;
     }
     case 'S': {
+        MATCH(vkSetDebugUtilsObjectNameEXT);
+        MATCH(vkSetDebugUtilsObjectTagEXT);
+        if (!is_device_only) {
+            MATCH(vkSubmitDebugUtilsMessageEXT);
+        }
         MATCH(vkSignalSemaphore);
         MATCH(vkSignalSemaphoreKHR);
         return NULL;
@@ -786,6 +901,9 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
     }
 
 FORWARD_INST(VkResult, vkEnumeratePhysicalDevices, (VkInstance instance, uint32_t* pCount, VkPhysicalDevice* pDevices), (instance, pCount, pDevices))
+FORWARD_INST(VkResult, vkCreateDebugUtilsMessengerEXT, (VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pMessenger), (instance, pCreateInfo, pAllocator, pMessenger))
+FORWARD_INST(void, vkDestroyDebugUtilsMessengerEXT, (VkInstance instance, VkDebugUtilsMessengerEXT messenger, const VkAllocationCallbacks* pAllocator), (instance, messenger, pAllocator))
+FORWARD_INST(void, vkSubmitDebugUtilsMessageEXT, (VkInstance instance, VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageTypes, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData), (instance, messageSeverity, messageTypes, pCallbackData))
 
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
     const char* pLayer,
@@ -817,6 +935,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
 
     add_ext(VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_SURFACE_SPEC_VERSION);
     add_ext(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_SPEC_VERSION);
+    add_ext(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_SPEC_VERSION);
 
     if (!pProps) {
         if (pCount) *pCount = (uint32_t)exts.size();
@@ -990,6 +1109,119 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdDrawIndexedIndirect(
     uint32_t stride
 ) {
     LayerManager::get().dispatch_cmd_draw_indexed_indirect(commandBuffer, buffer, offset, drawCount, stride);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBeginRenderPass(
+    VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo* pRenderPassBegin,
+    VkSubpassContents contents
+) {
+    LayerManager::get().dispatch_cmd_begin_render_pass(commandBuffer, pRenderPassBegin, contents);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdNextSubpass(
+    VkCommandBuffer commandBuffer,
+    VkSubpassContents contents
+) {
+    LayerManager::get().dispatch_cmd_next_subpass(commandBuffer, contents);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdEndRenderPass(
+    VkCommandBuffer commandBuffer
+) {
+    LayerManager::get().dispatch_cmd_end_render_pass(commandBuffer);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDispatch(
+    VkCommandBuffer commandBuffer,
+    uint32_t groupCountX,
+    uint32_t groupCountY,
+    uint32_t groupCountZ
+) {
+    LayerManager::get().dispatch_cmd_dispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdDispatchIndirect(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset
+) {
+    LayerManager::get().dispatch_cmd_dispatch_indirect(commandBuffer, buffer, offset);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdCopyBuffer(
+    VkCommandBuffer commandBuffer,
+    VkBuffer srcBuffer,
+    VkBuffer dstBuffer,
+    uint32_t regionCount,
+    const VkBufferCopy* pRegions
+) {
+    LayerManager::get().dispatch_cmd_copy_buffer(commandBuffer, srcBuffer, dstBuffer, regionCount, pRegions);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdCopyImage(
+    VkCommandBuffer commandBuffer,
+    VkImage srcImage,
+    VkImageLayout srcImageLayout,
+    VkImage dstImage,
+    VkImageLayout dstImageLayout,
+    uint32_t regionCount,
+    const VkImageCopy* pRegions
+) {
+    LayerManager::get().dispatch_cmd_copy_image(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdBlitImage(
+    VkCommandBuffer commandBuffer,
+    VkImage srcImage,
+    VkImageLayout srcImageLayout,
+    VkImage dstImage,
+    VkImageLayout dstImageLayout,
+    uint32_t regionCount,
+    const VkImageBlit* pRegions,
+    VkFilter filter
+) {
+    LayerManager::get().dispatch_cmd_blit_image(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions, filter);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdClearAttachments(
+    VkCommandBuffer commandBuffer,
+    uint32_t attachmentCount,
+    const VkClearAttachment* pAttachments,
+    uint32_t rectCount,
+    const VkClearRect* pRects
+) {
+    LayerManager::get().dispatch_cmd_clear_attachments(commandBuffer, attachmentCount, pAttachments, rectCount, pRects);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdClearColorImage(
+    VkCommandBuffer commandBuffer,
+    VkImage image,
+    VkImageLayout imageLayout,
+    const VkClearColorValue* pColor,
+    uint32_t rangeCount,
+    const VkImageSubresourceRange* pRanges
+) {
+    LayerManager::get().dispatch_cmd_clear_color_image(commandBuffer, image, imageLayout, pColor, rangeCount, pRanges);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdClearDepthStencilImage(
+    VkCommandBuffer commandBuffer,
+    VkImage image,
+    VkImageLayout imageLayout,
+    const VkClearDepthStencilValue* pDepthStencil,
+    uint32_t rangeCount,
+    const VkImageSubresourceRange* pRanges
+) {
+    LayerManager::get().dispatch_cmd_clear_depth_stencil_image(commandBuffer, image, imageLayout, pDepthStencil, rangeCount, pRanges);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdExecuteCommands(
+    VkCommandBuffer commandBuffer,
+    uint32_t commandBufferCount,
+    const VkCommandBuffer* pCommandBuffers
+) {
+    LayerManager::get().dispatch_cmd_execute_commands(commandBuffer, commandBufferCount, pCommandBuffers);
 }
 
 VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetEvent2(
