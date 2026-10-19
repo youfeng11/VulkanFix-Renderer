@@ -3114,12 +3114,24 @@ VkResult LayerManager::dispatch_acquire_next_image(
     }
     const auto& dt = get_dispatch_table(device);
     if (dt.AcquireNextImage) {
-        return dt.AcquireNextImage(device, swapchain, timeout, semaphore, fence, pImageIndex);
+        res = dt.AcquireNextImage(device, swapchain, timeout, semaphore, fence, pImageIndex);
+        if (res == VK_TIMEOUT && timeout > 0 && timeout != UINT64_MAX) {
+            LOGW("LayerManager: vkAcquireNextImageKHR timed out after %llu ns, retrying with 5s timeout to prevent crash...",
+                 (unsigned long long)timeout);
+            res = dt.AcquireNextImage(device, swapchain, 5000000000ULL, semaphore, fence, pImageIndex);
+        }
+        return res;
     }
     PFN_vkAcquireNextImageKHR real_fn =
         (PFN_vkAcquireNextImageKHR) get_real_proc(get_last_instance(), device, "vkAcquireNextImageKHR");
     if (real_fn) {
-        return real_fn(device, swapchain, timeout, semaphore, fence, pImageIndex);
+        res = real_fn(device, swapchain, timeout, semaphore, fence, pImageIndex);
+        if (res == VK_TIMEOUT && timeout > 0 && timeout != UINT64_MAX) {
+            LOGW("LayerManager: vkAcquireNextImageKHR timed out after %llu ns, retrying with 5s timeout to prevent crash...",
+                 (unsigned long long)timeout);
+            res = real_fn(device, swapchain, 5000000000ULL, semaphore, fence, pImageIndex);
+        }
+        return res;
     }
     return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
@@ -3138,12 +3150,28 @@ VkResult LayerManager::dispatch_acquire_next_image2(
     }
     const auto& dt = get_dispatch_table(device);
     if (dt.AcquireNextImage2) {
-        return dt.AcquireNextImage2(device, pAcquireInfo, pImageIndex);
+        res = dt.AcquireNextImage2(device, pAcquireInfo, pImageIndex);
+        if (res == VK_TIMEOUT && pAcquireInfo->timeout > 0 && pAcquireInfo->timeout != UINT64_MAX) {
+            LOGW("LayerManager: vkAcquireNextImage2KHR timed out after %llu ns, retrying with 5s timeout to prevent crash...",
+                 (unsigned long long)pAcquireInfo->timeout);
+            VkAcquireNextImageInfoKHR retry_info = *pAcquireInfo;
+            retry_info.timeout = 5000000000ULL;
+            res = dt.AcquireNextImage2(device, &retry_info, pImageIndex);
+        }
+        return res;
     }
     PFN_vkAcquireNextImage2KHR real_fn =
         (PFN_vkAcquireNextImage2KHR) get_real_proc(get_last_instance(), device, "vkAcquireNextImage2KHR");
     if (real_fn) {
-        return real_fn(device, pAcquireInfo, pImageIndex);
+        res = real_fn(device, pAcquireInfo, pImageIndex);
+        if (res == VK_TIMEOUT && pAcquireInfo->timeout > 0 && pAcquireInfo->timeout != UINT64_MAX) {
+            LOGW("LayerManager: vkAcquireNextImage2KHR timed out after %llu ns, retrying with 5s timeout to prevent crash...",
+                 (unsigned long long)pAcquireInfo->timeout);
+            VkAcquireNextImageInfoKHR retry_info = *pAcquireInfo;
+            retry_info.timeout = 5000000000ULL;
+            res = real_fn(device, &retry_info, pImageIndex);
+        }
+        return res;
     }
     return dispatch_acquire_next_image(device, pAcquireInfo->swapchain, pAcquireInfo->timeout, pAcquireInfo->semaphore, pAcquireInfo->fence, pImageIndex);
 }
