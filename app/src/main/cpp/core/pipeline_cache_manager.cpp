@@ -426,17 +426,6 @@ void PipelineCacheManager::on_pipelines_created(VkDevice device, VkPipelineCache
     VkPipelineCache diskCache = state->disk_cache;
     if (diskCache == VK_NULL_HANDLE) return;
 
-    // If pipelines were created using an app cache, merge the newly created pipelines back into diskCache safely under lock
-    if (usedCache != VK_NULL_HANDLE && usedCache != diskCache) {
-        const auto& dt = LayerManager::get().get_dispatch_table(device);
-        PFN_vkMergePipelineCaches real_merge = dt.MergePipelineCaches ? dt.MergePipelineCaches :
-            (PFN_vkMergePipelineCaches) get_real_proc(get_last_instance(), device, "vkMergePipelineCaches");
-        if (real_merge) {
-            std::lock_guard<std::mutex> api_lock(state->cache_api_mutex);
-            real_merge(device, diskCache, 1, &usedCache);
-        }
-    }
-
     state->pending_pipelines_count.fetch_add(count, std::memory_order_relaxed);
     state->is_dirty.store(true, std::memory_order_release);
 

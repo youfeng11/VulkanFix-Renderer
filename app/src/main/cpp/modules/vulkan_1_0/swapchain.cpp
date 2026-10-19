@@ -2,6 +2,8 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include <string.h>
+#include <strings.h>
+#include <stdlib.h>
 #include <algorithm>
 #include <atomic>
 
@@ -201,19 +203,32 @@ bool SwapchainModule::on_get_physical_device_surface_capabilities(
     VkSurfaceCapabilitiesKHR* pSurfaceCapabilities,
     VkResult& outResult
 ) {
-    if (is_phys_device_native(physicalDevice)) return false;
-
-    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR real_fn =
-        (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
-    if (real_fn && real_fn(physicalDevice, surface, pSurfaceCapabilities) == VK_SUCCESS) {
-        outResult = VK_SUCCESS;
-        return true;
-    }
-
     if (!pSurfaceCapabilities) {
         outResult = VK_ERROR_INITIALIZATION_FAILED;
         return true;
     }
+
+    uint32_t target_min_images = 3;
+    const char* env_min = getenv("VULKAN_FIX_SWAPCHAIN_MIN_IMAGES");
+    if (env_min && env_min[0] != '\0') {
+        int val = atoi(env_min);
+        if (val >= 2 && val <= 8) target_min_images = (uint32_t)val;
+    }
+
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR real_fn =
+        (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    if (real_fn && real_fn(physicalDevice, surface, pSurfaceCapabilities) == VK_SUCCESS) {
+        if (pSurfaceCapabilities->minImageCount < target_min_images) {
+            pSurfaceCapabilities->minImageCount = target_min_images;
+        }
+        if (pSurfaceCapabilities->maxImageCount > 0 && pSurfaceCapabilities->minImageCount > pSurfaceCapabilities->maxImageCount) {
+            pSurfaceCapabilities->minImageCount = pSurfaceCapabilities->maxImageCount;
+        }
+        outResult = VK_SUCCESS;
+        return true;
+    }
+
+    if (is_phys_device_native(physicalDevice)) return false;
 
     uint32_t w = 1920, h = 1080;
     {
@@ -229,8 +244,8 @@ bool SwapchainModule::on_get_physical_device_surface_capabilities(
         }
     }
 
-    pSurfaceCapabilities->minImageCount = 2;
-    pSurfaceCapabilities->maxImageCount = 4;
+    pSurfaceCapabilities->minImageCount = target_min_images;
+    pSurfaceCapabilities->maxImageCount = std::max(4u, target_min_images);
     pSurfaceCapabilities->currentExtent = {w, h};
     pSurfaceCapabilities->minImageExtent = {1, 1};
     pSurfaceCapabilities->maxImageExtent = {4096, 4096};
@@ -293,14 +308,14 @@ bool SwapchainModule::on_get_physical_device_surface_present_modes(
     VkPresentModeKHR* pPresentModes,
     VkResult& outResult
 ) {
-    if (is_phys_device_native(physicalDevice)) return false;
-
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR real_fn =
         (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfacePresentModesKHR");
     if (real_fn && real_fn(physicalDevice, surface, pPresentModeCount, pPresentModes) == VK_SUCCESS) {
         outResult = VK_SUCCESS;
         return true;
     }
+
+    if (is_phys_device_native(physicalDevice)) return false;
 
     static const VkPresentModeKHR s_modes[] = {
         VK_PRESENT_MODE_FIFO_KHR,
@@ -331,22 +346,117 @@ bool SwapchainModule::on_create_swapchain(
     VkSwapchainKHR* pSwapchain,
     VkResult& outResult
 ) {
-    if (is_device_native(device)) return false;
-
     if (!pCreateInfo || !pSwapchain) {
         outResult = VK_ERROR_INITIALIZATION_FAILED;
         return true;
+    }
+
+    VkSwapchainCreateInfoKHR modifiedInfo = *pCreateInfo;
+
+    // Buffer count elevation: Default to 3 (Triple Buffering) to eliminate 120Hz VSync cadence trap (40 FPS drop)
+    uint32_t target_min_images = 3;
+    const char* env_min = getenv("VULKAN_FIX_SWAPCHAIN_MIN_IMAGES");
+    if (env_min && env_min[0] != '\0') {
+        int val = atoi(env_min);
+        if (val >= 2 && val <= 8) target_min_images = (uint32_t)val;
+    }
+
+    VkPhysicalDevice physDev = VK_NULL_HANDLE;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_device_phys.find((uint64_t)(uintptr_t)device);
+        if (it != m_device_phys.end()) {
+            physDev = it->second;
+        }
+    }
+
+    // Query caps to avoid exceeding maxImageCount
+    VkSurfaceCapabilitiesKHR caps{};
+    bool have_caps = false;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR real_caps_fn =
+        (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    if (real_caps_fn && physDev && pCreateInfo->surface) {
+        if (real_caps_fn(physDev, pCreateInfo->surface, &caps) == VK_SUCCESS) {
+            have_caps = true;
+        }
+    }
+    if (have_caps && caps.maxImageCount > 0 && target_min_images > caps.maxImageCount) {
+        target_min_images = caps.maxImageCount;
+    }
+
+    if (modifiedInfo.minImageCount < target_min_images) {
+        LOGI("[VulkanFix] Swapchain: Elevating minImageCount from %u to %u (Triple Buffering) to eliminate 120Hz VSync cadence trap (40 FPS drop)",
+             modifiedInfo.minImageCount, target_min_images);
+        modifiedInfo.minImageCount = target_min_images;
+    }
+
+    // Helper: check if a present mode is supported by native driver
+    auto is_mode_supported = [&](VkPresentModeKHR testMode) -> bool {
+        PFN_vkGetPhysicalDeviceSurfacePresentModesKHR real_pm_fn =
+            (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+        if (!real_pm_fn || !physDev || !pCreateInfo->surface) return false;
+        uint32_t count = 0;
+        if (real_pm_fn(physDev, pCreateInfo->surface, &count, nullptr) != VK_SUCCESS || count == 0) return false;
+        std::vector<VkPresentModeKHR> modes(count);
+        if (real_pm_fn(physDev, pCreateInfo->surface, &count, modes.data()) != VK_SUCCESS) return false;
+        for (auto m : modes) {
+            if (m == testMode) return true;
+        }
+        return false;
+    };
+
+    const char* env_pm = getenv("VULKAN_FIX_PRESENT_MODE");
+    const char* env_pref_mailbox = getenv("VULKAN_FIX_PREFER_MAILBOX");
+    bool prefer_mailbox = (env_pref_mailbox && (strcmp(env_pref_mailbox, "1") == 0 || strcasecmp(env_pref_mailbox, "true") == 0));
+
+    if (env_pm && env_pm[0] != '\0') {
+        if (strcasecmp(env_pm, "mailbox") == 0) {
+            if (is_mode_supported(VK_PRESENT_MODE_MAILBOX_KHR)) {
+                LOGI("[VulkanFix] Swapchain: Overriding presentMode from %d to VK_PRESENT_MODE_MAILBOX_KHR", modifiedInfo.presentMode);
+                modifiedInfo.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+            } else {
+                LOGW("[VulkanFix] Swapchain: Requested MAILBOX present mode not supported by surface");
+            }
+        } else if (strcasecmp(env_pm, "fifo_relaxed") == 0) {
+            if (is_mode_supported(VK_PRESENT_MODE_FIFO_RELAXED_KHR)) {
+                LOGI("[VulkanFix] Swapchain: Overriding presentMode from %d to VK_PRESENT_MODE_FIFO_RELAXED_KHR", modifiedInfo.presentMode);
+                modifiedInfo.presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+            }
+        } else if (strcasecmp(env_pm, "immediate") == 0) {
+            if (is_mode_supported(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+                LOGI("[VulkanFix] Swapchain: Overriding presentMode from %d to VK_PRESENT_MODE_IMMEDIATE_KHR", modifiedInfo.presentMode);
+                modifiedInfo.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            }
+        } else if (strcasecmp(env_pm, "fifo") == 0) {
+            modifiedInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        }
+    } else if (prefer_mailbox && modifiedInfo.presentMode == VK_PRESENT_MODE_FIFO_KHR) {
+        if (is_mode_supported(VK_PRESENT_MODE_MAILBOX_KHR)) {
+            LOGI("[VulkanFix] Swapchain: Automatically promoting FIFO to VK_PRESENT_MODE_MAILBOX_KHR (prefer_mailbox enabled)");
+            modifiedInfo.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+        }
     }
 
     // Try native swapchain creation first
     PFN_vkCreateSwapchainKHR real_fn =
         (PFN_vkCreateSwapchainKHR) get_real_proc(get_last_instance(), device, "vkCreateSwapchainKHR");
     if (real_fn) {
-        VkResult r = real_fn(device, pCreateInfo, pAllocator, pSwapchain);
+        VkResult r = real_fn(device, &modifiedInfo, pAllocator, pSwapchain);
         if (r == VK_SUCCESS) {
             outResult = VK_SUCCESS;
             return true;
         }
+        LOGW("[VulkanFix] Swapchain: Native creation with modified info failed (res=%d), falling back to original create info", r);
+        r = real_fn(device, pCreateInfo, pAllocator, pSwapchain);
+        if (r == VK_SUCCESS) {
+            outResult = VK_SUCCESS;
+            return true;
+        }
+    }
+
+    if (is_device_native(device)) {
+        outResult = VK_ERROR_INITIALIZATION_FAILED;
+        return true;
     }
 
     // Emulated swapchain
@@ -362,14 +472,14 @@ bool SwapchainModule::on_create_swapchain(
 
     auto sc = std::make_shared<EmulatedSwapchain>();
     sc->device = device;
-    sc->surface = pCreateInfo->surface;
-    sc->width = pCreateInfo->imageExtent.width;
-    sc->height = pCreateInfo->imageExtent.height;
-    sc->format = pCreateInfo->imageFormat;
+    sc->surface = modifiedInfo.surface;
+    sc->width = modifiedInfo.imageExtent.width;
+    sc->height = modifiedInfo.imageExtent.height;
+    sc->format = modifiedInfo.imageFormat;
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_surface_windows.find((uint64_t)(uintptr_t)pCreateInfo->surface);
+        auto it = m_surface_windows.find((uint64_t)(uintptr_t)modifiedInfo.surface);
         if (it != m_surface_windows.end()) {
             sc->window = it->second;
         }
@@ -379,20 +489,20 @@ bool SwapchainModule::on_create_swapchain(
         ANativeWindow_setBuffersGeometry(sc->window, (int32_t)sc->width, (int32_t)sc->height, WINDOW_FORMAT_RGBA_8888);
     }
 
-    uint32_t count = std::max(pCreateInfo->minImageCount, 2u);
+    uint32_t count = std::max(modifiedInfo.minImageCount, 3u);
     for (uint32_t i = 0; i < count; ++i) {
         VkImageCreateInfo ici{};
         ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ici.imageType = VK_IMAGE_TYPE_2D;
-        ici.format = pCreateInfo->imageFormat;
+        ici.format = modifiedInfo.imageFormat;
         ici.extent = {sc->width, sc->height, 1};
         ici.mipLevels = 1;
         ici.arrayLayers = 1;
         ici.samples = VK_SAMPLE_COUNT_1_BIT;
         ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage = pCreateInfo->imageUsage | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+        ici.usage = modifiedInfo.imageUsage | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        ici.sharingMode = pCreateInfo->imageSharingMode;
+        ici.sharingMode = modifiedInfo.imageSharingMode;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
         VkImage img = VK_NULL_HANDLE;

@@ -2966,13 +2966,29 @@ VkResult LayerManager::dispatch_create_swapchain(
         }
     }
     const auto& dt = get_dispatch_table(device);
+    VkSwapchainCreateInfoKHR modifiedInfo = *pCreateInfo;
+    uint32_t target_min_images = 3;
+    const char* env_min = getenv("VULKAN_FIX_SWAPCHAIN_MIN_IMAGES");
+    if (env_min && env_min[0] != '\0') {
+        int val = atoi(env_min);
+        if (val >= 2 && val <= 8) target_min_images = (uint32_t)val;
+    }
+    if (modifiedInfo.minImageCount < target_min_images) {
+        modifiedInfo.minImageCount = target_min_images;
+    }
     if (dt.CreateSwapchain) {
-        res = dt.CreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
+        res = dt.CreateSwapchain(device, &modifiedInfo, pAllocator, pSwapchain);
+        if (res != VK_SUCCESS) {
+            res = dt.CreateSwapchain(device, pCreateInfo, pAllocator, pSwapchain);
+        }
     } else {
         PFN_vkCreateSwapchainKHR real_fn =
             (PFN_vkCreateSwapchainKHR) get_real_proc(get_last_instance(), device, "vkCreateSwapchainKHR");
         if (real_fn) {
-            res = real_fn(device, pCreateInfo, pAllocator, pSwapchain);
+            res = real_fn(device, &modifiedInfo, pAllocator, pSwapchain);
+            if (res != VK_SUCCESS) {
+                res = real_fn(device, pCreateInfo, pAllocator, pSwapchain);
+            }
         } else {
             res = VK_ERROR_EXTENSION_NOT_PRESENT;
         }
@@ -3196,7 +3212,22 @@ VkResult LayerManager::dispatch_get_physical_device_surface_capabilities(
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR real_fn =
         (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
     if (real_fn) {
-        return real_fn(physicalDevice, surface, pSurfaceCapabilities);
+        res = real_fn(physicalDevice, surface, pSurfaceCapabilities);
+        if (res == VK_SUCCESS && pSurfaceCapabilities) {
+            uint32_t target_min_images = 3;
+            const char* env_min = getenv("VULKAN_FIX_SWAPCHAIN_MIN_IMAGES");
+            if (env_min && env_min[0] != '\0') {
+                int val = atoi(env_min);
+                if (val >= 2 && val <= 8) target_min_images = (uint32_t)val;
+            }
+            if (pSurfaceCapabilities->minImageCount < target_min_images) {
+                pSurfaceCapabilities->minImageCount = target_min_images;
+            }
+            if (pSurfaceCapabilities->maxImageCount > 0 && pSurfaceCapabilities->minImageCount > pSurfaceCapabilities->maxImageCount) {
+                pSurfaceCapabilities->minImageCount = pSurfaceCapabilities->maxImageCount;
+            }
+        }
+        return res;
     }
     return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
@@ -3209,10 +3240,28 @@ VkResult LayerManager::dispatch_get_physical_device_surface_capabilities2(
     if (!pSurfaceInfo || !pSurfaceCapabilities) return VK_ERROR_INITIALIZATION_FAILED;
     PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR real_fn =
         (PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSurfaceCapabilities2KHR");
+    VkResult res = VK_SUCCESS;
     if (real_fn) {
-        return real_fn(physicalDevice, pSurfaceInfo, pSurfaceCapabilities);
+        res = real_fn(physicalDevice, pSurfaceInfo, pSurfaceCapabilities);
+    } else {
+        res = dispatch_get_physical_device_surface_capabilities(physicalDevice, pSurfaceInfo->surface, &pSurfaceCapabilities->surfaceCapabilities);
     }
-    return dispatch_get_physical_device_surface_capabilities(physicalDevice, pSurfaceInfo->surface, &pSurfaceCapabilities->surfaceCapabilities);
+    if (res == VK_SUCCESS) {
+        uint32_t target_min_images = 3;
+        const char* env_min = getenv("VULKAN_FIX_SWAPCHAIN_MIN_IMAGES");
+        if (env_min && env_min[0] != '\0') {
+            int val = atoi(env_min);
+            if (val >= 2 && val <= 8) target_min_images = (uint32_t)val;
+        }
+        if (pSurfaceCapabilities->surfaceCapabilities.minImageCount < target_min_images) {
+            pSurfaceCapabilities->surfaceCapabilities.minImageCount = target_min_images;
+        }
+        if (pSurfaceCapabilities->surfaceCapabilities.maxImageCount > 0 &&
+            pSurfaceCapabilities->surfaceCapabilities.minImageCount > pSurfaceCapabilities->surfaceCapabilities.maxImageCount) {
+            pSurfaceCapabilities->surfaceCapabilities.minImageCount = pSurfaceCapabilities->surfaceCapabilities.maxImageCount;
+        }
+    }
+    return res;
 }
 
 VkResult LayerManager::dispatch_get_physical_device_surface_formats(
