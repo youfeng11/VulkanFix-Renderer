@@ -10,6 +10,7 @@
 #include <thread>
 #include <condition_variable>
 #include <unordered_map>
+#include <memory>
 
 struct DevicePipelineCacheState {
     VkDevice device = VK_NULL_HANDLE;
@@ -21,7 +22,23 @@ struct DevicePipelineCacheState {
     uint8_t driver_uuid[VK_UUID_SIZE]{};
     uint32_t vendor_id = 0;
     uint32_t device_id = 0;
-    mutable std::mutex cache_api_mutex;
+
+    // Vulkan requires host access to a VkPipelineCache to be externally
+    // synchronized. Pipeline creation takes this lock in shared mode (several
+    // threads may compile at once); flushing, merging and destruction take it
+    // exclusively. `alive` is cleared while the exclusive lock is held, so a
+    // background flush that wins the lock later can no longer touch a cache
+    // handle that has been destroyed.
+    mutable std::shared_mutex cache_use_mutex;
+    std::atomic<bool> alive{true};
+};
+
+// Keeps a device's pipeline-cache state alive and holds a shared lock on it for
+// the duration of a vkCreate*Pipelines call. Empty (unlocked) when `cache` is
+// not the manager's internal cache.
+struct PipelineCacheUseGuard {
+    std::shared_ptr<DevicePipelineCacheState> state;
+    std::shared_lock<std::shared_mutex> lock;
 };
 
 /**
@@ -49,6 +66,14 @@ public:
 
     // Prepare effective pipeline cache before pipeline creation
     VkPipelineCache prepare_pipeline_cache(VkDevice device, VkPipelineCache appCache);
+
+    // Holds a shared lock on the manager's internal cache for the duration of a
+    // vkCreate*Pipelines call (no-op when `cache` is an application cache).
+    PipelineCacheUseGuard lock_cache_for_creation(VkDevice device, VkPipelineCache cache);
+
+    // Shared ownership so a background flush can keep the state alive while a
+    // device is being torn down.
+    std::shared_ptr<DevicePipelineCacheState> get_state(VkDevice device);
 
     // Called after graphics/compute pipelines are successfully created
     void on_pipelines_created(VkDevice device, VkPipelineCache usedCache, uint32_t count);
@@ -85,7 +110,7 @@ private:
     std::atomic<VkPipelineCache> m_primary_cache{VK_NULL_HANDLE};
 
     mutable std::shared_mutex m_mutex;
-    std::unordered_map<uint64_t, std::unique_ptr<DevicePipelineCacheState>> m_devices;
+    std::unordered_map<uint64_t, std::shared_ptr<DevicePipelineCacheState>> m_devices;
 
     // Asynchronous background flusher
     std::thread m_flusher_thread;

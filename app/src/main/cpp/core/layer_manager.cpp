@@ -920,6 +920,11 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
 
     VkPipelineCache effectiveCache = PipelineCacheManager::get().prepare_pipeline_cache(device, pipelineCache);
 
+    // Hold shared access to the layer's internal cache for the entire call so the
+    // background flusher can never query/flush the same VkPipelineCache at the
+    // same time (Vulkan requires external synchronization on cache host access).
+    auto cacheGuard = PipelineCacheManager::get().lock_cache_for_creation(device, effectiveCache);
+
     if (!is_emulated_device(device) || createInfoCount == 0 || !pCreateInfos) {
         VkResult res = real_fn(device, effectiveCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
         if (res == VK_SUCCESS) {
@@ -1016,6 +1021,7 @@ VkResult LayerManager::dispatch_create_compute_pipelines(
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkPipelineCache effectiveCache = PipelineCacheManager::get().prepare_pipeline_cache(device, pipelineCache);
+    auto cacheGuard = PipelineCacheManager::get().lock_cache_for_creation(device, effectiveCache);
     VkResult res = real_fn(device, effectiveCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
     if (res == VK_SUCCESS) {
         PipelineCacheManager::get().on_pipelines_created(device, effectiveCache, createInfoCount);

@@ -3,7 +3,22 @@
 #include "layer_manager.h"
 #include "vk_pnext.h"
 
+// Capability supplement: expose vertexPipelineStoresAndAtomics (and the
+// per-stage SSBO/Image descriptor limits that make it usable) to applications
+// that require it, even when the driver does not advertise the bit.
+//
+// This is intentionally NOT a simulation: shaders that actually perform
+// vertex-stage storage-buffer writes / atomics still execute on the real
+// hardware. The module therefore:
+//   1. reports the feature as available in vkGetPhysicalDeviceFeatures{,2};
+//   2. strips it from VkDeviceCreateInfo before forwarding to the driver, so
+//      vkCreateDevice does not fail with VK_ERROR_FEATURE_NOT_PRESENT.
+//
+// It can be disabled per device with
+//   VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE=skip
+// (or =force to always expose it), which is also what the launcher toggle maps to.
 REGISTER_LAYER_MODULE(VertexPipelineStoresAndAtomicsModule);
+
 
 VertexPipelineStoresAndAtomicsModule::VertexPipelineStoresAndAtomicsModule() {
     LOGI("Initialized Vulkan vertexPipelineStoresAndAtomics emulation module");

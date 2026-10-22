@@ -11,8 +11,13 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <mutex>
 
-static inline FILE* get_writable_log_file() {
+// NOTE: external linkage ("inline", not "static inline") on purpose. With
+// "static inline" every translation unit gets its own FILE* + s_initialized, so
+// each of the ~30 TUs that logs opened the same path with "w", truncating the
+// file and then writing at independent offsets (interleaved garbage / NUL holes).
+inline FILE* get_writable_log_file() {
     static FILE* s_fp = nullptr;
     static bool s_initialized = false;
     if (!s_initialized) {
@@ -72,7 +77,7 @@ static inline FILE* get_writable_log_file() {
     return s_fp;
 }
 
-static inline void file_log(const char* level, const char* fmt, ...) {
+inline void file_log(const char* level, const char* fmt, ...) {
     int prio = ANDROID_LOG_INFO;
     if (strcmp(level, "WARN") == 0) prio = ANDROID_LOG_WARN;
     else if (strcmp(level, "ERROR") == 0) prio = ANDROID_LOG_ERROR;
@@ -83,8 +88,10 @@ static inline void file_log(const char* level, const char* fmt, ...) {
     __android_log_vprint(prio, "VulkanFix", fmt, args);
     va_end(args);
 
+    static std::mutex s_log_mutex;
     FILE* fp = get_writable_log_file();
     if (fp) {
+        std::lock_guard<std::mutex> guard(s_log_mutex);
         va_start(args, fmt);
         fprintf(fp, "[%s] ", level);
         vfprintf(fp, fmt, args);

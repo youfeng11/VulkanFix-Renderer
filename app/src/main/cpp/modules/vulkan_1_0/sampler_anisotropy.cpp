@@ -3,7 +3,14 @@
 #include "layer_manager.h"
 #include "vk_pnext.h"
 
+// Capability supplement: expose samplerAnisotropy (and maxSamplerAnisotropy=16)
+// to applications that require it. vkCreateSampler clamps anisotropyEnable back
+// to VK_FALSE for the real driver, which cannot honour it.
+//
+// Disable per device with VULKAN_FIX_EMULATE_SAMPLER_ANISOTROPY=skip
+// (VULKAN_FIX_EMULATE_SAMPLER_ANISOTROPY_FEATURE controls the feature bit).
 REGISTER_LAYER_MODULE(SamplerAnisotropyModule);
+
 
 SamplerAnisotropyModule::SamplerAnisotropyModule() {
     LOGI("Initialized Vulkan samplerAnisotropy emulation module");

@@ -333,11 +333,33 @@ void DynamicRenderingModule::on_destroy_device(VkDevice device) {
     }
 
     m_device_native_support.erase((uint64_t)(uintptr_t)device);
+
+    // Drop per-command-buffer state belonging to this device. Without this the
+    // maps keep growing across device create/destroy cycles (e.g. world reloads)
+    // and stale entries shadow handles that the driver later reuses.
+    {
+        std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
+        for (auto cmdIt = m_cmd_devices.begin(); cmdIt != m_cmd_devices.end();) {
+            if (cmdIt->second == device) {
+                m_cmd_rendering_states.erase(cmdIt->first);
+                cmdIt = m_cmd_devices.erase(cmdIt);
+            } else {
+                ++cmdIt;
+            }
+        }
+    }
+
     if (m_device_resources.empty()) {
         m_pipeline_rp_cache.clear();
         m_dynamic_rp_cache.clear();
         m_framebuffer_cache.clear();
         m_image_view_to_framebuffers.clear();
+        // Image / view metadata is keyed by handle only, so it can only be
+        // dropped safely once every device is gone.
+        m_images.clear();
+        m_image_views.clear();
+        m_cmd_rendering_states.clear();
+        m_cmd_devices.clear();
     }
 }
 

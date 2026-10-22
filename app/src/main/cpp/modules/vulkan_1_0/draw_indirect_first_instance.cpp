@@ -3,7 +3,19 @@
 #include "layer_manager.h"
 #include "vk_pnext.h"
 
+// Capability supplement: expose drawIndirectFirstInstance to applications that
+// require it. The feature bit is stripped from VkDeviceCreateInfo before it
+// reaches the driver.
+//
+// NOTE: this only advertises the capability; non-zero firstInstance values in
+// VkDrawIndirectCommand / VkDrawIndexedIndirectCommand are still executed by the
+// real hardware. A real emulation would need to decompress the indirect buffer
+// into per-instance direct draws.
+//
+// Disable per device with VULKAN_FIX_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE=skip
+// (VULKAN_FIX_EMULATE_DRAW_INDIRECT_FIRST_INSTANCE_FEATURE controls the bit).
 REGISTER_LAYER_MODULE(DrawIndirectFirstInstanceModule);
+
 
 DrawIndirectFirstInstanceModule::DrawIndirectFirstInstanceModule() {
     LOGI("Initialized Vulkan drawIndirectFirstInstance emulation module");

@@ -957,13 +957,13 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceVersion(
     PFN_vkEnumerateInstanceVersion real_fn =
         (PFN_vkEnumerateInstanceVersion) get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
     if (real_fn) {
-        VkResult res = real_fn(pApiVersion);
-        if (res == VK_SUCCESS && *pApiVersion < VK_API_VERSION_1_2) {
-            *pApiVersion = VK_API_VERSION_1_2;
-        }
-        return res;
+        // Report the real loader/driver version. Never inflate it: applications
+        // (and their Vulkan backends) pick code paths from this value, and a
+        // driver that is really 1.0/1.1 cannot execute 1.2/1.3 entry points.
+        return real_fn(pApiVersion);
     }
-    *pApiVersion = VK_API_VERSION_1_2;
+    // Pre-1.1 loaders do not expose vkEnumerateInstanceVersion at all.
+    *pApiVersion = VK_API_VERSION_1_0;
     return VK_SUCCESS;
 }
 

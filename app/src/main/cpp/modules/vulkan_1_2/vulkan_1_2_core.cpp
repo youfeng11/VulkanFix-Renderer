@@ -144,11 +144,11 @@ void Vulkan12CoreModule::on_get_properties(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceProperties* pProperties
 ) {
-    if (!pProperties) return;
-    if (pProperties->apiVersion < VK_API_VERSION_1_2) {
-        pProperties->apiVersion = VK_API_VERSION_1_2;
-        LOG_OPT_DEBUG("Vulkan12Core: promoted device apiVersion to 1.2 in vkGetPhysicalDeviceProperties");
-    }
+    // Do not promote apiVersion to 1.2: applications would then use Vulkan 1.2
+    // core entry points that this driver does not provide. Emulated extensions
+    // are still advertised individually.
+    (void)physicalDevice;
+    (void)pProperties;
 }
 
 struct Properties12UnlinkData {
@@ -182,9 +182,7 @@ void Vulkan12CoreModule::on_post_get_properties2(
     void* pUserData
 ) {
     if (!pProperties) return;
-    if (pProperties->properties.apiVersion < VK_API_VERSION_1_2) {
-        pProperties->properties.apiVersion = VK_API_VERSION_1_2;
-    }
+    // apiVersion is intentionally left as reported by the driver (see on_get_properties).
 
     char driverInfoStr[VK_MAX_DRIVER_INFO_SIZE];
     uint32_t realApiVer = get_phys_real_api_version(physicalDevice);
