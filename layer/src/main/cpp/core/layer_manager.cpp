@@ -3,6 +3,7 @@
 #include "pipeline_cache_manager.h"
 #include "tbdr_barrier_optimizer.h"
 #include "renderdoc_manager.h"
+#include "shader/shader_rewriter.h"
 
 LayerManager& LayerManager::get() {
     static LayerManager s_instance;
@@ -592,6 +593,19 @@ void LayerManager::remove_emulated_device(VkDevice device) {
     }
 }
 
+void LayerManager::set_device_max_spirv_version(VkDevice device, uint32_t version) {
+    if (device == VK_NULL_HANDLE) return;
+    std::unique_lock<std::shared_mutex> lock(m_device_info_mutex);
+    m_device_spirv_versions[(uint64_t)(uintptr_t)device] = version;
+}
+
+uint32_t LayerManager::get_device_max_spirv_version(VkDevice device) {
+    if (device == VK_NULL_HANDLE) return 0;
+    std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
+    auto it = m_device_spirv_versions.find((uint64_t)(uintptr_t)device);
+    return it != m_device_spirv_versions.end() ? it->second : 0;
+}
+
 VkResult LayerManager::dispatch_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
     const char* pLayerName,
@@ -848,7 +862,20 @@ VkResult LayerManager::dispatch_create_device(
         init_device_dispatch_table(*pDevice);
         update_device_bypass_flags(*pDevice);
         PipelineCacheManager::get().init_for_device(physicalDevice, *pDevice);
-        LOGI("Created logical device %p with layer module emulation enabled", *pDevice);
+
+        // Record the SPIR-V ceiling implied by the *real* driver API version.
+        PFN_vkGetPhysicalDeviceProperties real_props = (PFN_vkGetPhysicalDeviceProperties)
+            get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+        uint32_t api_version = VK_API_VERSION_1_0;
+        if (real_props) {
+            VkPhysicalDeviceProperties props{};
+            real_props(physicalDevice, &props);
+            api_version = props.apiVersion;
+        }
+        const uint32_t spirv_version = ShaderRewriter::api_version_to_spirv(api_version);
+        set_device_max_spirv_version(*pDevice, spirv_version);
+        LOGI("Created logical device %p (driver api 0x%x, max SPIR-V %s)",
+             *pDevice, api_version, ShaderRewriter::spirv_version_string(spirv_version));
     }
 
     return res;
@@ -895,6 +922,11 @@ void LayerManager::dispatch_destroy_device(
     }
 
     remove_emulated_device(device);
+
+    {
+        std::unique_lock<std::shared_mutex> info_lock(m_device_info_mutex);
+        m_device_spirv_versions.erase((uint64_t)(uintptr_t)device);
+    }
 
     PFN_vkDestroyDevice real_fn =
         (PFN_vkDestroyDevice) get_real_proc(get_last_instance(), device, "vkDestroyDevice");

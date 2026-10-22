@@ -233,6 +233,11 @@ public:
         return m_primary_emulated_device.load(std::memory_order_relaxed);
     }
 
+    // Maximum SPIR-V version implied by the real driver API version of `device`
+    // (1.0 -> SPIR-V 1.0, 1.1 -> 1.3, 1.2 -> 1.5, 1.3 -> 1.6). 0 when unknown.
+    void set_device_max_spirv_version(VkDevice device, uint32_t version);
+    uint32_t get_device_max_spirv_version(VkDevice device);
+
     VkResult dispatch_create_descriptor_set_layout(
         VkDevice device,
         const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
@@ -884,6 +889,10 @@ private:
 
     std::shared_mutex m_table_rw_mutex;
     std::unordered_map<uint64_t, DeviceDispatchTable> m_device_tables;
+
+    // Per-device SPIR-V version ceiling, used by the shader rewriter.
+    std::shared_mutex m_device_info_mutex;
+    std::unordered_map<uint64_t, uint32_t> m_device_spirv_versions;
 
     IVulkanLayerModule* m_divisor_mod = nullptr;
     IVulkanLayerModule* m_dyn_rendering_mod = nullptr;

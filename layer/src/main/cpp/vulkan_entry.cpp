@@ -2,8 +2,10 @@
 #include "driver_loader.h"
 #include "layer_manager.h"
 #include "renderdoc_manager.h"
+#include "shader/shader_rewriter.h"
 #include <string.h>
 #include <string>
+#include <vector>
 
 __attribute__((constructor))
 static void init_vulkan_layer() {
@@ -630,6 +632,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vkCreateImage);
         MATCH(vkCreateImageView);
         MATCH(vkCreateSampler);
+        MATCH(vkCreateShaderModule);
         MATCH(vkCreateSemaphore);
         MATCH(vkCreateRenderPass2);
         MATCH(vkCreateRenderPass2KHR);
@@ -1016,7 +1019,42 @@ FORWARD_DEV(VkResult, vkMapMemory, device, (VkDevice device, VkDeviceMemory memo
 FORWARD_DEV_VOID(vkUnmapMemory, device, (VkDevice device, VkDeviceMemory memory), (device, memory))
 FORWARD_DEV(VkResult, vkCreateBuffer, device, (VkDevice device, const VkBufferCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkBuffer* pBuffer), (device, pCreateInfo, pAllocator, pBuffer))
 FORWARD_DEV_VOID(vkDestroyBuffer, device, (VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* pAllocator), (device, buffer, pAllocator))
-FORWARD_DEV(VkResult, vkCreateShaderModule, device, (VkDevice device, const VkShaderModuleCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkShaderModule* pShaderModule), (device, pCreateInfo, pAllocator, pShaderModule))
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateShaderModule(
+    VkDevice device,
+    const VkShaderModuleCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkShaderModule* pShaderModule
+) {
+    static PFN_vkCreateShaderModule s_real_fn = nullptr;
+    if (!s_real_fn) {
+        s_real_fn = (PFN_vkCreateShaderModule)
+            get_real_proc(get_last_instance(), device, "vkCreateShaderModule");
+    }
+    if (!s_real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    if (!pCreateInfo || !pCreateInfo->pCode ||
+        pCreateInfo->codeSize < 5 * sizeof(uint32_t) ||
+        (pCreateInfo->codeSize % sizeof(uint32_t)) != 0) {
+        return s_real_fn(device, pCreateInfo, pAllocator, pShaderModule);
+    }
+
+    const uint32_t targetVersion = LayerManager::get().get_device_max_spirv_version(device);
+    if (targetVersion == 0) {
+        return s_real_fn(device, pCreateInfo, pAllocator, pShaderModule);
+    }
+
+    std::vector<uint32_t> code(pCreateInfo->codeSize / sizeof(uint32_t));
+    memcpy(code.data(), pCreateInfo->pCode, pCreateInfo->codeSize);
+
+    if (!ShaderRewriter::get().rewrite(code, targetVersion)) {
+        return s_real_fn(device, pCreateInfo, pAllocator, pShaderModule);
+    }
+
+    VkShaderModuleCreateInfo modified = *pCreateInfo;
+    modified.codeSize = code.size() * sizeof(uint32_t);
+    modified.pCode = code.data();
+    return s_real_fn(device, &modified, pAllocator, pShaderModule);
+}
 FORWARD_DEV_VOID(vkDestroyShaderModule, device, (VkDevice device, VkShaderModule shaderModule, const VkAllocationCallbacks* pAllocator), (device, shaderModule, pAllocator))
 FORWARD_DEV(VkResult, vkCreateRenderPass, device, (VkDevice device, const VkRenderPassCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkRenderPass* pRenderPass), (device, pCreateInfo, pAllocator, pRenderPass))
 FORWARD_DEV_VOID(vkDestroyRenderPass, device, (VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator), (device, renderPass, pAllocator))

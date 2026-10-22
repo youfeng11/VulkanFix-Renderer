@@ -36,13 +36,43 @@ add_compile_definitions(
 # Vulkan-Headers submodule
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../../Vulkan-Headers ${CMAKE_CURRENT_BINARY_DIR}/Vulkan-Headers EXCLUDE_FROM_ALL)
 
+# SPIRV-Tools: SPIR-V parsing/validation/rewriting for the shader downgrade pass.
+# Both SPIRV-Tools and SPIRV-Headers are pinned submodules at the repository root.
+set(VKFIX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../")
+set(SPIRV_TOOLS_DIR "${VKFIX_ROOT}SPIRV-Tools")
+set(SPIRV_HEADERS_DIR "${VKFIX_ROOT}SPIRV-Headers")
+
+if(NOT EXISTS "${SPIRV_TOOLS_DIR}/CMakeLists.txt" OR NOT EXISTS "${SPIRV_HEADERS_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR
+        "SPIRV-Tools / SPIRV-Headers submodules are missing.\n"
+        "Run: git submodule update --init --recursive")
+endif()
+
+set(SPIRV-Headers_SOURCE_DIR "${SPIRV_HEADERS_DIR}" CACHE PATH "SPIRV-Headers for SPIRV-Tools" FORCE)
+set(SPIRV_SKIP_TESTS ON CACHE BOOL "Skip SPIRV-Tools tests" FORCE)
+set(SPIRV_SKIP_EXECUTABLES ON CACHE BOOL "Skip SPIRV-Tools executables" FORCE)
+set(SPIRV_TOOLS_BUILD_STATIC ON CACHE BOOL "Build SPIRV-Tools as a static library" FORCE)
+set(SPIRV_WERROR OFF CACHE BOOL "Do not treat SPIRV-Tools warnings as errors" FORCE)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_subdirectory(${SPIRV_TOOLS_DIR} ${CMAKE_CURRENT_BINARY_DIR}/SPIRV-Tools EXCLUDE_FROM_ALL)
+
+if(TARGET SPIRV-Tools-static)
+    set(VKFIX_SPIRV_TOOLS_TARGET SPIRV-Tools-static)
+elseif(TARGET SPIRV-Tools)
+    set(VKFIX_SPIRV_TOOLS_TARGET SPIRV-Tools)
+else()
+    message(FATAL_ERROR "SPIRV-Tools target not found after add_subdirectory")
+endif()
+
 # Automatically discover all core and module sources
 file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS core/*.cpp)
 file(GLOB_RECURSE MODULE_SOURCES CONFIGURE_DEPENDS modules/*.cpp)
+file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS shader/*.cpp)
 
 add_library(vulkan_fix SHARED
     ${CORE_SOURCES}
     ${MODULE_SOURCES}
+    ${SHADER_SOURCES}
     vulkan_entry.cpp
     egl_stubs.c
 )
@@ -68,6 +98,7 @@ find_library(ANDROID_LIB android)
 
 target_link_libraries(vulkan_fix PRIVATE
     Vulkan::Headers
+    ${VKFIX_SPIRV_TOOLS_TARGET}
     ${LOG_LIB}
     ${ANDROID_LIB}
     dl
