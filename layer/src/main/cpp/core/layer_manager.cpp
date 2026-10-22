@@ -1,9 +1,10 @@
-#include "layer_manager.h"
+﻿#include "layer_manager.h"
 #include "driver_loader.h"
 #include "pipeline_cache_manager.h"
 #include "tbdr_barrier_optimizer.h"
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
+#include "imageless_framebuffer_manager.h"
 
 LayerManager& LayerManager::get() {
     static LayerManager s_instance;
@@ -334,6 +335,7 @@ void LayerManager::update_device_bypass_flags(VkDevice device) {
         m_device_bypass_flags[(uint64_t)(uintptr_t)device] = flags;
         if (!m_has_primary_bypass.load(std::memory_order_relaxed) || m_primary_device.load(std::memory_order_relaxed) == device) {
             m_primary_bypass_flags = flags;
+            m_primary_multi_draw_bypass.store(flags.bypass_multi_draw, std::memory_order_release);
             m_has_primary_bypass.store(true, std::memory_order_release);
         }
     }
@@ -358,10 +360,12 @@ void LayerManager::remove_device_bypass_flags(VkDevice device) {
         if (!m_device_bypass_flags.empty()) {
             auto it = m_device_bypass_flags.begin();
             m_primary_bypass_flags = it->second;
+            m_primary_multi_draw_bypass.store(m_primary_bypass_flags.bypass_multi_draw, std::memory_order_release);
             m_has_primary_bypass.store(true, std::memory_order_release);
             m_divisor_bypass_active.store(m_primary_bypass_flags.bypass_draw, std::memory_order_release);
         } else {
             m_has_primary_bypass.store(false, std::memory_order_release);
+            m_primary_multi_draw_bypass.store(false, std::memory_order_release);
             m_divisor_bypass_active.store(false, std::memory_order_release);
         }
     }
@@ -1520,6 +1524,10 @@ void LayerManager::dispatch_destroy_image_view(
         m_dyn_rendering_mod->on_destroy_image_view(device, imageView);
     }
 
+    // Cached imageless framebuffers reference the view; drop them before the
+    // driver destroys it.
+    ImagelessFramebufferManager::get().on_destroy_image_view(device, imageView);
+
     const auto& dt = get_dispatch_table(device);
     if (dt.DestroyImageView) {
         dt.DestroyImageView(device, imageView, pAllocator);
@@ -1633,7 +1641,8 @@ void LayerManager::dispatch_cmd_bind_pipeline(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
-    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
+                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             m_primary_table.CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
             return;
@@ -1660,7 +1669,8 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
-    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
+                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             m_primary_table.CmdBindVertexBuffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
             return;
@@ -1689,7 +1699,8 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
-    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
+                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             if (m_primary_table.CmdBindVertexBuffers2) {
                 m_primary_table.CmdBindVertexBuffers2(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
@@ -1722,7 +1733,8 @@ void LayerManager::dispatch_cmd_draw(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
-    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
+                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             m_primary_table.CmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
             return;
@@ -1752,7 +1764,8 @@ void LayerManager::dispatch_cmd_draw_indexed(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
-    if (__builtin_expect(m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
+    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
+                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
         if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
             m_primary_table.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
             return;
@@ -1781,7 +1794,9 @@ void LayerManager::dispatch_cmd_draw_indirect(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
-    if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed) && m_primary_bypass_flags.bypass_multi_draw, 1)) {
+    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
+                         m_has_primary_table.load(std::memory_order_relaxed) &&
+                         m_primary_multi_draw_bypass.load(std::memory_order_relaxed), 1)) {
         if (m_primary_table.CmdDrawIndirect) {
             m_primary_table.CmdDrawIndirect(commandBuffer, buffer, offset, drawCount, stride);
             return;
@@ -1810,7 +1825,9 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
-    if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed) && m_primary_bypass_flags.bypass_multi_draw, 1)) {
+    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
+                         m_has_primary_table.load(std::memory_order_relaxed) &&
+                         m_primary_multi_draw_bypass.load(std::memory_order_relaxed), 1)) {
         if (m_primary_table.CmdDrawIndexedIndirect) {
             m_primary_table.CmdDrawIndexedIndirect(commandBuffer, buffer, offset, drawCount, stride);
             return;
@@ -1838,8 +1855,20 @@ void LayerManager::dispatch_cmd_begin_render_pass(
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
+
+    VkRenderPassBeginInfo resolved{};
+    const VkRenderPassBeginInfo* begin = pRenderPassBegin;
+    const auto imageless = ImagelessFramebufferManager::get().resolve(pRenderPassBegin, resolved);
+    if (imageless == ImagelessFramebufferManager::ResolveResult::Failed) {
+        LOGE("vkCmdBeginRenderPass: imageless framebuffer could not be resolved; skipping submission");
+        return;
+    }
+    if (imageless == ImagelessFramebufferManager::ResolveResult::Resolved) {
+        begin = &resolved;
+    }
+
     if (dt.CmdBeginRenderPass) {
-        dt.CmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
+        dt.CmdBeginRenderPass(commandBuffer, begin, contents);
     }
 }
 
@@ -2490,18 +2519,29 @@ void LayerManager::dispatch_cmd_begin_render_pass2(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
+    VkRenderPassBeginInfo resolved{};
+    const VkRenderPassBeginInfo* begin = pRenderPassBegin;
+    const auto imageless = ImagelessFramebufferManager::get().resolve(pRenderPassBegin, resolved);
+    if (imageless == ImagelessFramebufferManager::ResolveResult::Failed) {
+        LOGE("vkCmdBeginRenderPass2: imageless framebuffer could not be resolved; skipping submission");
+        return;
+    }
+    if (imageless == ImagelessFramebufferManager::ResolveResult::Resolved) {
+        begin = &resolved;
+    }
+
     if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
-        if (m_renderpass2_mod->on_cmd_begin_render_pass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo)) {
+        if (m_renderpass2_mod->on_cmd_begin_render_pass2(commandBuffer, begin, pSubpassBeginInfo)) {
             return;
         }
     }
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdBeginRenderPass2) {
-        dt.CmdBeginRenderPass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+        dt.CmdBeginRenderPass2(commandBuffer, begin, pSubpassBeginInfo);
     } else if (dt.CmdBeginRenderPass) {
         VkSubpassContents contents = pSubpassBeginInfo ? pSubpassBeginInfo->contents : VK_SUBPASS_CONTENTS_INLINE;
-        dt.CmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
+        dt.CmdBeginRenderPass(commandBuffer, begin, contents);
     }
 }
 
@@ -3489,4 +3529,6 @@ VkResult LayerManager::dispatch_set_debug_utils_object_tag(
     }
     return VK_SUCCESS;
 }
+
+
 

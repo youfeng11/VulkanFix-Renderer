@@ -3,6 +3,7 @@
 #include "layer_manager.h"
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
+#include "imageless_framebuffer_manager.h"
 #include <string.h>
 #include <string>
 #include <vector>
@@ -633,6 +634,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vkCreateImageView);
         MATCH(vkCreateSampler);
         MATCH(vkCreateShaderModule);
+        MATCH(vkCreateFramebuffer);
         MATCH(vkCreateSemaphore);
         MATCH(vkCreateRenderPass2);
         MATCH(vkCreateRenderPass2KHR);
@@ -651,6 +653,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vkDestroyImage);
         MATCH(vkDestroyImageView);
         MATCH(vkDestroySampler);
+        MATCH(vkDestroyFramebuffer);
         MATCH(vkDestroySemaphore);
         MATCH(vkDestroySamplerYcbcrConversion);
         MATCH(vkDestroySamplerYcbcrConversionKHR);
@@ -1043,6 +1046,13 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateShaderModule(
         return s_real_fn(device, pCreateInfo, pAllocator, pShaderModule);
     }
 
+    // Fast path: on a modern driver there is nothing to lower. Checking the
+    // header avoids a heap allocation + memcpy for every shader module.
+    const uint32_t* code_words = pCreateInfo->pCode;
+    if (code_words[0] != 0x07230203u || code_words[1] <= targetVersion) {
+        return s_real_fn(device, pCreateInfo, pAllocator, pShaderModule);
+    }
+
     std::vector<uint32_t> code(pCreateInfo->codeSize / sizeof(uint32_t));
     memcpy(code.data(), pCreateInfo->pCode, pCreateInfo->codeSize);
 
@@ -1058,6 +1068,50 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateShaderModule(
 FORWARD_DEV_VOID(vkDestroyShaderModule, device, (VkDevice device, VkShaderModule shaderModule, const VkAllocationCallbacks* pAllocator), (device, shaderModule, pAllocator))
 FORWARD_DEV(VkResult, vkCreateRenderPass, device, (VkDevice device, const VkRenderPassCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkRenderPass* pRenderPass), (device, pCreateInfo, pAllocator, pRenderPass))
 FORWARD_DEV_VOID(vkDestroyRenderPass, device, (VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator), (device, renderPass, pAllocator))
+
+// VK_KHR_imageless_framebuffer emulation: a framebuffer created with
+// VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT gets a synthetic handle; the real
+// framebuffer is created lazily at vkCmdBeginRenderPass when the application
+// supplies the attachment views.
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateFramebuffer(
+    VkDevice device,
+    const VkFramebufferCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkFramebuffer* pFramebuffer
+) {
+    if (pCreateInfo != nullptr && pFramebuffer != nullptr &&
+        (pCreateInfo->flags & VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT) != 0 &&
+        ImagelessFramebufferManager::get().is_emulated(device)) {
+        return ImagelessFramebufferManager::get().create(device, pCreateInfo, pFramebuffer);
+    }
+
+    static PFN_vkCreateFramebuffer s_real_fn = nullptr;
+    if (!s_real_fn) {
+        s_real_fn = (PFN_vkCreateFramebuffer)
+            get_real_proc(get_last_instance(), device, "vkCreateFramebuffer");
+    }
+    if (!s_real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+    return s_real_fn(device, pCreateInfo, pAllocator, pFramebuffer);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyFramebuffer(
+    VkDevice device,
+    VkFramebuffer framebuffer,
+    const VkAllocationCallbacks* pAllocator
+) {
+    if (ImagelessFramebufferManager::get().destroy(device, framebuffer)) {
+        return;
+    }
+
+    static PFN_vkDestroyFramebuffer s_real_fn = nullptr;
+    if (!s_real_fn) {
+        s_real_fn = (PFN_vkDestroyFramebuffer)
+            get_real_proc(get_last_instance(), device, "vkDestroyFramebuffer");
+    }
+    if (s_real_fn) {
+        s_real_fn(device, framebuffer, pAllocator);
+    }
+}
 VK_LAYER_EXPORT void VKAPI_CALL vkDestroyPipeline(
     VkDevice device,
     VkPipeline pipeline,

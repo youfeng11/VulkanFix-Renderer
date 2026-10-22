@@ -915,6 +915,7 @@ private:
     IVulkanLayerModule* m_bind_mem2_mod = nullptr;
 
     std::atomic<bool> m_divisor_bypass_active{false};
+    std::atomic<bool> m_primary_multi_draw_bypass{false};
     DeviceBypassFlags m_primary_bypass_flags{};
     std::atomic<bool> m_has_primary_bypass{false};
     std::unordered_map<uint64_t, DeviceBypassFlags> m_device_bypass_flags;

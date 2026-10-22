@@ -75,6 +75,9 @@ private:
 
     std::mutex m_cache_mutex;
     std::unordered_map<uint64_t, CacheEntry> m_cache;
+    size_t m_cache_bytes = 0;
+    static constexpr size_t kMaxCachedModules = 4096;
+    static constexpr size_t kMaxCacheBytes = 8 * 1024 * 1024;
 
     std::atomic<uint64_t> m_rewritten{0};
     std::atomic<uint64_t> m_rejected{0};

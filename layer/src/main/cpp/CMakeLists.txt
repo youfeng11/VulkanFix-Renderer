@@ -72,6 +72,12 @@ set(SPIRV_TOOLS_CMAKE_ARGS
     -DSPIRV_TOOLS_BUILD_STATIC=ON
     -DSPIRV_WERROR=OFF
     "-DSPIRV-Headers_SOURCE_DIR=${SPIRV_HEADERS_DIR}"
+    # Size-oriented release build: the validator is only used for downgrade
+    # checks, and function sections let the linker drop unreachable validators.
+    "-DCMAKE_CXX_FLAGS_RELEASE=-Os -DNDEBUG -ffunction-sections -fdata-sections"
+    "-DCMAKE_C_FLAGS_RELEASE=-Os -DNDEBUG -ffunction-sections -fdata-sections"
+    "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-Os -g -DNDEBUG -ffunction-sections -fdata-sections"
+    "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-Os -g -DNDEBUG -ffunction-sections -fdata-sections"
 )
 if(CMAKE_TOOLCHAIN_FILE)
     list(APPEND SPIRV_TOOLS_CMAKE_ARGS "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")

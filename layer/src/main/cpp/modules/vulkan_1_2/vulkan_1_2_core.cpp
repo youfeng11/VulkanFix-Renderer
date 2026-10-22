@@ -2,6 +2,7 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
+#include "imageless_framebuffer_manager.h"
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -501,7 +502,15 @@ void Vulkan12CoreModule::on_post_create_device(
                 m_primary_dev.store(device, std::memory_order_release);
             }
         }
-        LOGI("Device %p created: Vulkan 1.2 core native=%d", device, native);
+
+        const char* force_env = getenv("VULKAN_FIX_EMULATE_IMAGELESS_FRAMEBUFFER");
+        const bool force = (force_env != nullptr) &&
+            (strcmp(force_env, "1") == 0 || strcasecmp(force_env, "force") == 0 ||
+             strcasecmp(force_env, "true") == 0);
+        const bool emulate_imageless = force || !native;
+        ImagelessFramebufferManager::get().set_device_emulated(device, emulate_imageless);
+        LOGI("Device %p created: Vulkan 1.2 core native=%d, imageless framebuffer=%s",
+             device, native ? 1 : 0, emulate_imageless ? "EMULATED" : "NATIVE");
     }
 
     if (pUserData) {
@@ -514,6 +523,7 @@ void Vulkan12CoreModule::on_destroy_device(VkDevice device) {
         m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_relaxed);
         m_primary_native.store(false, std::memory_order_relaxed);
     }
+    ImagelessFramebufferManager::get().remove_device(device);
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
 }

@@ -346,7 +346,10 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     if (!validate(output, target)) {
         {
             std::lock_guard<std::mutex> lock(m_cache_mutex);
-            if (m_cache.size() >= kMaxCachedModules) m_cache.clear();
+            if (m_cache.size() >= kMaxCachedModules) {
+                m_cache.clear();
+                m_cache_bytes = 0;
+            }
             m_cache[key] = CacheEntry{false, {}};
         }
         const uint64_t rejected = m_rejected.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -361,10 +364,15 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     }
 
     code = std::move(output);
-    {
+    const size_t rewritten_bytes = code.size() * sizeof(uint32_t);
+    if (rewritten_bytes <= kMaxCacheBytes / 2) {
         std::lock_guard<std::mutex> lock(m_cache_mutex);
-        if (m_cache.size() >= kMaxCachedModules) m_cache.clear();
+        if (m_cache.size() >= kMaxCachedModules || m_cache_bytes + rewritten_bytes > kMaxCacheBytes) {
+            m_cache.clear();
+            m_cache_bytes = 0;
+        }
         m_cache[key] = CacheEntry{true, code};
+        m_cache_bytes += rewritten_bytes;
     }
     const uint64_t rewritten = m_rewritten.fetch_add(1, std::memory_order_relaxed) + 1;
     LOG_OPT_DEBUG("ShaderRewriter: downgraded SPIR-V %s -> %s (declarations stripped: %d)",
