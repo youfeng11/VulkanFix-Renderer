@@ -113,8 +113,8 @@ switch ($Action.ToLower()) {
     "test" {
         if (-not $TARGET_DEVICE) { Write-Error "No Android device connected"; exit 1 }
         Write-Host "Syncing latest arm64-v8a binaries to device..." -ForegroundColor Cyan
-        $soFile = Get-ChildItem -Path "app\build\intermediates\cxx" -Filter "libvulkan_fix.so" -Recurse | Where-Object { $_.FullName -match "arm64-v8a" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        $exeFile = Get-ChildItem -Path "app\build\intermediates\cxx" -Filter "vulkan_fix_test" -Recurse | Where-Object { $_.FullName -match "arm64-v8a" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $soFile = Get-ChildItem -Path "layer\build\intermediates\cxx" -Filter "libvulkan_fix.so" -Recurse | Where-Object { $_.FullName -match "arm64-v8a" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $exeFile = Get-ChildItem -Path "layer\build\intermediates\cxx" -Filter "vulkan_fix_test" -Recurse | Where-Object { $_.FullName -match "arm64-v8a" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
         if ($soFile -and $exeFile) {
             Write-Host "Pushing $($soFile.FullName) -> /data/local/tmp/libvulkan_fix.so" -ForegroundColor DarkGray

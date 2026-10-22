@@ -14,6 +14,6 @@
 .cxx
 local.properties
 /.idea
-/app/release
+/pluginApp/release
 /dsl/build
 *.log

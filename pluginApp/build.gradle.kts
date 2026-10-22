@@ -13,64 +13,16 @@ plugins {
     id("kotlinx-serialization")
 }
 
-fun getGitCommitCount(): Int {
-    return try {
-        val shallowFile = File(rootDir, ".git/shallow")
-        if (shallowFile.exists()) {
-            try {
-                ProcessBuilder("git", "fetch", "--unshallow")
-                    .directory(rootDir)
-                    .redirectOutput(ProcessBuilder.Redirect.PIPE)
-                    .redirectError(ProcessBuilder.Redirect.PIPE)
-                    .start()
-                    .waitFor()
-            } catch (_: Exception) {}
-        }
-        val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
-            .directory(rootDir)
-            .redirectOutput(ProcessBuilder.Redirect.PIPE)
-            .redirectError(ProcessBuilder.Redirect.PIPE)
-            .start()
-        val count = process.inputStream.bufferedReader().use { it.readText().trim() }
-        process.waitFor()
-        count.toIntOrNull() ?: 1
-    } catch (_: Exception) {
-        1
-    }
-}
-
 android {
     namespace = "com.launchers_plugin.renderer"
     compileSdk = 34
-    ndkVersion = "25.2.9519653"
 
     defaultConfig {
         applicationId = "com.youfeng.plugin.vulkanfix"
         minSdk = 26
         targetSdk = 34
-        versionCode = getGitCommitCount()
-        versionName = "0.4.1"
-
-        ndk {
-            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86"))
-        }
-
-        externalNativeBuild {
-            cmake {
-                cppFlags("-std=c++17")
-                arguments(
-                    "-DANDROID_STL=c++_static",
-                    "-DPROJECT_VERSION_NAME=${versionName}",
-                    "-DPROJECT_VERSION_CODE=${versionCode}"
-                )
-            }
-        }
-    }
-
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-        }
+        versionCode = rootProject.extra["pluginVersionCode"] as Int
+        versionName = rootProject.extra["pluginVersionName"] as String
     }
 
     buildFeatures {
@@ -230,4 +182,5 @@ kotlin {
 
 dependencies {
     implementation(libs.androidx.annotation)
+    implementation(project(":layer"))
 }
