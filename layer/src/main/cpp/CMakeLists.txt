@@ -49,20 +49,56 @@ if(NOT EXISTS "${SPIRV_TOOLS_DIR}/CMakeLists.txt" OR NOT EXISTS "${SPIRV_HEADERS
 endif()
 
 set(SPIRV-Headers_SOURCE_DIR "${SPIRV_HEADERS_DIR}" CACHE PATH "SPIRV-Headers for SPIRV-Tools" FORCE)
-set(SPIRV_SKIP_TESTS ON CACHE BOOL "Skip SPIRV-Tools tests" FORCE)
-set(SPIRV_SKIP_EXECUTABLES ON CACHE BOOL "Skip SPIRV-Tools executables" FORCE)
-set(SPIRV_TOOLS_BUILD_STATIC ON CACHE BOOL "Build SPIRV-Tools as a static library" FORCE)
-set(SPIRV_WERROR OFF CACHE BOOL "Do not treat SPIRV-Tools warnings as errors" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-add_subdirectory(${SPIRV_TOOLS_DIR} ${CMAKE_CURRENT_BINARY_DIR}/SPIRV-Tools EXCLUDE_FROM_ALL)
 
-if(TARGET SPIRV-Tools-static)
-    set(VKFIX_SPIRV_TOOLS_TARGET SPIRV-Tools-static)
-elseif(TARGET SPIRV-Tools)
-    set(VKFIX_SPIRV_TOOLS_TARGET SPIRV-Tools)
-else()
-    message(FATAL_ERROR "SPIRV-Tools target not found after add_subdirectory")
+# Build SPIRV-Tools in its own build tree and only the static library.
+#
+# Upstream always creates a SPIRV-Tools-shared target, and AGP builds every
+# library/executable target it finds in the CMake project - which doubles the
+# compile time and exhausted memory when the four ABIs were built in parallel.
+# ExternalProject keeps SPIRV-Tools' targets out of AGP's target list and lets
+# us ask for SPIRV-Tools-static only.
+set(SPIRV_TOOLS_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/spirv-tools-build")
+set(SPIRV_TOOLS_STATIC_LIB "${SPIRV_TOOLS_BUILD_DIR}/source/libSPIRV-Tools.a")
+
+include(ExternalProject)
+
+set(SPIRV_TOOLS_CMAKE_ARGS
+    -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+    -DANDROID_ABI=${ANDROID_ABI}
+    -DANDROID_STL=c++_static
+    -DSPIRV_SKIP_TESTS=ON
+    -DSPIRV_SKIP_EXECUTABLES=ON
+    -DSPIRV_TOOLS_BUILD_STATIC=ON
+    -DSPIRV_WERROR=OFF
+    "-DSPIRV-Headers_SOURCE_DIR=${SPIRV_HEADERS_DIR}"
+)
+if(CMAKE_TOOLCHAIN_FILE)
+    list(APPEND SPIRV_TOOLS_CMAKE_ARGS "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
 endif()
+if(ANDROID_PLATFORM)
+    list(APPEND SPIRV_TOOLS_CMAKE_ARGS "-DANDROID_PLATFORM=${ANDROID_PLATFORM}")
+endif()
+if(CMAKE_MAKE_PROGRAM)
+    list(APPEND SPIRV_TOOLS_CMAKE_ARGS "-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}")
+endif()
+
+ExternalProject_Add(spirv_tools_external
+    SOURCE_DIR "${SPIRV_TOOLS_DIR}"
+    BINARY_DIR "${SPIRV_TOOLS_BUILD_DIR}"
+    CMAKE_ARGS ${SPIRV_TOOLS_CMAKE_ARGS}
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target SPIRV-Tools-static --parallel 4
+    INSTALL_COMMAND ""
+    UPDATE_COMMAND ""
+    BUILD_BYPRODUCTS "${SPIRV_TOOLS_STATIC_LIB}"
+)
+
+add_library(SPIRV-Tools-static STATIC IMPORTED GLOBAL)
+set_target_properties(SPIRV-Tools-static PROPERTIES
+    IMPORTED_LOCATION "${SPIRV_TOOLS_STATIC_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${SPIRV_TOOLS_DIR}/include;${SPIRV_HEADERS_DIR}/include"
+)
+add_dependencies(SPIRV-Tools-static spirv_tools_external)
 
 # Automatically discover all core and module sources
 file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS core/*.cpp)
@@ -91,6 +127,7 @@ target_include_directories(vulkan_fix PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/vulkan_1_2
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/vulkan_1_3
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/vulkan_1_4
+    ${SPIRV_HEADERS_DIR}/include
 )
 
 find_library(LOG_LIB log)
@@ -98,7 +135,7 @@ find_library(ANDROID_LIB android)
 
 target_link_libraries(vulkan_fix PRIVATE
     Vulkan::Headers
-    ${VKFIX_SPIRV_TOOLS_TARGET}
+    SPIRV-Tools-static
     ${LOG_LIB}
     ${ANDROID_LIB}
     dl
