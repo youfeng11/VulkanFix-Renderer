@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <mutex>
+#include <strings.h>
 
 // NOTE: external linkage ("inline", not "static inline") on purpose. With
 // "static inline" every translation unit gets its own FILE* + s_initialized, so
@@ -145,6 +146,20 @@ static inline EmulationMode parse_emulation_mode(const char* env1, const char* e
     }
 
     return EmulationMode::Auto;
+}
+
+// When enabled (default), the layer advertises Vulkan 1.1/1.2 on older drivers
+// and clamps VkApplicationInfo::apiVersion at instance creation so the real
+// loader still accepts the instance. Set VULKAN_FIX_CLAIM_VULKAN_1_2=0 to report
+// the driver's real version instead.
+inline bool claim_vulkan_1_2() {
+    static const bool s_enabled = []() {
+        const char* env = getenv("VULKAN_FIX_CLAIM_VULKAN_1_2");
+        if (!env || env[0] == '\0') return true;
+        return !(strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0 ||
+                 strcasecmp(env, "off") == 0 || strcasecmp(env, "skip") == 0);
+    }();
+    return s_enabled;
 }
 
 #define VK_EXPORT __attribute__((visibility("default")))

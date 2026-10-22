@@ -102,11 +102,12 @@ void Vulkan11CoreModule::on_get_properties(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceProperties* pProperties
 ) {
-    // Do not promote apiVersion to 1.1 here: the application would take Vulkan 1.1
-    // code paths (core entry points, 16-bit storage, YCbCr, ...) on a 1.0 driver.
-    // Emulated extensions are still advertised individually.
+    if (!pProperties) return;
+    if (claim_vulkan_1_2() && pProperties->apiVersion < VK_API_VERSION_1_1) {
+        pProperties->apiVersion = VK_API_VERSION_1_1;
+        LOG_OPT_DEBUG("Vulkan11Core: promoted device apiVersion to 1.1");
+    }
     (void)physicalDevice;
-    (void)pProperties;
 }
 
 struct Properties11UnlinkData {
@@ -140,7 +141,9 @@ void Vulkan11CoreModule::on_post_get_properties2(
     void* pUserData
 ) {
     if (!pProperties) return;
-    // apiVersion is intentionally left as reported by the driver (see on_get_properties).
+    if (claim_vulkan_1_2() && pProperties->properties.apiVersion < VK_API_VERSION_1_1) {
+        pProperties->properties.apiVersion = VK_API_VERSION_1_1;
+    }
 
     if (pUserData) {
         auto* unlinks = reinterpret_cast<Properties11UnlinkData*>(pUserData);

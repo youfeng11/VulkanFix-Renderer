@@ -7,6 +7,28 @@
 #include <string.h>
 #include <string>
 #include <vector>
+#include <atomic>
+
+// Highest instance version the real loader accepts. Used to clamp the version
+// requested by the application when the layer advertises Vulkan 1.2 on an older
+// loader.
+static uint32_t query_real_instance_version() {
+    static std::atomic<uint32_t> s_version{0};
+    const uint32_t cached = s_version.load(std::memory_order_relaxed);
+    if (cached != 0) return cached;
+
+    PFN_vkEnumerateInstanceVersion fn = (PFN_vkEnumerateInstanceVersion)
+        get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
+    uint32_t version = VK_API_VERSION_1_0;
+    if (fn != nullptr) {
+        uint32_t reported = 0;
+        if (fn(&reported) == VK_SUCCESS && reported != 0) {
+            version = reported;
+        }
+    }
+    s_version.store(version, std::memory_order_relaxed);
+    return version;
+}
 
 __attribute__((constructor))
 static void init_vulkan_layer() {
@@ -98,6 +120,21 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateInstance(
         }
         modCI.enabledExtensionCount = (uint32_t)enabledExts.size();
         modCI.ppEnabledExtensionNames = enabledExts.empty() ? nullptr : enabledExts.data();
+    }
+
+    // If we advertised 1.2 to the application but the loader is older, create
+    // the instance with the loader's real version; all 1.2 entry points are
+    // served by the layer and its emulation modules.
+    VkApplicationInfo appInfoCopy{};
+    if (modCI.pApplicationInfo != nullptr) {
+        const uint32_t realVersion = query_real_instance_version();
+        if (modCI.pApplicationInfo->apiVersion > realVersion) {
+            appInfoCopy = *modCI.pApplicationInfo;
+            appInfoCopy.apiVersion = realVersion;
+            modCI.pApplicationInfo = &appInfoCopy;
+            LOGI("vkCreateInstance: clamped apiVersion 0x%x -> real loader 0x%x",
+                 pCreateInfo->pApplicationInfo->apiVersion, realVersion);
+        }
     }
 
     VkResult res = real_fn(&modCI, pAllocator, pInstance);
@@ -963,13 +1000,15 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumerateInstanceVersion(
     PFN_vkEnumerateInstanceVersion real_fn =
         (PFN_vkEnumerateInstanceVersion) get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
     if (real_fn) {
-        // Report the real loader/driver version. Never inflate it: applications
-        // (and their Vulkan backends) pick code paths from this value, and a
-        // driver that is really 1.0/1.1 cannot execute 1.2/1.3 entry points.
-        return real_fn(pApiVersion);
+        VkResult res = real_fn(pApiVersion);
+        // The layer claims Vulkan 1.2 support (see claim_vulkan_1_2). The real
+        // version is still used internally, e.g. as the SPIR-V downgrade target.
+        if (res == VK_SUCCESS && claim_vulkan_1_2() && *pApiVersion < VK_API_VERSION_1_2) {
+            *pApiVersion = VK_API_VERSION_1_2;
+        }
+        return res;
     }
-    // Pre-1.1 loaders do not expose vkEnumerateInstanceVersion at all.
-    *pApiVersion = VK_API_VERSION_1_0;
+    *pApiVersion = claim_vulkan_1_2() ? VK_API_VERSION_1_2 : VK_API_VERSION_1_0;
     return VK_SUCCESS;
 }
 
