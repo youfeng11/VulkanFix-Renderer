@@ -153,12 +153,18 @@ TBDRBarrierOptimizer::TBDRBarrierOptimizer() {
     const char* env_opt = getenv("VULKAN_FIX_OPTIMIZE_BARRIER");
     if (!env_opt || env_opt[0] == '\0') env_opt = getenv("OPTIMIZE_BARRIER");
     if (!env_opt || env_opt[0] == '\0') env_opt = getenv("optimize_barrier");
-    bool opt_enabled = (env_opt && (strcmp(env_opt, "1") == 0 || strcasecmp(env_opt, "true") == 0));
+    // Enabled by default. Set VULKAN_FIX_OPTIMIZE_BARRIER=0 to opt out.
+    bool opt_enabled = true;
+    if (env_opt && env_opt[0] != '\0') {
+        opt_enabled = (strcmp(env_opt, "1") == 0 ||
+                       strcasecmp(env_opt, "true") == 0 ||
+                       strcasecmp(env_opt, "on") == 0);
+    }
     m_enabled.store(opt_enabled, std::memory_order_relaxed);
     if (opt_enabled) {
-        LOGI("TBDRBarrierOptimizer: ENABLED (TBDR mobile barrier stage narrowing & deduplication active)");
+        LOGI("TBDRBarrierOptimizer: ENABLED by default (stage narrowing, deduplication, read-only strip); set VULKAN_FIX_OPTIMIZE_BARRIER=0 to disable");
     } else {
-        LOGI("TBDRBarrierOptimizer: disabled by default (pass-through for 100%% exact native driver barrier stability)");
+        LOGI("TBDRBarrierOptimizer: disabled by VULKAN_FIX_OPTIMIZE_BARRIER");
     }
 
     const char* env_narrow = getenv("VULKAN_FIX_BARRIER_NARROW");

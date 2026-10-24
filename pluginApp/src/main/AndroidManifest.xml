@@ -42,8 +42,8 @@
             android:name="title_emulate_vertex_pipeline_stores_and_atomics_feat"
             android:resource="@string/title_emulate_vertex_pipeline_stores_and_atomics_feat" />
         <meta-data
-            android:name="title_optimize_barrier"
-            android:resource="@string/title_optimize_barrier" />
+            android:name="title_disable_optimize_barrier"
+            android:resource="@string/title_disable_optimize_barrier" />
         <meta-data
             android:name="title_disable_pipeline_cache"
             android:resource="@string/title_disable_pipeline_cache" />

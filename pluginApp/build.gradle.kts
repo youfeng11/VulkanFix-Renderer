@@ -129,9 +129,9 @@ android {
                         )
                         toggleable(
                             key = "VULKAN_FIX_OPTIMIZE_BARRIER",
-                            value = "1",
+                            value = "0",
                             toggle = false,
-                            title = RendererConfig.MetaString("title_optimize_barrier")
+                            title = RendererConfig.MetaString("title_disable_optimize_barrier")
                         )
                         toggleable(
                             key = "VULKAN_FIX_DISABLE_PIPELINE_CACHE",
