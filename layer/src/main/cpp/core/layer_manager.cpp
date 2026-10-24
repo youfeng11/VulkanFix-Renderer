@@ -1465,7 +1465,7 @@ void LayerManager::dispatch_cmd_push_descriptor_set(
     uint32_t descriptorWriteCount,
     const VkWriteDescriptorSet* pDescriptorWrites
 ) {
-    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    // Descriptor writes are command state, not barrier-relevant memory access.
 
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
         if (m_push_desc_mod->on_cmd_push_descriptor_set(
@@ -1488,7 +1488,7 @@ void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
     uint32_t set,
     const void* pData
 ) {
-    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    // Descriptor writes are command state, not barrier-relevant memory access.
 
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
         if (m_push_desc_mod->on_cmd_push_descriptor_set_with_template(
@@ -1694,7 +1694,8 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     VkPipelineBindPoint pipelineBindPoint,
     VkPipeline pipeline
 ) {
-    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    // Binding state does not access memory. Do not mark it as a barrier action:
+    // identical barriers separated only by binds can still be deduplicated.
 
     if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
                          m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
@@ -1722,7 +1723,7 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers(
     const VkBuffer* pBuffers,
     const VkDeviceSize* pOffsets
 ) {
-    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    // Vertex buffer binding is not a memory access; keep the TBDR dedup window open.
 
     if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
                          m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
@@ -1752,7 +1753,7 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
     const VkDeviceSize* pSizes,
     const VkDeviceSize* pStrides
 ) {
-    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    // Vertex buffer binding is not a memory access; keep the TBDR dedup window open.
 
     if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
                          m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
@@ -3595,6 +3596,9 @@ VkResult LayerManager::dispatch_queue_present(
 ) {
     VkResult res = VK_SUCCESS;
     RenderDocManager::get().on_pre_present(queue, pPresentInfo);
+    if (TBDRBarrierOptimizer::get().is_enabled()) {
+        TBDRBarrierOptimizer::get().maybe_log_stats();
+    }
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
         VkResult stats_result = VK_SUCCESS;
         m_push_desc_mod->on_queue_present(queue, pPresentInfo, stats_result);

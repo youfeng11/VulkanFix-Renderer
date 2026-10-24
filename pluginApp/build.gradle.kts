@@ -29,7 +29,7 @@ android {
         resValues = true
     }
 
-    packagingOptions {
+    packaging {
         jniLibs {
             useLegacyPackaging = true
         }

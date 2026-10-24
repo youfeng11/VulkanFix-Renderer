@@ -32,6 +32,118 @@ static inline bool is_read_only_access1(VkAccessFlags access) {
     return (access & write_mask) == 0;
 }
 
+// ALL_COMMANDS narrowing target. HOST, conditional rendering and transform
+// feedback must stay in the narrowed set: ALL_COMMANDS includes them, and
+// dropping them would lose the host-write -> GPU-read and transform-feedback
+// dependencies (which caused stale/black chunk data on some drivers).
+static constexpr VkPipelineStageFlags2 kBroadStages2 =
+    VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+    VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
+    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_HOST_BIT |
+    VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT |
+    VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT;
+
+static constexpr VkPipelineStageFlags kBroadStages1 =
+    VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT |
+    VK_PIPELINE_STAGE_TRANSFER_BIT |
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+    VK_PIPELINE_STAGE_HOST_BIT |
+    VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT |
+    VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT;
+
+// Exact stage narrowing: derive the producer/consumer stages from the access
+// masks instead of replacing ALL_COMMANDS with another broad mask. On TBDR this
+// lets the driver keep tiles on-chip (e.g. COLOR_ATTACHMENT_OUTPUT <->
+// FRAGMENT_SHADER) instead of treating the barrier as a full pipeline drain.
+static constexpr VkPipelineStageFlags2 kShaderStages2 =
+    VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+
+static constexpr VkPipelineStageFlags kShaderStages1 =
+    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+    VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+    VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+    VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+static bool narrow_stages2(VkPipelineStageFlags2& mask, VkAccessFlags2 access) {
+    if (!(mask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) return false;
+    VkPipelineStageFlags2 derived = 0;
+    if (access == 0 ||
+        (access & (VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT))) {
+        derived = kBroadStages2;
+    } else {
+        if (access & (VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT))
+            derived |= VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        if (access & (VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT))
+            derived |= VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        if (access & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT)
+            derived |= VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        if (access & (VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT |
+                      VK_ACCESS_2_UNIFORM_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                      VK_ACCESS_2_SHADER_STORAGE_READ_BIT))
+            derived |= kShaderStages2;
+        if (access & (VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT))
+            derived |= VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        if (access & (VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_HOST_WRITE_BIT))
+            derived |= VK_PIPELINE_STAGE_2_HOST_BIT;
+        if (access & VK_ACCESS_2_INDEX_READ_BIT)
+            derived |= VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT;
+        if (access & VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT)
+            derived |= VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT;
+        if (access & VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT)
+            derived |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+        if (access & VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT)
+            derived |= VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT;
+        if (access & VK_ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT)
+            derived |= VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT;
+        if (derived == 0) derived = kBroadStages2;
+    }
+    mask = (mask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) | derived;
+    return true;
+}
+
+static bool narrow_stages1(VkPipelineStageFlags& mask, VkAccessFlags access) {
+    if (!(mask & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)) return false;
+    VkPipelineStageFlags derived = 0;
+    if (access == 0 ||
+        (access & (VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT))) {
+        derived = kBroadStages1;
+    } else {
+        if (access & (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT))
+            derived |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        if (access & (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT))
+            derived |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        if (access & VK_ACCESS_INPUT_ATTACHMENT_READ_BIT)
+            derived |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        if (access & (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_UNIFORM_READ_BIT))
+            derived |= kShaderStages1;
+        if (access & (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT))
+            derived |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+        if (access & (VK_ACCESS_HOST_READ_BIT | VK_ACCESS_HOST_WRITE_BIT))
+            derived |= VK_PIPELINE_STAGE_HOST_BIT;
+        if (access & VK_ACCESS_INDEX_READ_BIT)
+            derived |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        if (access & VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT)
+            derived |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+        if (access & VK_ACCESS_INDIRECT_COMMAND_READ_BIT)
+            derived |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+        if (access & VK_ACCESS_TRANSFORM_FEEDBACK_WRITE_BIT_EXT)
+            derived |= VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT;
+        if (access & VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT)
+            derived |= VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT;
+        if (derived == 0) derived = kBroadStages1;
+    }
+    mask = (mask & ~VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) | derived;
+    return true;
+}
+
 TBDRBarrierOptimizer& TBDRBarrierOptimizer::get() {
     static TBDRBarrierOptimizer s_instance;
     return s_instance;
@@ -71,6 +183,19 @@ TBDRBarrierOptimizer::TBDRBarrierOptimizer() {
     }
 }
 
+void TBDRBarrierOptimizer::maybe_log_stats() {
+    const uint64_t total = m_stat_total.load(std::memory_order_relaxed);
+    static std::atomic<uint64_t> s_last_reported{0};
+    uint64_t last = s_last_reported.load(std::memory_order_relaxed);
+    if (total < last + 1024) return;
+    if (!s_last_reported.compare_exchange_strong(last, total, std::memory_order_relaxed)) return;
+    LOGI("TBDR stats: total=%llu eliminated=%llu narrowed=%llu strippedImage=%llu strippedBuffer=%llu",
+         (unsigned long long)total,
+         (unsigned long long)m_stat_eliminated.load(std::memory_order_relaxed),
+         (unsigned long long)m_stat_narrowed.load(std::memory_order_relaxed),
+         (unsigned long long)m_stat_stripped_img.load(std::memory_order_relaxed),
+         (unsigned long long)m_stat_stripped_buf.load(std::memory_order_relaxed));
+}
 TBDRBarrierOptimizer::CmdTracker& TBDRBarrierOptimizer::get_or_create_tracker(VkCommandBuffer cmd) {
     auto it = m_trackers.find((uint64_t)(uintptr_t)cmd);
     if (it != m_trackers.end()) {
@@ -177,8 +302,7 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             // Same layout, same queue family, identical stages, and read-only access on both sides.
             if (strip_noops) {
                 if (b.oldLayout == b.newLayout &&
-                    b.srcQueueFamilyIndex == b.dstQueueFamilyIndex &&
-                    b.srcStageMask == b.dstStageMask) {
+                    b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
                     if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
                         is_read_only_access2(b.srcAccessMask) && is_read_only_access2(b.dstAccessMask)) {
                         m_stat_stripped_img.fetch_add(1, std::memory_order_relaxed);
@@ -191,14 +315,10 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             // Replace over-broad ALL_COMMANDS_BIT with safe GPU pipeline stages (graphics, transfer, compute).
             // NEVER narrow presentation barriers to preserve SurfaceFlinger display sync!
             if (narrow_stages && !has_present_barrier) {
-                if (b.srcStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
-                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                if (narrow_stages2(b.srcStageMask, b.srcAccessMask)) {
                     m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
-                if (b.dstStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
-                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                if (narrow_stages2(b.dstStageMask, b.dstAccessMask)) {
                     m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
             }
@@ -230,7 +350,7 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             VkBufferMemoryBarrier2 b = pSrc->pBufferMemoryBarriers[i];
 
             if (strip_noops) {
-                if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex && b.srcStageMask == b.dstStageMask) {
+                if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
                     if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
                         is_read_only_access2(b.srcAccessMask) && is_read_only_access2(b.dstAccessMask)) {
                         m_stat_stripped_buf.fetch_add(1, std::memory_order_relaxed);
@@ -240,14 +360,10 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             }
 
             if (narrow_stages) {
-                if (b.srcStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
-                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                if (narrow_stages2(b.srcStageMask, b.srcAccessMask)) {
                     m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
-                if (b.dstStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
-                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                if (narrow_stages2(b.dstStageMask, b.dstAccessMask)) {
                     m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
             }
@@ -279,14 +395,10 @@ bool TBDRBarrierOptimizer::optimize_dependency_info(
             }
 
             if (narrow_stages) {
-                if (b.srcStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    b.srcStageMask = (b.srcStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
-                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                if (narrow_stages2(b.srcStageMask, b.srcAccessMask)) {
                     m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
-                if (b.dstStageMask & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) {
-                    b.dstStageMask = (b.dstStageMask & ~VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) |
-                                     (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+                if (narrow_stages2(b.dstStageMask, b.dstAccessMask)) {
                     m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
                 }
             }
@@ -394,8 +506,7 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
 
             if (strip_noops) {
                 if (b.oldLayout == b.newLayout &&
-                    b.srcQueueFamilyIndex == b.dstQueueFamilyIndex &&
-                    inOutSrcStageMask == inOutDstStageMask) {
+                    b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
                     if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
                         is_read_only_access1(b.srcAccessMask) && is_read_only_access1(b.dstAccessMask)) {
                         m_stat_stripped_img.fetch_add(1, std::memory_order_relaxed);
@@ -428,7 +539,7 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
         for (uint32_t i = 0; i < inOutBufCount; ++i) {
             const auto& b = pInOutBufBarriers[i];
             if (strip_noops) {
-                if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex && inOutSrcStageMask == inOutDstStageMask) {
+                if (b.srcQueueFamilyIndex == b.dstQueueFamilyIndex) {
                     if (b.srcAccessMask != 0 && b.dstAccessMask != 0 &&
                         is_read_only_access1(b.srcAccessMask) && is_read_only_access1(b.dstAccessMask)) {
                         m_stat_stripped_buf.fetch_add(1, std::memory_order_relaxed);
@@ -497,15 +608,24 @@ bool TBDRBarrierOptimizer::optimize_pipeline_barrier1(
     // Safely narrow ALL_COMMANDS_BIT to ALL_GRAPHICS_BIT + TRANSFER_BIT + COMPUTE_SHADER_BIT, avoiding host/CPU bubbles.
     // NEVER narrow presentation barriers to preserve display sync!
     if (narrow_stages && !has_present_barrier) {
-        if (inOutSrcStageMask & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) {
-            inOutSrcStageMask = (inOutSrcStageMask & ~VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) |
-                                (VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        VkAccessFlags srcAccess = 0;
+        VkAccessFlags dstAccess = 0;
+        for (const auto& b : storage.imageBarriers) {
+            srcAccess |= b.srcAccessMask;
+            dstAccess |= b.dstAccessMask;
+        }
+        for (const auto& b : storage.bufferBarriers) {
+            srcAccess |= b.srcAccessMask;
+            dstAccess |= b.dstAccessMask;
+        }
+        for (const auto& b : storage.memoryBarriers) {
+            srcAccess |= b.srcAccessMask;
+            dstAccess |= b.dstAccessMask;
+        }
+        if (narrow_stages1(inOutSrcStageMask, srcAccess)) {
             m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
         }
-
-        if (inOutDstStageMask & VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) {
-            inOutDstStageMask = (inOutDstStageMask & ~VK_PIPELINE_STAGE_ALL_COMMANDS_BIT) |
-                                (VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        if (narrow_stages1(inOutDstStageMask, dstAccess)) {
             m_stat_narrowed.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -529,3 +649,9 @@ TBDRBarrierOptimizer::Stats TBDRBarrierOptimizer::get_stats() const {
     s.stripped_buffer_barriers = m_stat_stripped_buf.load(std::memory_order_relaxed);
     return s;
 }
+
+
+
+
+
+

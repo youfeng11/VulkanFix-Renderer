@@ -6,6 +6,7 @@
 #include "imageless_framebuffer_manager.h"
 #include "layout_compat.h"
 #include "vk_pnext.h"
+#include "core/tbdr_barrier_optimizer.h"
 #include <string.h>
 #include <string>
 #include <vector>
@@ -650,6 +651,10 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCmdCopyImage);
             MATCH(vkCmdCopyBufferToImage);
             MATCH(vkCmdCopyImageToBuffer);
+            MATCH(vkCmdFillBuffer);
+            MATCH(vkCmdUpdateBuffer);
+            MATCH(vkCmdResolveImage);
+            MATCH(vkCmdCopyQueryPoolResults);
             MATCH(vkCmdBlitImage);
             MATCH(vkCmdClearAttachments);
             MATCH(vkCmdClearColorImage);
@@ -1393,6 +1398,7 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdCopyBufferToImage(
     uint32_t regionCount,
     const VkBufferImageCopy* pRegions
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     if (dt.CmdCopyBufferToImage) {
@@ -1411,6 +1417,7 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdCopyImageToBuffer(
     uint32_t regionCount,
     const VkBufferImageCopy* pRegions
 ) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     if (dt.CmdCopyImageToBuffer) {
@@ -1418,6 +1425,81 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdCopyImageToBuffer(
             ? LayoutCompat::sanitize(srcImageLayout) : srcImageLayout;
         dt.CmdCopyImageToBuffer(commandBuffer, srcImage,
                                 layout, dstBuffer, regionCount, pRegions);
+    }
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdFillBuffer(
+    VkCommandBuffer commandBuffer,
+    VkBuffer dstBuffer,
+    VkDeviceSize dstOffset,
+    VkDeviceSize size,
+    uint32_t data
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
+    PFN_vkCmdFillBuffer real_fn = (PFN_vkCmdFillBuffer)
+        get_real_proc(get_last_instance(), device, "vkCmdFillBuffer");
+    if (real_fn) {
+        real_fn(commandBuffer, dstBuffer, dstOffset, size, data);
+    }
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdUpdateBuffer(
+    VkCommandBuffer commandBuffer,
+    VkBuffer dstBuffer,
+    VkDeviceSize dstOffset,
+    VkDeviceSize dataSize,
+    const void* pData
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
+    PFN_vkCmdUpdateBuffer real_fn = (PFN_vkCmdUpdateBuffer)
+        get_real_proc(get_last_instance(), device, "vkCmdUpdateBuffer");
+    if (real_fn) {
+        real_fn(commandBuffer, dstBuffer, dstOffset, dataSize, pData);
+    }
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdResolveImage(
+    VkCommandBuffer commandBuffer,
+    VkImage srcImage,
+    VkImageLayout srcImageLayout,
+    VkImage dstImage,
+    VkImageLayout dstImageLayout,
+    uint32_t regionCount,
+    const VkImageResolve* pRegions
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
+    PFN_vkCmdResolveImage real_fn = (PFN_vkCmdResolveImage)
+        get_real_proc(get_last_instance(), device, "vkCmdResolveImage");
+    if (real_fn) {
+        const bool emulated = LayoutCompat::get().is_emulated(device);
+        real_fn(commandBuffer, srcImage,
+                emulated ? LayoutCompat::sanitize(srcImageLayout) : srcImageLayout,
+                dstImage,
+                emulated ? LayoutCompat::sanitize(dstImageLayout) : dstImageLayout,
+                regionCount, pRegions);
+    }
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdCopyQueryPoolResults(
+    VkCommandBuffer commandBuffer,
+    VkQueryPool queryPool,
+    uint32_t firstQuery,
+    uint32_t queryCount,
+    VkBuffer dstBuffer,
+    VkDeviceSize dstOffset,
+    VkDeviceSize stride,
+    VkQueryResultFlags flags
+) {
+    TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+    VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
+    PFN_vkCmdCopyQueryPoolResults real_fn = (PFN_vkCmdCopyQueryPoolResults)
+        get_real_proc(get_last_instance(), device, "vkCmdCopyQueryPoolResults");
+    if (real_fn) {
+        real_fn(commandBuffer, queryPool, firstQuery, queryCount,
+                dstBuffer, dstOffset, stride, flags);
     }
 }
 

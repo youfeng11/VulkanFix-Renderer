@@ -124,6 +124,9 @@ public:
     };
     Stats get_stats() const;
 
+    // Logs cumulative optimization counts every 1024 processed barriers.
+    void maybe_log_stats();
+
 private:
     TBDRBarrierOptimizer();
     ~TBDRBarrierOptimizer() = default;
@@ -148,3 +151,4 @@ private:
 };
 
 #endif // TBDR_BARRIER_OPTIMIZER_H
+
