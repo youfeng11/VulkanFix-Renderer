@@ -17,3 +17,6 @@ local.properties
 /pluginApp/release
 /dsl/build
 *.log
+
+# Cached SPIRV-Tools build tree (layer native build)
+/.cxx-spirv-tools/

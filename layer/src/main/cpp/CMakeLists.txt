@@ -58,7 +58,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # compile time and exhausted memory when the four ABIs were built in parallel.
 # ExternalProject keeps SPIRV-Tools' targets out of AGP's target list and lets
 # us ask for SPIRV-Tools-static only.
-set(SPIRV_TOOLS_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/spirv-tools-build")
+# Keep the SPIRV-Tools build tree outside the AGP-hashed .cxx directory. A
+# CMake/AGP configuration change creates a new .cxx hash directory; without this
+# cache the validator would be recompiled from scratch (several minutes per ABI).
+# Bump the v1 suffix when SPIRV_TOOLS_CMAKE_ARGS change.
+set(SPIRV_TOOLS_BUILD_DIR
+    "${VKFIX_ROOT}.cxx-spirv-tools/v1/${ANDROID_ABI}-${CMAKE_BUILD_TYPE}")
 set(SPIRV_TOOLS_STATIC_LIB "${SPIRV_TOOLS_BUILD_DIR}/source/libSPIRV-Tools.a")
 
 include(ExternalProject)
@@ -188,3 +193,19 @@ target_link_libraries(vulkan_fix_test PRIVATE
     vulkan
 )
 
+# Device-run validation of the SPIR-V compute shader used by the
+# drawIndirectCount expansion. Not packaged into the APK.
+add_executable(indirect_expander_test
+    tests/indirect_expander_test.cpp
+)
+target_include_directories(indirect_expander_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../Vulkan-Headers/include
+)
+target_link_libraries(indirect_expander_test PRIVATE
+    SPIRV-Tools-static
+    ${LOG_LIB}
+    vulkan
+)
+
+# Cache reuse check: the SPIRV-Tools tree above is intentionally stable across AGP .cxx hashes.

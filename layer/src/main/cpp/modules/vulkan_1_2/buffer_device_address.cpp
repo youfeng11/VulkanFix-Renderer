@@ -33,7 +33,21 @@ bool BufferDeviceAddressModule::on_get_buffer_device_address(
     const VkBufferDeviceAddressInfo* pInfo,
     VkDeviceAddress& outAddress
 ) {
-    if (is_device_native(device)) return false;
+    if (is_device_native(device)) {
+        // The driver exposes VK_KHR_buffer_device_address. Never substitute a
+        // CPU pointer for a GPU address: call the real entry point.
+        auto real_fn = (PFN_vkGetBufferDeviceAddressKHR)
+            get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddressKHR");
+        if (!real_fn) {
+            real_fn = (PFN_vkGetBufferDeviceAddressKHR)
+                get_real_proc(get_last_instance(), device, "vkGetBufferDeviceAddress");
+        }
+        if (real_fn) {
+            outAddress = real_fn(device, pInfo);
+            return true;
+        }
+        return false;
+    }
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     if (dt.GetBufferDeviceAddress) {

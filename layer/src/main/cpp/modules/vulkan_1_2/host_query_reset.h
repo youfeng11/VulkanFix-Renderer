@@ -38,6 +38,7 @@ private:
     struct DeviceResetContext {
         VkCommandPool pool{VK_NULL_HANDLE};
         VkCommandBuffer cmd{VK_NULL_HANDLE};
+        VkFence fence{VK_NULL_HANDLE};
         VkQueue queue{VK_NULL_HANDLE};
         uint32_t queueFamilyIndex{0};
     };

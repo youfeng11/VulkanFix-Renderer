@@ -105,6 +105,19 @@ bool HostQueryResetModule::on_reset_query_pool(
                 if (real_ac(device, &allocInfo, &ctx.cmd) != VK_SUCCESS) {
                     ctx.cmd = VK_NULL_HANDLE;
                 }
+                if (ctx.cmd != VK_NULL_HANDLE) {
+                    PFN_vkCreateFence real_cf = dt.CreateFence;
+                    if (!real_cf) {
+                        real_cf = (PFN_vkCreateFence) get_real_proc(get_last_instance(), device, "vkCreateFence");
+                    }
+                    if (real_cf) {
+                        VkFenceCreateInfo fenceCI{};
+                        fenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+                        if (real_cf(device, &fenceCI, nullptr, &ctx.fence) != VK_SUCCESS) {
+                            ctx.fence = VK_NULL_HANDLE;
+                        }
+                    }
+                }
             }
         }
     }
@@ -128,6 +141,14 @@ bool HostQueryResetModule::on_reset_query_pool(
         if (!real_qwi) {
             real_qwi = (PFN_vkQueueWaitIdle) get_real_proc(get_last_instance(), device, "vkQueueWaitIdle");
         }
+        PFN_vkResetFences real_rf = dt.ResetFences;
+        if (!real_rf) {
+            real_rf = (PFN_vkResetFences) get_real_proc(get_last_instance(), device, "vkResetFences");
+        }
+        PFN_vkWaitForFences real_wf = dt.WaitForFences;
+        if (!real_wf) {
+            real_wf = (PFN_vkWaitForFences) get_real_proc(get_last_instance(), device, "vkWaitForFences");
+        }
 
         if (real_bc && real_cmd_reset && real_ec && real_qs) {
             if (real_rcb) {
@@ -146,8 +167,19 @@ bool HostQueryResetModule::on_reset_query_pool(
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &ctx.cmd;
 
-            real_qs(ctx.queue, 1, &submitInfo, VK_NULL_HANDLE);
-            if (real_qwi) real_qwi(ctx.queue);
+            if (ctx.fence != VK_NULL_HANDLE && real_rf && real_wf) {
+                // Wait only for the reset submission instead of the whole queue
+                // (vkQueueWaitIdle also waits for in-flight frames).
+                real_rf(device, 1, &ctx.fence);
+                if (real_qs(ctx.queue, 1, &submitInfo, ctx.fence) == VK_SUCCESS) {
+                    real_wf(device, 1, &ctx.fence, VK_TRUE, UINT64_MAX);
+                } else if (real_qwi) {
+                    real_qwi(ctx.queue);
+                }
+            } else {
+                real_qs(ctx.queue, 1, &submitInfo, VK_NULL_HANDLE);
+                if (real_qwi) real_qwi(ctx.queue);
+            }
         }
     }
     return true;
@@ -158,8 +190,17 @@ void HostQueryResetModule::on_destroy_device(VkDevice device) {
     std::lock_guard<std::mutex> lock(m_reset_mutex);
     auto it = m_device_contexts.find((uint64_t)(uintptr_t)device);
     if (it != m_device_contexts.end()) {
+        const auto& dt = LayerManager::get().get_dispatch_table(device);
+        if (it->second.fence != VK_NULL_HANDLE) {
+            PFN_vkDestroyFence real_df = dt.DestroyFence;
+            if (!real_df) {
+                real_df = (PFN_vkDestroyFence) get_real_proc(get_last_instance(), device, "vkDestroyFence");
+            }
+            if (real_df) {
+                real_df(device, it->second.fence, nullptr);
+            }
+        }
         if (it->second.pool != VK_NULL_HANDLE) {
-            const auto& dt = LayerManager::get().get_dispatch_table(device);
             PFN_vkDestroyCommandPool real_dp = dt.DestroyCommandPool;
             if (!real_dp) {
                 real_dp = (PFN_vkDestroyCommandPool) get_real_proc(get_last_instance(), device, "vkDestroyCommandPool");

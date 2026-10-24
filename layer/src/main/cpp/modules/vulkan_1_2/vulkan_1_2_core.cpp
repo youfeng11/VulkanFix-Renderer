@@ -1,8 +1,9 @@
-#include "vulkan_1_2_core.h"
+﻿#include "vulkan_1_2_core.h"
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
 #include "imageless_framebuffer_manager.h"
+#include "layout_compat.h"
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -328,6 +329,77 @@ void Vulkan12CoreModule::on_pre_get_features2(
     pUserData = unlinks;
 }
 
+namespace {
+
+bool driver_has_extension(VkPhysicalDevice physicalDevice, const char* name) {
+    if (physicalDevice == VK_NULL_HANDLE || name == nullptr) return false;
+    auto enumerate = (PFN_vkEnumerateDeviceExtensionProperties)
+        get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+    if (!enumerate) return false;
+    uint32_t count = 0;
+    if (enumerate(physicalDevice, nullptr, &count, nullptr) != VK_SUCCESS) return false;
+    std::vector<VkExtensionProperties> extensions(count);
+    if (count > 0 && enumerate(physicalDevice, nullptr, &count, extensions.data()) != VK_SUCCESS) {
+        return false;
+    }
+    return vku::has_extension(extensions, name);
+}
+
+void add_extension(std::vector<const char*>& extensions, const char* name) {
+    for (const char* existing : extensions) {
+        if (existing != nullptr && strcmp(existing, name) == 0) return;
+    }
+    extensions.push_back(name);
+}
+
+bool pnext_has_type(const void* pNext, VkStructureType type) {
+    const auto* current = reinterpret_cast<const VkBaseInStructure*>(pNext);
+    while (current != nullptr) {
+        if (current->sType == type) return true;
+        current = current->pNext;
+    }
+    return false;
+}
+
+thread_local VkPhysicalDeviceBufferDeviceAddressFeatures* g_bda_features = nullptr;
+thread_local VkPhysicalDeviceDescriptorIndexingFeatures* g_di_features = nullptr;
+thread_local VkPhysicalDeviceScalarBlockLayoutFeatures* g_scalar_features = nullptr;
+thread_local VkPhysicalDeviceUniformBufferStandardLayoutFeatures* g_ubo_features = nullptr;
+thread_local VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures* g_subgroup_features = nullptr;
+thread_local VkPhysicalDevice8BitStorageFeatures* g_8bit_features = nullptr;
+thread_local VkPhysicalDeviceShaderFloat16Int8Features* g_float16_int8_features = nullptr;
+thread_local VkPhysicalDeviceVulkanMemoryModelFeatures* g_memory_model_features = nullptr;
+thread_local VkPhysicalDeviceImagelessFramebufferFeatures* g_imageless_features = nullptr;
+thread_local VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures* g_separate_ds_features = nullptr;
+
+void copy_descriptor_indexing(
+    const VkPhysicalDeviceVulkan12Features* source,
+    VkPhysicalDeviceDescriptorIndexingFeatures* target
+) {
+    target->shaderInputAttachmentArrayDynamicIndexing = source->shaderInputAttachmentArrayDynamicIndexing;
+    target->shaderUniformTexelBufferArrayDynamicIndexing = source->shaderUniformTexelBufferArrayDynamicIndexing;
+    target->shaderStorageTexelBufferArrayDynamicIndexing = source->shaderStorageTexelBufferArrayDynamicIndexing;
+    target->shaderUniformBufferArrayNonUniformIndexing = source->shaderUniformBufferArrayNonUniformIndexing;
+    target->shaderSampledImageArrayNonUniformIndexing = source->shaderSampledImageArrayNonUniformIndexing;
+    target->shaderStorageBufferArrayNonUniformIndexing = source->shaderStorageBufferArrayNonUniformIndexing;
+    target->shaderStorageImageArrayNonUniformIndexing = source->shaderStorageImageArrayNonUniformIndexing;
+    target->shaderInputAttachmentArrayNonUniformIndexing = source->shaderInputAttachmentArrayNonUniformIndexing;
+    target->shaderUniformTexelBufferArrayNonUniformIndexing = source->shaderUniformTexelBufferArrayNonUniformIndexing;
+    target->shaderStorageTexelBufferArrayNonUniformIndexing = source->shaderStorageTexelBufferArrayNonUniformIndexing;
+    target->descriptorBindingUniformBufferUpdateAfterBind = source->descriptorBindingUniformBufferUpdateAfterBind;
+    target->descriptorBindingSampledImageUpdateAfterBind = source->descriptorBindingSampledImageUpdateAfterBind;
+    target->descriptorBindingStorageImageUpdateAfterBind = source->descriptorBindingStorageImageUpdateAfterBind;
+    target->descriptorBindingStorageBufferUpdateAfterBind = source->descriptorBindingStorageBufferUpdateAfterBind;
+    target->descriptorBindingUniformTexelBufferUpdateAfterBind = source->descriptorBindingUniformTexelBufferUpdateAfterBind;
+    target->descriptorBindingStorageTexelBufferUpdateAfterBind = source->descriptorBindingStorageTexelBufferUpdateAfterBind;
+    target->descriptorBindingUpdateUnusedWhilePending = source->descriptorBindingUpdateUnusedWhilePending;
+    target->descriptorBindingPartiallyBound = source->descriptorBindingPartiallyBound;
+    target->descriptorBindingVariableDescriptorCount = source->descriptorBindingVariableDescriptorCount;
+    target->runtimeDescriptorArray = source->runtimeDescriptorArray;
+}
+
+}  // namespace
+
 void Vulkan12CoreModule::on_post_get_features2(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceFeatures2* pFeatures,
@@ -338,49 +410,72 @@ void Vulkan12CoreModule::on_post_get_features2(
 
     if (unlinks->v12_features) {
         auto* f = reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(unlinks->v12_features);
-        f->samplerMirrorClampToEdge = VK_TRUE;
-        f->drawIndirectCount = VK_TRUE;
-        f->storageBuffer8BitAccess = VK_FALSE;
-        f->uniformAndStorageBuffer8BitAccess = VK_FALSE;
-        f->storagePushConstant8 = VK_FALSE;
+        const bool native_sampler_mirror = driver_has_extension(
+            physicalDevice, VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
+        const bool native_draw_count = driver_has_extension(
+            physicalDevice, VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+        const bool native_bda = driver_has_extension(
+            physicalDevice, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+        const bool native_sampler_minmax = driver_has_extension(
+            physicalDevice, VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME);
+        const bool native_di = driver_has_extension(
+            physicalDevice, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+        const bool native_scalar = driver_has_extension(
+            physicalDevice, VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME);
+        const bool native_ubo = driver_has_extension(
+            physicalDevice, VK_KHR_UNIFORM_BUFFER_STANDARD_LAYOUT_EXTENSION_NAME);
+        const bool native_sg = driver_has_extension(
+            physicalDevice, VK_KHR_SHADER_SUBGROUP_EXTENDED_TYPES_EXTENSION_NAME);
+        const bool native_8bit = driver_has_extension(physicalDevice, VK_KHR_8BIT_STORAGE_EXTENSION_NAME);
+        const bool native_float16_int8 = driver_has_extension(physicalDevice, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+        const bool native_memory_model = driver_has_extension(physicalDevice, VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
+        const bool native_imageless = driver_has_extension(physicalDevice, VK_KHR_IMAGELESS_FRAMEBUFFER_EXTENSION_NAME);
+        const bool native_sep_ds = driver_has_extension(physicalDevice, VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME);
+        f->samplerMirrorClampToEdge = native_sampler_mirror ? VK_TRUE : VK_FALSE;
+        f->drawIndirectCount = native_draw_count ? VK_TRUE : VK_FALSE;
+        f->storageBuffer8BitAccess = native_8bit ? VK_TRUE : VK_FALSE;
+        f->uniformAndStorageBuffer8BitAccess = native_8bit ? VK_TRUE : VK_FALSE;
+        f->storagePushConstant8 = native_8bit ? VK_TRUE : VK_FALSE;
         f->shaderBufferInt64Atomics = VK_FALSE;
         f->shaderSharedInt64Atomics = VK_FALSE;
-        f->shaderFloat16 = VK_FALSE;
-        f->shaderInt8 = VK_FALSE;
-        f->descriptorIndexing = VK_TRUE;
-        f->shaderInputAttachmentArrayDynamicIndexing = VK_TRUE;
-        f->shaderUniformTexelBufferArrayDynamicIndexing = VK_TRUE;
-        f->shaderStorageTexelBufferArrayDynamicIndexing = VK_TRUE;
-        f->shaderUniformBufferArrayNonUniformIndexing = VK_TRUE;
-        f->shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
-        f->shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
-        f->shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
-        f->shaderInputAttachmentArrayNonUniformIndexing = VK_TRUE;
-        f->shaderUniformTexelBufferArrayNonUniformIndexing = VK_TRUE;
-        f->shaderStorageTexelBufferArrayNonUniformIndexing = VK_TRUE;
-        f->descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
-        f->descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
-        f->descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
-        f->descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
-        f->descriptorBindingUniformTexelBufferUpdateAfterBind = VK_TRUE;
-        f->descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
-        f->descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
-        f->descriptorBindingPartiallyBound = VK_TRUE;
-        f->descriptorBindingVariableDescriptorCount = VK_TRUE;
-        f->runtimeDescriptorArray = VK_TRUE;
-        f->samplerFilterMinmax = VK_TRUE;
-        f->scalarBlockLayout = VK_TRUE;
-        f->imagelessFramebuffer = VK_TRUE;
-        f->uniformBufferStandardLayout = VK_TRUE;
-        f->shaderSubgroupExtendedTypes = VK_TRUE;
-        f->separateDepthStencilLayouts = VK_TRUE;
+        f->shaderFloat16 = native_float16_int8 ? VK_TRUE : VK_FALSE;
+        f->shaderInt8 = native_float16_int8 ? VK_TRUE : VK_FALSE;
+        // Descriptor indexing/scalar/UBO layout are only exposed once their
+        // extension feature structs are passed through at device creation.
+        f->descriptorIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderInputAttachmentArrayDynamicIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderUniformTexelBufferArrayDynamicIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderStorageTexelBufferArrayDynamicIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderUniformBufferArrayNonUniformIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderSampledImageArrayNonUniformIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderStorageBufferArrayNonUniformIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderStorageImageArrayNonUniformIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderInputAttachmentArrayNonUniformIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderUniformTexelBufferArrayNonUniformIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->shaderStorageTexelBufferArrayNonUniformIndexing = native_di ? VK_TRUE : VK_FALSE;
+        f->descriptorBindingUniformBufferUpdateAfterBind = native_di ? VK_TRUE : VK_FALSE;
+        f->descriptorBindingSampledImageUpdateAfterBind = native_di ? VK_TRUE : VK_FALSE;
+        f->descriptorBindingStorageImageUpdateAfterBind = native_di ? VK_TRUE : VK_FALSE;
+        f->descriptorBindingStorageBufferUpdateAfterBind = native_di ? VK_TRUE : VK_FALSE;
+        f->descriptorBindingUniformTexelBufferUpdateAfterBind = native_di ? VK_TRUE : VK_FALSE;
+        f->descriptorBindingStorageTexelBufferUpdateAfterBind = native_di ? VK_TRUE : VK_FALSE;
+        f->descriptorBindingUpdateUnusedWhilePending = native_di ? VK_TRUE : VK_FALSE;
+        f->descriptorBindingPartiallyBound = native_di ? VK_TRUE : VK_FALSE;
+        f->descriptorBindingVariableDescriptorCount = native_di ? VK_TRUE : VK_FALSE;
+        f->runtimeDescriptorArray = native_di ? VK_TRUE : VK_FALSE;
+        f->samplerFilterMinmax = native_sampler_minmax ? VK_TRUE : VK_FALSE;
+        f->scalarBlockLayout = native_scalar ? VK_TRUE : VK_FALSE;
+        f->imagelessFramebuffer = native_imageless ? VK_TRUE : VK_FALSE;
+        f->uniformBufferStandardLayout = native_ubo ? VK_TRUE : VK_FALSE;
+        f->shaderSubgroupExtendedTypes = native_sg ? VK_TRUE : VK_FALSE;
+        f->separateDepthStencilLayouts = native_sep_ds ? VK_TRUE : VK_FALSE;
         f->hostQueryReset = VK_TRUE;
         f->timelineSemaphore = VK_TRUE;
-        f->bufferDeviceAddress = VK_TRUE;
+        f->bufferDeviceAddress = native_bda ? VK_TRUE : VK_FALSE;
         f->bufferDeviceAddressCaptureReplay = VK_FALSE;
         f->bufferDeviceAddressMultiDevice = VK_FALSE;
-        f->vulkanMemoryModel = VK_FALSE;
-        f->vulkanMemoryModelDeviceScope = VK_FALSE;
+        f->vulkanMemoryModel = native_memory_model ? VK_TRUE : VK_FALSE;
+        f->vulkanMemoryModelDeviceScope = native_memory_model ? VK_TRUE : VK_FALSE;
         f->vulkanMemoryModelAvailabilityVisibilityChains = VK_FALSE;
         f->shaderOutputViewportIndex = VK_FALSE;
         f->shaderOutputLayer = VK_FALSE;
@@ -487,6 +582,163 @@ void Vulkan12CoreModule::on_pre_create_device(
     unlinks->desc_indexing_features = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES);
     unlinks->subgroup_ext_features = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES);
     pUserData = unlinks;
+
+    // Native promotion: this driver exposes 1.1/1.2 extensions that provide
+    // the corresponding Vulkan 1.2 features. Re-link the application's
+    // extension feature structs and enable those extensions for the driver.
+    auto relink_native = [&](void* struct_ptr, const char* extension_name) {
+        if (struct_ptr == nullptr) return;
+        if (!vku::has_extension(nativeExts, extension_name)) return;
+        vku::relink_pnext(pCreateInfo->pNext, struct_ptr);
+        add_extension(enabledExtensions, extension_name);
+    };
+    relink_native(unlinks->sep_ds_features, VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME);
+    relink_native(unlinks->scalar_block_features, VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME);
+    relink_native(unlinks->ubo_std_layout_features, VK_KHR_UNIFORM_BUFFER_STANDARD_LAYOUT_EXTENSION_NAME);
+    relink_native(unlinks->desc_indexing_features, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+    relink_native(unlinks->subgroup_ext_features, VK_KHR_SHADER_SUBGROUP_EXTENDED_TYPES_EXTENSION_NAME);
+
+    delete g_bda_features;
+    g_bda_features = nullptr;
+    delete g_di_features;
+    g_di_features = nullptr;
+    delete g_scalar_features;
+    g_scalar_features = nullptr;
+    delete g_ubo_features;
+    g_ubo_features = nullptr;
+    delete g_subgroup_features;
+    g_subgroup_features = nullptr;
+    if (vku::has_extension(nativeExts, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
+        add_extension(enabledExtensions, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+        if (unlinks->v12_features != nullptr &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)) {
+            const auto* v12 = reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(unlinks->v12_features);
+            auto* bda = new VkPhysicalDeviceBufferDeviceAddressFeatures{};
+            bda->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+            bda->bufferDeviceAddress = v12->bufferDeviceAddress;
+            bda->bufferDeviceAddressCaptureReplay = VK_FALSE;
+            bda->bufferDeviceAddressMultiDevice = VK_FALSE;
+            bda->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = bda;
+            g_bda_features = bda;
+        }
+    }
+    if (unlinks->v12_features != nullptr) {
+        const auto* v12 = reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(unlinks->v12_features);
+        if (vku::has_extension(nativeExts, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) &&
+            v12->descriptorIndexing &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES)) {
+            auto* di = new VkPhysicalDeviceDescriptorIndexingFeatures{};
+            di->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+            copy_descriptor_indexing(v12, di);
+            di->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = di;
+            g_di_features = di;
+            add_extension(enabledExtensions, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+        }
+        if (vku::has_extension(nativeExts, VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME) &&
+            v12->scalarBlockLayout &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES)) {
+            auto* scalar = new VkPhysicalDeviceScalarBlockLayoutFeatures{};
+            scalar->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
+            scalar->scalarBlockLayout = v12->scalarBlockLayout;
+            scalar->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = scalar;
+            g_scalar_features = scalar;
+            add_extension(enabledExtensions, VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME);
+        }
+        if (vku::has_extension(nativeExts, VK_KHR_UNIFORM_BUFFER_STANDARD_LAYOUT_EXTENSION_NAME) &&
+            v12->uniformBufferStandardLayout &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES)) {
+            auto* ubo = new VkPhysicalDeviceUniformBufferStandardLayoutFeatures{};
+            ubo->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES;
+            ubo->uniformBufferStandardLayout = v12->uniformBufferStandardLayout;
+            ubo->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = ubo;
+            g_ubo_features = ubo;
+            add_extension(enabledExtensions, VK_KHR_UNIFORM_BUFFER_STANDARD_LAYOUT_EXTENSION_NAME);
+        }
+        if (vku::has_extension(nativeExts, VK_KHR_SHADER_SUBGROUP_EXTENDED_TYPES_EXTENSION_NAME) &&
+            v12->shaderSubgroupExtendedTypes &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES)) {
+            auto* subgroup = new VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures{};
+            subgroup->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES;
+            subgroup->shaderSubgroupExtendedTypes = v12->shaderSubgroupExtendedTypes;
+            subgroup->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = subgroup;
+            g_subgroup_features = subgroup;
+            add_extension(enabledExtensions, VK_KHR_SHADER_SUBGROUP_EXTENDED_TYPES_EXTENSION_NAME);
+        }
+        if (vku::has_extension(nativeExts, VK_KHR_8BIT_STORAGE_EXTENSION_NAME) &&
+            v12->storageBuffer8BitAccess &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES)) {
+            auto* storage = new VkPhysicalDevice8BitStorageFeatures{};
+            storage->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES;
+            storage->storageBuffer8BitAccess = v12->storageBuffer8BitAccess;
+            storage->uniformAndStorageBuffer8BitAccess = v12->uniformAndStorageBuffer8BitAccess;
+            storage->storagePushConstant8 = v12->storagePushConstant8;
+            storage->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = storage;
+            g_8bit_features = storage;
+            add_extension(enabledExtensions, VK_KHR_8BIT_STORAGE_EXTENSION_NAME);
+        }
+        if (vku::has_extension(nativeExts, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME) &&
+            v12->shaderFloat16 &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES)) {
+            auto* shader = new VkPhysicalDeviceShaderFloat16Int8Features{};
+            shader->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+            shader->shaderFloat16 = v12->shaderFloat16;
+            shader->shaderInt8 = v12->shaderInt8;
+            shader->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = shader;
+            g_float16_int8_features = shader;
+            add_extension(enabledExtensions, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+        }
+        if (vku::has_extension(nativeExts, VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME) &&
+            v12->vulkanMemoryModel &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES)) {
+            auto* memory = new VkPhysicalDeviceVulkanMemoryModelFeatures{};
+            memory->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
+            memory->vulkanMemoryModel = v12->vulkanMemoryModel;
+            memory->vulkanMemoryModelDeviceScope = v12->vulkanMemoryModelDeviceScope;
+            memory->vulkanMemoryModelAvailabilityVisibilityChains = v12->vulkanMemoryModelAvailabilityVisibilityChains;
+            memory->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = memory;
+            g_memory_model_features = memory;
+            add_extension(enabledExtensions, VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME);
+        }
+        if (vku::has_extension(nativeExts, VK_KHR_IMAGELESS_FRAMEBUFFER_EXTENSION_NAME) &&
+            v12->imagelessFramebuffer &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES)) {
+            auto* imageless = new VkPhysicalDeviceImagelessFramebufferFeatures{};
+            imageless->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES;
+            imageless->imagelessFramebuffer = v12->imagelessFramebuffer;
+            imageless->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = imageless;
+            g_imageless_features = imageless;
+            add_extension(enabledExtensions, VK_KHR_IMAGELESS_FRAMEBUFFER_EXTENSION_NAME);
+        }
+        if (vku::has_extension(nativeExts, VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME) &&
+            v12->separateDepthStencilLayouts &&
+            !pnext_has_type(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES)) {
+            auto* separate = new VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures{};
+            separate->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES;
+            separate->separateDepthStencilLayouts = v12->separateDepthStencilLayouts;
+            separate->pNext = const_cast<void*>(pCreateInfo->pNext);
+            pCreateInfo->pNext = separate;
+            g_separate_ds_features = separate;
+            add_extension(enabledExtensions, VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME);
+        }
+    }
+    if (vku::has_extension(nativeExts, VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME)) {
+        add_extension(enabledExtensions, VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+    }
+    if (vku::has_extension(nativeExts, VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME)) {
+        add_extension(enabledExtensions, VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
+    }
+    if (vku::has_extension(nativeExts, VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME)) {
+        add_extension(enabledExtensions, VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME);
+    }
 }
 
 void Vulkan12CoreModule::on_post_create_device(
@@ -510,10 +762,20 @@ void Vulkan12CoreModule::on_post_create_device(
         const bool force = (force_env != nullptr) &&
             (strcmp(force_env, "1") == 0 || strcasecmp(force_env, "force") == 0 ||
              strcasecmp(force_env, "true") == 0);
-        const bool emulate_imageless = force || !native;
+        const bool emulate_imageless = force || !driver_has_extension(physicalDevice, VK_KHR_IMAGELESS_FRAMEBUFFER_EXTENSION_NAME);
         ImagelessFramebufferManager::get().set_device_emulated(device, emulate_imageless);
-        LOGI("Device %p created: Vulkan 1.2 core native=%d, imageless framebuffer=%s",
-             device, native ? 1 : 0, emulate_imageless ? "EMULATED" : "NATIVE");
+
+        const char* ds_env = getenv("VULKAN_FIX_EMULATE_SEPARATE_DS_LAYOUTS");
+        const bool force_ds = (ds_env != nullptr) &&
+            (strcmp(ds_env, "1") == 0 || strcasecmp(ds_env, "force") == 0 ||
+             strcasecmp(ds_env, "true") == 0);
+        const bool emulate_separate_ds = force_ds || !driver_has_extension(physicalDevice, VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME);
+        LayoutCompat::get().set_device_emulated(device, emulate_separate_ds);
+
+        LOGI("Device %p created: Vulkan 1.2 core native=%d, imageless=%s, separate D/S layouts=%s",
+             device, native ? 1 : 0,
+             emulate_imageless ? "EMULATED" : "NATIVE",
+             emulate_separate_ds ? "EMULATED" : "NATIVE");
     }
 
     if (pUserData) {
@@ -527,7 +789,18 @@ void Vulkan12CoreModule::on_destroy_device(VkDevice device) {
         m_primary_native.store(false, std::memory_order_relaxed);
     }
     ImagelessFramebufferManager::get().remove_device(device);
+    LayoutCompat::get().remove_device(device);
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
 }
+
+
+
+
+
+
+
+
+
+
 

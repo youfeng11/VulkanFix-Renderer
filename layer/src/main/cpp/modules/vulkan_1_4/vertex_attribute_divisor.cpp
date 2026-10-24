@@ -9,6 +9,9 @@
 
 REGISTER_LAYER_MODULE(VertexAttributeDivisorModule);
 
+thread_local VkCommandBuffer VertexAttributeDivisorModule::t_cached_cmd = VK_NULL_HANDLE;
+thread_local VertexAttributeDivisorModule::CmdBufferState* VertexAttributeDivisorModule::t_cached_state = nullptr;
+
 VertexAttributeDivisorModule::VertexAttributeDivisorModule() {
     LOGI("Initialized Vulkan Vertex Attribute Divisor emulation module (with full instance rate divisor support)");
 }
@@ -576,6 +579,10 @@ void VertexAttributeDivisorModule::on_free_command_buffers(
 
     std::lock_guard<std::mutex> lock(m_cmd_mutex);
     for (uint32_t i = 0; i < count; i++) {
+        if (t_cached_cmd == pCommandBuffers[i]) {
+            t_cached_cmd = VK_NULL_HANDLE;
+            t_cached_state = nullptr;
+        }
         m_cmd_devices.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
         m_cmd_states.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
     }
@@ -601,7 +608,7 @@ void VertexAttributeDivisorModule::on_cmd_bind_pipeline(
     if (!m_has_divisor_pipelines.load(std::memory_order_relaxed)) return;
     if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
 
-    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
     if (!state) return;
 
     state->current_pipeline = pipeline;
@@ -622,6 +629,8 @@ void VertexAttributeDivisorModule::on_cmd_bind_pipeline(
     }
     s_last_pipeline = pipeline;
     s_last_divisor_info = state->active_divisor_info;
+    t_cached_cmd = commandBuffer;
+    t_cached_state = state;
 }
 
 void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers(
@@ -634,7 +643,7 @@ void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers(
     if (!m_has_divisor_pipelines.load(std::memory_order_relaxed)) return;
     if (!pBuffers || !pOffsets || bindingCount == 0) return;
 
-    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
     if (!state) return;
 
     for (uint32_t i = 0; i < bindingCount; i++) {
@@ -655,7 +664,7 @@ bool VertexAttributeDivisorModule::on_cmd_draw(
 ) {
     if (!m_has_divisor_pipelines.load(std::memory_order_relaxed) || instanceCount == 0) return false;
 
-    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
     if (!state || !state->active_divisor_info || !state->active_divisor_info->has_divisor_greater_than_one) {
         return false;
     }
@@ -726,7 +735,7 @@ bool VertexAttributeDivisorModule::on_cmd_draw_indexed(
 ) {
     if (!m_has_divisor_pipelines.load(std::memory_order_relaxed) || instanceCount == 0) return false;
 
-    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
     if (!state || !state->active_divisor_info || !state->active_divisor_info->has_divisor_greater_than_one) {
         return false;
     }
@@ -784,3 +793,4 @@ bool VertexAttributeDivisorModule::on_cmd_draw_indexed(
     vku::cmd_end_label(commandBuffer);
     return true;
 }
+

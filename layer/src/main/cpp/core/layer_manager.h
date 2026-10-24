@@ -112,6 +112,8 @@ struct DeviceDispatchTable {
     PFN_vkCmdCopyBuffer CmdCopyBuffer = nullptr;
     PFN_vkCmdCopyImage CmdCopyImage = nullptr;
     PFN_vkCmdBlitImage CmdBlitImage = nullptr;
+    PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage = nullptr;
+    PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer = nullptr;
     PFN_vkCmdClearAttachments CmdClearAttachments = nullptr;
     PFN_vkCmdClearColorImage CmdClearColorImage = nullptr;
     PFN_vkCmdClearDepthStencilImage CmdClearDepthStencilImage = nullptr;
@@ -156,6 +158,8 @@ public:
         std::shared_lock<std::shared_mutex> lock(m_state_rw_mutex);
         return m_emulated_devices.find((uint64_t)(uintptr_t)device) != m_emulated_devices.end();
     }
+
+    VkPhysicalDevice get_physical_device_for(VkDevice device);
 
     // Intercepted dispatchers
     VkResult dispatch_enumerate_device_extensions(
@@ -874,6 +878,7 @@ private:
 
     std::shared_mutex m_state_rw_mutex;
     std::unordered_set<uint64_t> m_emulated_devices;
+    std::unordered_map<uint64_t, VkPhysicalDevice> m_device_phys;
     std::atomic<VkDevice> m_primary_emulated_device{VK_NULL_HANDLE};
 
     std::shared_mutex m_cmd_device_rw_mutex;
@@ -893,6 +898,7 @@ private:
     // Per-device SPIR-V version ceiling, used by the shader rewriter.
     std::shared_mutex m_device_info_mutex;
     std::unordered_map<uint64_t, uint32_t> m_device_spirv_versions;
+    std::atomic<uint32_t> m_primary_spirv_version{0};
 
     IVulkanLayerModule* m_divisor_mod = nullptr;
     IVulkanLayerModule* m_dyn_rendering_mod = nullptr;

@@ -4,6 +4,8 @@
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
 #include "imageless_framebuffer_manager.h"
+#include "layout_compat.h"
+#include "vk_pnext.h"
 #include <string.h>
 #include <string>
 #include <vector>
@@ -646,6 +648,8 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCmdDispatchIndirect);
             MATCH(vkCmdCopyBuffer);
             MATCH(vkCmdCopyImage);
+            MATCH(vkCmdCopyBufferToImage);
+            MATCH(vkCmdCopyImageToBuffer);
             MATCH(vkCmdBlitImage);
             MATCH(vkCmdClearAttachments);
             MATCH(vkCmdClearColorImage);
@@ -742,6 +746,8 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vkGetDescriptorSetLayoutSupportKHR);
         MATCH(vkGetDeviceGroupPeerMemoryFeatures);
         MATCH(vkGetDeviceGroupPeerMemoryFeaturesKHR);
+        MATCH(vkGetDeviceGroupPresentCapabilitiesKHR);
+        MATCH(vkGetDeviceGroupSurfacePresentModesKHR);
         MATCH(vkGetPhysicalDeviceFormatProperties2);
         MATCH(vkGetPhysicalDeviceFormatProperties2KHR);
         MATCH(vkGetPhysicalDeviceImageFormatProperties2);
@@ -1105,7 +1111,71 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateShaderModule(
     return s_real_fn(device, &modified, pAllocator, pShaderModule);
 }
 FORWARD_DEV_VOID(vkDestroyShaderModule, device, (VkDevice device, VkShaderModule shaderModule, const VkAllocationCallbacks* pAllocator), (device, shaderModule, pAllocator))
-FORWARD_DEV(VkResult, vkCreateRenderPass, device, (VkDevice device, const VkRenderPassCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkRenderPass* pRenderPass), (device, pCreateInfo, pAllocator, pRenderPass))
+// VK_KHR_separate_depth_stencil_layouts emulation: rewrite the separate
+// depth/stencil layouts to the combined layouts understood by Vulkan 1.0.
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateRenderPass(
+    VkDevice device,
+    const VkRenderPassCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkRenderPass* pRenderPass
+) {
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    PFN_vkCreateRenderPass real_fn = dt.CreateRenderPass;
+    if (!real_fn) {
+        real_fn = (PFN_vkCreateRenderPass)
+            get_real_proc(get_last_instance(), device, "vkCreateRenderPass");
+    }
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+
+    if (!pCreateInfo || !LayoutCompat::get().any_emulated()) {
+        return real_fn(device, pCreateInfo, pAllocator, pRenderPass);
+    }
+
+    std::vector<VkAttachmentDescription> attachments(pCreateInfo->attachmentCount);
+    for (uint32_t i = 0; i < pCreateInfo->attachmentCount; ++i) {
+        attachments[i] = pCreateInfo->pAttachments[i];
+        attachments[i].initialLayout = LayoutCompat::sanitize(attachments[i].initialLayout);
+        attachments[i].finalLayout = LayoutCompat::sanitize(attachments[i].finalLayout);
+    }
+
+    std::vector<std::vector<VkAttachmentReference>> ref_storage(
+        static_cast<size_t>(pCreateInfo->subpassCount) * 4);
+    std::vector<VkSubpassDescription> subpasses(pCreateInfo->subpassCount);
+
+    auto sanitize_refs = [&](uint32_t subpass, int slot,
+                             const VkAttachmentReference* src,
+                             uint32_t count) -> const VkAttachmentReference* {
+        if (src == nullptr || count == 0) return src;
+        auto& storage = ref_storage[static_cast<size_t>(subpass) * 4 + slot];
+        storage.resize(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            storage[i] = src[i];
+            storage[i].layout = LayoutCompat::sanitize(storage[i].layout);
+        }
+        return storage.data();
+    };
+
+    for (uint32_t s = 0; s < pCreateInfo->subpassCount; ++s) {
+        const VkSubpassDescription& in = pCreateInfo->pSubpasses[s];
+        VkSubpassDescription& out = subpasses[s];
+        out = in;
+        out.pInputAttachments = sanitize_refs(s, 0, in.pInputAttachments, in.inputAttachmentCount);
+        out.pColorAttachments = sanitize_refs(s, 1, in.pColorAttachments, in.colorAttachmentCount);
+        out.pResolveAttachments = sanitize_refs(s, 2, in.pResolveAttachments, in.colorAttachmentCount);
+        if (in.pDepthStencilAttachment != nullptr) {
+            auto& storage = ref_storage[static_cast<size_t>(s) * 4 + 3];
+            storage.resize(1);
+            storage[0] = *in.pDepthStencilAttachment;
+            storage[0].layout = LayoutCompat::sanitize(storage[0].layout);
+            out.pDepthStencilAttachment = storage.data();
+        }
+    }
+
+    VkRenderPassCreateInfo modified = *pCreateInfo;
+    modified.pAttachments = attachments.empty() ? nullptr : attachments.data();
+    modified.pSubpasses = subpasses.empty() ? nullptr : subpasses.data();
+    return real_fn(device, &modified, pAllocator, pRenderPass);
+}
 FORWARD_DEV_VOID(vkDestroyRenderPass, device, (VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator), (device, renderPass, pAllocator))
 
 // VK_KHR_imageless_framebuffer emulation: a framebuffer created with
@@ -1313,6 +1383,42 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdBlitImage(
     VkFilter filter
 ) {
     LayerManager::get().dispatch_cmd_blit_image(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions, filter);
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdCopyBufferToImage(
+    VkCommandBuffer commandBuffer,
+    VkBuffer srcBuffer,
+    VkImage dstImage,
+    VkImageLayout dstImageLayout,
+    uint32_t regionCount,
+    const VkBufferImageCopy* pRegions
+) {
+    VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdCopyBufferToImage) {
+        const VkImageLayout layout = LayoutCompat::get().is_emulated(device)
+            ? LayoutCompat::sanitize(dstImageLayout) : dstImageLayout;
+        dt.CmdCopyBufferToImage(commandBuffer, srcBuffer, dstImage,
+                                layout, regionCount, pRegions);
+    }
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL vkCmdCopyImageToBuffer(
+    VkCommandBuffer commandBuffer,
+    VkImage srcImage,
+    VkImageLayout srcImageLayout,
+    VkBuffer dstBuffer,
+    uint32_t regionCount,
+    const VkBufferImageCopy* pRegions
+) {
+    VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (dt.CmdCopyImageToBuffer) {
+        const VkImageLayout layout = LayoutCompat::get().is_emulated(device)
+            ? LayoutCompat::sanitize(srcImageLayout) : srcImageLayout;
+        dt.CmdCopyImageToBuffer(commandBuffer, srcImage,
+                                layout, dstBuffer, regionCount, pRegions);
+    }
 }
 
 VK_LAYER_EXPORT void VKAPI_CALL vkCmdClearAttachments(
@@ -1989,6 +2095,22 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties2(
     }
     if (!pImageFormatInfo || !pImageFormatProperties) return VK_ERROR_INITIALIZATION_FAILED;
 
+    // A 1.0 driver cannot report the 1.1 pNext properties; initialise them so
+    // the application never reads uninitialised memory.
+    if (auto* external = vku::find_pnext_mut<VkExternalImageFormatProperties>(
+            pImageFormatProperties->pNext, VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES)) {
+        memset(&external->externalMemoryProperties, 0, sizeof(external->externalMemoryProperties));
+    }
+    if (auto* ycbcr = vku::find_pnext_mut<VkSamplerYcbcrConversionImageFormatProperties>(
+            pImageFormatProperties->pNext, VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES)) {
+        ycbcr->combinedImageSamplerDescriptorCount = 1;
+    }
+    if (auto* cubic = vku::find_pnext_mut<VkFilterCubicImageViewImageFormatPropertiesEXT>(
+            pImageFormatProperties->pNext, VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT)) {
+        cubic->filterCubic = VK_FALSE;
+        cubic->filterCubicMinmax = VK_FALSE;
+    }
+
     PFN_vkGetPhysicalDeviceImageFormatProperties real_ifp =
         (PFN_vkGetPhysicalDeviceImageFormatProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceImageFormatProperties");
     if (real_ifp) {
@@ -2308,6 +2430,50 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkAcquireNextImage2KHR(
     uint32_t* pImageIndex
 ) {
     return LayerManager::get().dispatch_acquire_next_image2(device, pAcquireInfo, pImageIndex);
+}
+
+// Vulkan 1.1 device-group present queries. A 1.0 driver has neither entry
+// point; expose the single-device (local) topology instead.
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetDeviceGroupPresentCapabilitiesKHR(
+    VkDevice device,
+    VkDeviceGroupPresentCapabilitiesKHR* pDeviceGroupPresentCapabilities
+) {
+    PFN_vkGetDeviceGroupPresentCapabilitiesKHR real_fn =
+        (PFN_vkGetDeviceGroupPresentCapabilitiesKHR)
+            get_real_proc(get_last_instance(), device, "vkGetDeviceGroupPresentCapabilitiesKHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetDeviceGroupPresentCapabilitiesKHR)
+            get_real_proc(get_last_instance(), device, "vkGetDeviceGroupPresentCapabilities");
+    }
+    if (real_fn) {
+        return real_fn(device, pDeviceGroupPresentCapabilities);
+    }
+    if (!pDeviceGroupPresentCapabilities) return VK_ERROR_INITIALIZATION_FAILED;
+    memset(pDeviceGroupPresentCapabilities->presentMask, 0,
+           sizeof(pDeviceGroupPresentCapabilities->presentMask));
+    pDeviceGroupPresentCapabilities->presentMask[0] = 1;
+    pDeviceGroupPresentCapabilities->modes = VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
+    return VK_SUCCESS;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetDeviceGroupSurfacePresentModesKHR(
+    VkDevice device,
+    VkSurfaceKHR surface,
+    VkDeviceGroupPresentModeFlagsKHR* pModes
+) {
+    PFN_vkGetDeviceGroupSurfacePresentModesKHR real_fn =
+        (PFN_vkGetDeviceGroupSurfacePresentModesKHR)
+            get_real_proc(get_last_instance(), device, "vkGetDeviceGroupSurfacePresentModesKHR");
+    if (!real_fn) {
+        real_fn = (PFN_vkGetDeviceGroupSurfacePresentModesKHR)
+            get_real_proc(get_last_instance(), device, "vkGetDeviceGroupSurfacePresentModes");
+    }
+    if (real_fn) {
+        return real_fn(device, surface, pModes);
+    }
+    if (!pModes) return VK_ERROR_INITIALIZATION_FAILED;
+    *pModes = VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR;
+    return VK_SUCCESS;
 }
 
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkQueuePresentKHR(

@@ -1,10 +1,12 @@
-﻿#include "layer_manager.h"
+#include "layer_manager.h"
 #include "driver_loader.h"
 #include "pipeline_cache_manager.h"
 #include "tbdr_barrier_optimizer.h"
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
 #include "imageless_framebuffer_manager.h"
+#include "layout_compat.h"
+#include "vk_pnext.h"
 
 LayerManager& LayerManager::get() {
     static LayerManager s_instance;
@@ -280,6 +282,8 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     LOAD_PROC_OPT(CmdCopyBuffer, "vkCmdCopyBuffer");
     LOAD_PROC_OPT(CmdCopyImage, "vkCmdCopyImage");
     LOAD_PROC_OPT(CmdBlitImage, "vkCmdBlitImage");
+    LOAD_PROC_OPT(CmdCopyBufferToImage, "vkCmdCopyBufferToImage");
+    LOAD_PROC_OPT(CmdCopyImageToBuffer, "vkCmdCopyImageToBuffer");
     LOAD_PROC_OPT(CmdClearAttachments, "vkCmdClearAttachments");
     LOAD_PROC_OPT(CmdClearColorImage, "vkCmdClearColorImage");
     LOAD_PROC_OPT(CmdClearDepthStencilImage, "vkCmdClearDepthStencilImage");
@@ -601,10 +605,17 @@ void LayerManager::set_device_max_spirv_version(VkDevice device, uint32_t versio
     if (device == VK_NULL_HANDLE) return;
     std::unique_lock<std::shared_mutex> lock(m_device_info_mutex);
     m_device_spirv_versions[(uint64_t)(uintptr_t)device] = version;
+    if (device == m_primary_device.load(std::memory_order_relaxed) ||
+        m_primary_device.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
+        m_primary_spirv_version.store(version, std::memory_order_release);
+    }
 }
 
 uint32_t LayerManager::get_device_max_spirv_version(VkDevice device) {
     if (device == VK_NULL_HANDLE) return 0;
+    if (__builtin_expect(device == m_primary_device.load(std::memory_order_relaxed), 1)) {
+        return m_primary_spirv_version.load(std::memory_order_acquire);
+    }
     std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
     auto it = m_device_spirv_versions.find((uint64_t)(uintptr_t)device);
     return it != m_device_spirv_versions.end() ? it->second : 0;
@@ -690,13 +701,31 @@ void LayerManager::dispatch_get_physical_device_features2(
     if (!real_fn) {
         PFN_vkGetPhysicalDeviceFeatures real_fn1 =
             (PFN_vkGetPhysicalDeviceFeatures) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures");
+
+        const size_t mod_count = m_modules.size();
+        void* stack_user_data[32] = {nullptr};
+        std::vector<void*> heap_user_data;
+        void** user_data = stack_user_data;
+        if (__builtin_expect(mod_count > 32, 0)) {
+            heap_user_data.resize(mod_count, nullptr);
+            user_data = heap_user_data.data();
+        }
+
+        // On a 1.0 driver there is no Features2 entry point. Run the module
+        // pre-hooks (they unlink the 1.1/1.2 structs), fill the 1.0 features,
+        // then let the modules relink and fill the emulated structs.
+        for (size_t i = 0; i < mod_count; i++) {
+            if (m_modules[i]->is_enabled()) {
+                m_modules[i]->on_pre_get_features2(physicalDevice, pFeatures, user_data[i]);
+            }
+        }
         if (real_fn1) {
             real_fn1(physicalDevice, &pFeatures->features);
         }
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_get_features(physicalDevice, &pFeatures->features);
-                mod->on_post_get_features2(physicalDevice, pFeatures, nullptr);
+        for (size_t i = 0; i < mod_count; i++) {
+            if (m_modules[i]->is_enabled()) {
+                m_modules[i]->on_get_features(physicalDevice, &pFeatures->features);
+                m_modules[i]->on_post_get_features2(physicalDevice, pFeatures, user_data[i]);
             }
         }
         return;
@@ -741,13 +770,28 @@ void LayerManager::dispatch_get_physical_device_properties2(
     if (!real_fn) {
         PFN_vkGetPhysicalDeviceProperties real_fn1 =
             (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+
+        const size_t mod_count = m_modules.size();
+        void* stack_user_data[32] = {nullptr};
+        std::vector<void*> heap_user_data;
+        void** user_data = stack_user_data;
+        if (__builtin_expect(mod_count > 32, 0)) {
+            heap_user_data.resize(mod_count, nullptr);
+            user_data = heap_user_data.data();
+        }
+
+        for (size_t i = 0; i < mod_count; i++) {
+            if (m_modules[i]->is_enabled()) {
+                m_modules[i]->on_pre_get_properties2(physicalDevice, pProperties, user_data[i]);
+            }
+        }
         if (real_fn1) {
             real_fn1(physicalDevice, &pProperties->properties);
         }
-        for (auto& mod : m_modules) {
-            if (mod->is_enabled()) {
-                mod->on_get_properties(physicalDevice, &pProperties->properties);
-                mod->on_post_get_properties2(physicalDevice, pProperties, nullptr);
+        for (size_t i = 0; i < mod_count; i++) {
+            if (m_modules[i]->is_enabled()) {
+                m_modules[i]->on_get_properties(physicalDevice, &pProperties->properties);
+                m_modules[i]->on_post_get_properties2(physicalDevice, pProperties, user_data[i]);
             }
         }
         return;
@@ -863,6 +907,10 @@ VkResult LayerManager::dispatch_create_device(
         m_last_device = *pDevice;
         m_device_count.fetch_add(1, std::memory_order_relaxed);
         m_primary_device.store(*pDevice, std::memory_order_relaxed);
+        {
+            std::unique_lock<std::shared_mutex> lock(m_state_rw_mutex);
+            m_device_phys[(uint64_t)(uintptr_t)*pDevice] = physicalDevice;
+        }
         init_device_dispatch_table(*pDevice);
         update_device_bypass_flags(*pDevice);
         PipelineCacheManager::get().init_for_device(physicalDevice, *pDevice);
@@ -894,6 +942,10 @@ void LayerManager::dispatch_destroy_device(
     m_device_count.fetch_sub(1, std::memory_order_relaxed);
     remove_device_bypass_flags(device);
     remove_device_dispatch_table(device);
+    {
+        std::unique_lock<std::shared_mutex> lock(m_state_rw_mutex);
+        m_device_phys.erase((uint64_t)(uintptr_t)device);
+    }
 
     {
         std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
@@ -929,6 +981,9 @@ void LayerManager::dispatch_destroy_device(
 
     {
         std::unique_lock<std::shared_mutex> info_lock(m_device_info_mutex);
+        if (m_primary_device.load(std::memory_order_relaxed) == device) {
+            m_primary_spirv_version.store(0, std::memory_order_release);
+        }
         m_device_spirv_versions.erase((uint64_t)(uintptr_t)device);
     }
 
@@ -1950,7 +2005,8 @@ void LayerManager::dispatch_cmd_copy_image(
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdCopyImage) {
-        dt.CmdCopyImage(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions);
+        dt.CmdCopyImage(commandBuffer, srcImage, LayoutCompat::sanitize(srcImageLayout),
+                        dstImage, LayoutCompat::sanitize(dstImageLayout), regionCount, pRegions);
     }
 }
 
@@ -1968,7 +2024,8 @@ void LayerManager::dispatch_cmd_blit_image(
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdBlitImage) {
-        dt.CmdBlitImage(commandBuffer, srcImage, srcImageLayout, dstImage, dstImageLayout, regionCount, pRegions, filter);
+        dt.CmdBlitImage(commandBuffer, srcImage, LayoutCompat::sanitize(srcImageLayout),
+                        dstImage, LayoutCompat::sanitize(dstImageLayout), regionCount, pRegions, filter);
     }
 }
 
@@ -2015,7 +2072,8 @@ void LayerManager::dispatch_cmd_clear_depth_stencil_image(
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdClearDepthStencilImage) {
-        dt.CmdClearDepthStencilImage(commandBuffer, image, imageLayout, pDepthStencil, rangeCount, pRanges);
+        dt.CmdClearDepthStencilImage(commandBuffer, image, LayoutCompat::sanitize(imageLayout),
+                                     pDepthStencil, rangeCount, pRanges);
     }
 }
 
@@ -2068,11 +2126,20 @@ void LayerManager::dispatch_get_device_queue2(
     }
     if (real_fn) {
         real_fn(device, pQueueInfo, pQueue);
-        if (pQueue && *pQueue != VK_NULL_HANDLE && pQueueInfo) {
-            std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
-            m_queue_devices[(uint64_t)(uintptr_t)*pQueue] = device;
-            m_device_queues[(uint64_t)(uintptr_t)device] = {*pQueue, pQueueInfo->queueFamilyIndex};
+    } else if (pQueueInfo && pQueue && pQueueInfo->flags == 0) {
+        // Vulkan 1.0 fallback: vkGetDeviceQueue cannot express queue flags, but
+        // flags == 0 is the common case for every queue.
+        PFN_vkGetDeviceQueue real_get =
+            (PFN_vkGetDeviceQueue) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue");
+        if (real_get) {
+            real_get(device, pQueueInfo->queueFamilyIndex, pQueueInfo->queueIndex, pQueue);
         }
+    }
+
+    if (pQueue && *pQueue != VK_NULL_HANDLE && pQueueInfo) {
+        std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
+        m_queue_devices[(uint64_t)(uintptr_t)*pQueue] = device;
+        m_device_queues[(uint64_t)(uintptr_t)device] = {*pQueue, pQueueInfo->queueFamilyIndex};
     }
 }
 
@@ -2180,6 +2247,19 @@ void LayerManager::dispatch_cmd_pipeline_barrier(
 
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
+
+    const VkImageMemoryBarrier* image_barriers = pImageMemoryBarriers;
+    static thread_local std::vector<VkImageMemoryBarrier> sanitized_barriers;
+    sanitized_barriers.clear();
+    if (LayoutCompat::get().any_emulated() && imageMemoryBarrierCount > 0 && pImageMemoryBarriers != nullptr) {
+        sanitized_barriers.assign(pImageMemoryBarriers, pImageMemoryBarriers + imageMemoryBarrierCount);
+        for (auto& barrier : sanitized_barriers) {
+            barrier.oldLayout = LayoutCompat::sanitize(barrier.oldLayout);
+            barrier.newLayout = LayoutCompat::sanitize(barrier.newLayout);
+        }
+        image_barriers = sanitized_barriers.data();
+    }
+
     if (dt.CmdPipelineBarrier) {
         dt.CmdPipelineBarrier(
             commandBuffer,
@@ -2191,7 +2271,7 @@ void LayerManager::dispatch_cmd_pipeline_barrier(
             bufferMemoryBarrierCount,
             pBufferMemoryBarriers,
             imageMemoryBarrierCount,
-            pImageMemoryBarriers);
+            image_barriers);
     }
 }
 
@@ -2209,8 +2289,25 @@ void LayerManager::dispatch_cmd_pipeline_barrier2(
         pInfoToUse = &optInfo;
     }
 
+    const VkDependencyInfo* info = pInfoToUse;
+    VkDependencyInfo sanitized_info{};
+    static thread_local std::vector<VkImageMemoryBarrier2> sanitized_barriers;
+    sanitized_barriers.clear();
+    if (LayoutCompat::get().any_emulated() && info != nullptr &&
+        info->imageMemoryBarrierCount > 0 && info->pImageMemoryBarriers != nullptr) {
+        sanitized_barriers.assign(
+            info->pImageMemoryBarriers, info->pImageMemoryBarriers + info->imageMemoryBarrierCount);
+        for (auto& barrier : sanitized_barriers) {
+            barrier.oldLayout = LayoutCompat::sanitize(barrier.oldLayout);
+            barrier.newLayout = LayoutCompat::sanitize(barrier.newLayout);
+        }
+        sanitized_info = *info;
+        sanitized_info.pImageMemoryBarriers = sanitized_barriers.data();
+        info = &sanitized_info;
+    }
+
     if (m_sync2_mod && m_sync2_mod->is_enabled()) {
-        if (m_sync2_mod->on_cmd_pipeline_barrier2(commandBuffer, pInfoToUse)) {
+        if (m_sync2_mod->on_cmd_pipeline_barrier2(commandBuffer, info)) {
             return;
         }
     }
@@ -2218,7 +2315,7 @@ void LayerManager::dispatch_cmd_pipeline_barrier2(
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdPipelineBarrier2) {
-        dt.CmdPipelineBarrier2(commandBuffer, pInfoToUse);
+        dt.CmdPipelineBarrier2(commandBuffer, info);
     }
 }
 
@@ -2722,6 +2819,15 @@ VkResult LayerManager::dispatch_bind_buffer_memory2(
     if (!real_bind) return VK_ERROR_INITIALIZATION_FAILED;
 
     for (uint32_t i = 0; i < bindInfoCount; ++i) {
+        const auto* group = vku::find_pnext<VkBindBufferMemoryDeviceGroupInfo>(
+            pBindInfos[i].pNext, VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO);
+        if (group != nullptr &&
+            (group->deviceIndexCount > 1 ||
+             (group->deviceIndexCount == 1 && group->pDeviceIndices != nullptr &&
+              group->pDeviceIndices[0] != 0))) {
+            LOGW("vkBindBufferMemory2: multi-device binding is not supported on this driver");
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
         VkResult r = real_bind(device, pBindInfos[i].buffer, pBindInfos[i].memory, pBindInfos[i].memoryOffset);
         if (r != VK_SUCCESS) return r;
     }
@@ -2755,6 +2861,15 @@ VkResult LayerManager::dispatch_bind_image_memory2(
     if (!real_bind) return VK_ERROR_INITIALIZATION_FAILED;
 
     for (uint32_t i = 0; i < bindInfoCount; ++i) {
+        const auto* group = vku::find_pnext<VkBindImageMemoryDeviceGroupInfo>(
+            pBindInfos[i].pNext, VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_DEVICE_GROUP_INFO);
+        if (group != nullptr &&
+            (group->deviceIndexCount > 1 || group->splitInstanceBindRegionCount > 0 ||
+             (group->deviceIndexCount == 1 && group->pDeviceIndices != nullptr &&
+              group->pDeviceIndices[0] != 0))) {
+            LOGW("vkBindImageMemory2: multi-device binding is not supported on this driver");
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
         VkResult r = real_bind(device, pBindInfos[i].image, pBindInfos[i].memory, pBindInfos[i].memoryOffset);
         if (r != VK_SUCCESS) return r;
     }
@@ -2788,6 +2903,13 @@ void LayerManager::dispatch_get_buffer_memory_requirements2(
         if (real_gmr) {
             real_gmr(device, pInfo->buffer, &pMemoryRequirements->memoryRequirements);
         }
+        // A 1.0 driver has no dedicated-allocation support; never leave the
+        // application reading uninitialised pNext memory.
+        if (auto* dedicated = vku::find_pnext_mut<VkMemoryDedicatedRequirements>(
+                pMemoryRequirements->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS)) {
+            dedicated->prefersDedicatedAllocation = VK_FALSE;
+            dedicated->requiresDedicatedAllocation = VK_FALSE;
+        }
     }
 }
 
@@ -2817,6 +2939,11 @@ void LayerManager::dispatch_get_image_memory_requirements2(
             (PFN_vkGetImageMemoryRequirements) get_real_proc(get_last_instance(), device, "vkGetImageMemoryRequirements");
         if (real_gmr) {
             real_gmr(device, pInfo->image, &pMemoryRequirements->memoryRequirements);
+        }
+        if (auto* dedicated = vku::find_pnext_mut<VkMemoryDedicatedRequirements>(
+                pMemoryRequirements->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS)) {
+            dedicated->prefersDedicatedAllocation = VK_FALSE;
+            dedicated->requiresDedicatedAllocation = VK_FALSE;
         }
     }
 }
@@ -2872,6 +2999,128 @@ void LayerManager::dispatch_update_descriptor_set_with_template(
     }
 }
 
+VkPhysicalDevice LayerManager::get_physical_device_for(VkDevice device) {
+    std::shared_lock<std::shared_mutex> lock(m_state_rw_mutex);
+    auto it = m_device_phys.find((uint64_t)(uintptr_t)device);
+    return it != m_device_phys.end() ? it->second : VK_NULL_HANDLE;
+}
+
+namespace {
+
+struct DescriptorCounts {
+    uint64_t sampler = 0;
+    uint64_t sampled = 0;
+    uint64_t ubo = 0;
+    uint64_t sbo = 0;
+    uint64_t storage_image = 0;
+    uint64_t input = 0;
+};
+
+bool accumulate_descriptor(DescriptorCounts& counts, VkDescriptorType type, uint64_t count) {
+    switch (type) {
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+            counts.sampler += count;
+            return true;
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+            counts.sampler += count;
+            counts.sampled += count;
+            return true;
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+            counts.sampled += count;
+            return true;
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            counts.storage_image += count;
+            return true;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+            counts.ubo += count;
+            return true;
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+            counts.sbo += count;
+            return true;
+        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+            counts.input += count;
+            return true;
+        default:
+            // Types introduced after Vulkan 1.0 (acceleration structures,
+            // inline uniform blocks, mutable) are not available on a 1.0 driver.
+            return false;
+    }
+}
+
+bool descriptor_layout_within_limits(const VkPhysicalDeviceLimits& limits,
+                                     const VkDescriptorSetLayoutCreateInfo* info) {
+    if (!info) return true;
+    const auto* binding_flags = vku::find_pnext<VkDescriptorSetLayoutBindingFlagsCreateInfo>(
+        info->pNext, VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO);
+    if (binding_flags != nullptr && binding_flags->pBindingFlags != nullptr) {
+        for (uint32_t i = 0; i < binding_flags->bindingCount; ++i) {
+            if ((binding_flags->pBindingFlags[i] & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT) != 0) {
+                // Variable descriptor count layouts are validated by the driver
+                // against the descriptor-indexing limits.
+                return true;
+            }
+        }
+    }
+    if ((info->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT) != 0) {
+        // Native descriptor indexing supports update-after-bind; the driver
+        // validates the update-after-bind limits itself.
+        return true;
+    }
+#ifdef VK_DESCRIPTOR_SET_LAYOUT_CREATE_HOST_ONLY_POOL_BIT_EXT
+    if ((info->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_HOST_ONLY_POOL_BIT_EXT) != 0) {
+        return false;
+    }
+#endif
+    if (info->bindingCount > 0 && info->pBindings == nullptr) return false;
+
+    DescriptorCounts total{};
+    DescriptorCounts per_stage[32]{};
+    uint64_t per_stage_resources[32] = {};
+
+    for (uint32_t i = 0; i < info->bindingCount; ++i) {
+        const VkDescriptorSetLayoutBinding& binding = info->pBindings[i];
+        if (binding.descriptorCount == 0) continue;
+        if (!accumulate_descriptor(total, binding.descriptorType, binding.descriptorCount)) {
+            return false;
+        }
+        for (uint32_t bit = 0; bit < 32; ++bit) {
+            if ((binding.stageFlags & (1u << bit)) == 0) continue;
+            if (!accumulate_descriptor(per_stage[bit], binding.descriptorType, binding.descriptorCount)) {
+                return false;
+            }
+            per_stage_resources[bit] += binding.descriptorCount;
+        }
+    }
+
+    if (total.sampler > limits.maxDescriptorSetSamplers ||
+        total.sampled > limits.maxDescriptorSetSampledImages ||
+        total.ubo > limits.maxDescriptorSetUniformBuffers ||
+        total.sbo > limits.maxDescriptorSetStorageBuffers ||
+        total.storage_image > limits.maxDescriptorSetStorageImages ||
+        total.input > limits.maxDescriptorSetInputAttachments) {
+        return false;
+    }
+
+    for (uint32_t bit = 0; bit < 32; ++bit) {
+        if (per_stage[bit].sampler > limits.maxPerStageDescriptorSamplers ||
+            per_stage[bit].sampled > limits.maxPerStageDescriptorSampledImages ||
+            per_stage[bit].ubo > limits.maxPerStageDescriptorUniformBuffers ||
+            per_stage[bit].sbo > limits.maxPerStageDescriptorStorageBuffers ||
+            per_stage[bit].storage_image > limits.maxPerStageDescriptorStorageImages ||
+            per_stage[bit].input > limits.maxPerStageDescriptorInputAttachments ||
+            per_stage_resources[bit] > limits.maxPerStageResources) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
 void LayerManager::dispatch_get_descriptor_set_layout_support(
     VkDevice device,
     const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
@@ -2893,7 +3142,18 @@ void LayerManager::dispatch_get_descriptor_set_layout_support(
         return;
     }
     if (pSupport) {
-        pSupport->supported = VK_TRUE;
+        bool supported = true;
+        if (pCreateInfo) {
+            VkPhysicalDevice physicalDevice = get_physical_device_for(device);
+            PFN_vkGetPhysicalDeviceProperties get_props = (PFN_vkGetPhysicalDeviceProperties)
+                get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+            if (physicalDevice != VK_NULL_HANDLE && get_props != nullptr) {
+                VkPhysicalDeviceProperties props{};
+                get_props(physicalDevice, &props);
+                supported = descriptor_layout_within_limits(props.limits, pCreateInfo);
+            }
+        }
+        pSupport->supported = supported ? VK_TRUE : VK_FALSE;
     }
 }
 
@@ -2928,6 +3188,9 @@ void LayerManager::dispatch_cmd_dispatch_base(
         if (real_disp) {
             real_disp(commandBuffer, groupCountX, groupCountY, groupCountZ);
         }
+    } else {
+        LOGW("vkCmdDispatchBase: non-zero base group (%u,%u,%u) needs shader-side emulation; dispatch skipped",
+             baseGroupX, baseGroupY, baseGroupZ);
     }
 }
 
@@ -2954,7 +3217,42 @@ VkResult LayerManager::dispatch_enumerate_physical_device_groups(
         return real_fn(inst, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
     }
 
-    return VK_ERROR_INITIALIZATION_FAILED;
+    // Vulkan 1.0 fallback: expose every physical device as a single-device
+    // group. This is the only valid device-group topology on a 1.0 driver.
+    if (!pPhysicalDeviceGroupCount) return VK_ERROR_INITIALIZATION_FAILED;
+    PFN_vkEnumeratePhysicalDevices real_enum =
+        (PFN_vkEnumeratePhysicalDevices) get_real_proc(inst, VK_NULL_HANDLE, "vkEnumeratePhysicalDevices");
+    if (!real_enum) return VK_ERROR_INITIALIZATION_FAILED;
+
+    uint32_t deviceCount = 0;
+    if (real_enum(inst, &deviceCount, nullptr) != VK_SUCCESS || deviceCount == 0) {
+        *pPhysicalDeviceGroupCount = 0;
+        return VK_SUCCESS;
+    }
+    if (pPhysicalDeviceGroupProperties == nullptr) {
+        *pPhysicalDeviceGroupCount = 1;
+        return VK_SUCCESS;
+    }
+    if (*pPhysicalDeviceGroupCount < 1) {
+        *pPhysicalDeviceGroupCount = 1;
+        return VK_INCOMPLETE;
+    }
+
+    std::vector<VkPhysicalDevice> devices(deviceCount);
+    if (real_enum(inst, &deviceCount, devices.data()) != VK_SUCCESS || deviceCount == 0) {
+        *pPhysicalDeviceGroupCount = 0;
+        return VK_SUCCESS;
+    }
+
+    VkPhysicalDeviceGroupProperties& group = pPhysicalDeviceGroupProperties[0];
+    group.physicalDeviceCount = 1;
+    group.physicalDevices[0] = devices[0];
+    for (uint32_t i = 1; i < VK_MAX_DEVICE_GROUP_SIZE; ++i) {
+        group.physicalDevices[i] = VK_NULL_HANDLE;
+    }
+    group.subsetAllocation = VK_FALSE;
+    *pPhysicalDeviceGroupCount = 1;
+    return VK_SUCCESS;
 }
 
 void LayerManager::dispatch_trim_command_pool(

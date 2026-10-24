@@ -20,45 +20,11 @@ constexpr size_t kMaxCachedModules = 4096;
 // dropped when a version downgrade is already happening, and the validator
 // below decides whether the module really does not need them.
 const uint32_t kDefaultStripCaps[] = {
-    static_cast<uint32_t>(spv::CapabilityShaderNonUniform),
-    static_cast<uint32_t>(spv::CapabilityRuntimeDescriptorArray),
-    static_cast<uint32_t>(spv::CapabilityInputAttachmentArrayDynamicIndexing),
-    static_cast<uint32_t>(spv::CapabilityUniformTexelBufferArrayDynamicIndexing),
-    static_cast<uint32_t>(spv::CapabilityStorageTexelBufferArrayDynamicIndexing),
-    static_cast<uint32_t>(spv::CapabilityUniformBufferArrayNonUniformIndexing),
-    static_cast<uint32_t>(spv::CapabilitySampledImageArrayNonUniformIndexing),
-    static_cast<uint32_t>(spv::CapabilityStorageBufferArrayNonUniformIndexing),
-    static_cast<uint32_t>(spv::CapabilityStorageImageArrayNonUniformIndexing),
-    static_cast<uint32_t>(spv::CapabilityInputAttachmentArrayNonUniformIndexing),
-    static_cast<uint32_t>(spv::CapabilityUniformTexelBufferArrayNonUniformIndexing),
-    static_cast<uint32_t>(spv::CapabilityStorageTexelBufferArrayNonUniformIndexing),
-    static_cast<uint32_t>(spv::CapabilityStorageBuffer16BitAccess),
-    static_cast<uint32_t>(spv::CapabilityUniformAndStorageBuffer16BitAccess),
-    static_cast<uint32_t>(spv::CapabilityStoragePushConstant16),
-    static_cast<uint32_t>(spv::CapabilityStorageInputOutput16),
-    static_cast<uint32_t>(spv::CapabilityStorageBuffer8BitAccess),
-    static_cast<uint32_t>(spv::CapabilityUniformAndStorageBuffer8BitAccess),
-    static_cast<uint32_t>(spv::CapabilityStoragePushConstant8),
-    static_cast<uint32_t>(spv::CapabilityGroupNonUniform),
-    static_cast<uint32_t>(spv::CapabilityGroupNonUniformVote),
-    static_cast<uint32_t>(spv::CapabilityGroupNonUniformArithmetic),
-    static_cast<uint32_t>(spv::CapabilityGroupNonUniformBallot),
-    static_cast<uint32_t>(spv::CapabilityGroupNonUniformShuffle),
-    static_cast<uint32_t>(spv::CapabilityGroupNonUniformShuffleRelative),
-    static_cast<uint32_t>(spv::CapabilityGroupNonUniformClustered),
-    static_cast<uint32_t>(spv::CapabilityGroupNonUniformQuad),
-    static_cast<uint32_t>(spv::CapabilityPhysicalStorageBufferAddresses),
-    static_cast<uint32_t>(spv::CapabilityVulkanMemoryModel),
-    static_cast<uint32_t>(spv::CapabilityVulkanMemoryModelDeviceScope),
     static_cast<uint32_t>(spv::CapabilityDemoteToHelperInvocation),
 };
 
 const char* const kDefaultStripExtensions[] = {
-    "SPV_EXT_descriptor_indexing",
-    "SPV_KHR_16bit_storage",
-    "SPV_KHR_8bit_storage",
-    "SPV_KHR_vulkan_memory_model",
-    "SPV_EXT_physical_storage_buffer",
+    "SPV_EXT_demote_to_helper_invocation",
 };
 
 bool env_truthy(const char* value) {
@@ -235,7 +201,112 @@ void ShaderRewriter::ensure_initialized() {
                  self.m_strip_caps.size(), self.m_strip_extensions.size(),
                  self.m_strip_debug ? "stripped" : "kept");
         }
+
+        if (self.m_enabled) {
+            self.m_disk_cache_ready = true;
+            const bool custom_policy =
+                std::getenv("VULKAN_FIX_SPIRV_STRIP_CAPS") != nullptr ||
+                std::getenv("VULKAN_FIX_SPIRV_STRIP_EXTENSIONS") != nullptr ||
+                std::getenv("VULKAN_FIX_SPIRV_MAX_VERSION") != nullptr ||
+                std::getenv("VULKAN_FIX_SPIRV_KEEP_CAPS") != nullptr;
+            if (!custom_policy) {
+                const char* override_path = std::getenv("VULKAN_FIX_SHADER_CACHE_PATH");
+                if (override_path != nullptr && override_path[0] != '\0') {
+                    self.m_cache_path = override_path;
+                } else if (const char* home = std::getenv("HOME")) {
+                    self.m_cache_path = std::string(home) + "/vulkanfix_shader_cache.bin";
+                }
+                if (!self.m_cache_path.empty()) {
+                    self.load_disk_cache();
+                }
+            }
+        }
     });
+}
+
+ShaderRewriter::~ShaderRewriter() {
+    save_disk_cache();
+}
+
+void ShaderRewriter::load_disk_cache() {
+    constexpr uint32_t kDiskCacheMagic = 0x564B4658u;  // "VKFX"
+    constexpr uint32_t kDiskCacheVersion = 3u;
+    FILE* file = std::fopen(m_cache_path.c_str(), "rb");
+    if (file == nullptr) return;
+
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint32_t count = 0;
+    if (std::fread(&magic, sizeof(magic), 1, file) != 1 ||
+        std::fread(&version, sizeof(version), 1, file) != 1 ||
+        std::fread(&count, sizeof(count), 1, file) != 1 ||
+        magic != kDiskCacheMagic || version != kDiskCacheVersion || count > 65536u) {
+        std::fclose(file);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(m_cache_mutex);
+    size_t loaded = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint64_t hash = 0;
+        uint8_t changed = 0;
+        uint32_t words = 0;
+        if (std::fread(&hash, sizeof(hash), 1, file) != 1 ||
+            std::fread(&changed, sizeof(changed), 1, file) != 1 ||
+            std::fread(&words, sizeof(words), 1, file) != 1 ||
+            words > (4u * 1024u * 1024u)) {
+            break;
+        }
+        CacheEntry entry;
+        entry.changed = changed != 0;
+        entry.code.resize(words);
+        if (words != 0 && std::fread(entry.code.data(), sizeof(uint32_t), words, file) != words) {
+            break;
+        }
+        const size_t bytes = entry.code.size() * sizeof(uint32_t);
+        if (m_cache.size() >= kMaxCachedModules || m_cache_bytes + bytes > kMaxCacheBytes) {
+            break;
+        }
+        m_cache[hash] = std::move(entry);
+        m_cache_bytes += bytes;
+        ++loaded;
+    }
+    std::fclose(file);
+    if (loaded > 0) {
+        LOGI("ShaderRewriter: loaded %zu shader rewrites from %s", loaded, m_cache_path.c_str());
+    }
+}
+
+void ShaderRewriter::save_disk_cache() {
+    if (m_cache_path.empty()) return;
+    constexpr uint32_t kDiskCacheMagic = 0x564B4658u;  // "VKFX"
+    constexpr uint32_t kDiskCacheVersion = 3u;
+
+    std::lock_guard<std::mutex> lock(m_cache_mutex);
+    if (m_cache.empty()) return;
+    const std::string temporary = m_cache_path + ".tmp";
+    FILE* file = std::fopen(temporary.c_str(), "wb");
+    if (file == nullptr) return;
+
+    const uint32_t magic = kDiskCacheMagic;
+    const uint32_t version = kDiskCacheVersion;
+    const uint32_t count = static_cast<uint32_t>(m_cache.size());
+    std::fwrite(&magic, sizeof(magic), 1, file);
+    std::fwrite(&version, sizeof(version), 1, file);
+    std::fwrite(&count, sizeof(count), 1, file);
+    for (const auto& entry : m_cache) {
+        const uint64_t hash = entry.first;
+        const uint8_t changed = entry.second.changed ? 1u : 0u;
+        const uint32_t words = static_cast<uint32_t>(entry.second.code.size());
+        std::fwrite(&hash, sizeof(hash), 1, file);
+        std::fwrite(&changed, sizeof(changed), 1, file);
+        std::fwrite(&words, sizeof(words), 1, file);
+        if (words != 0) {
+            std::fwrite(entry.second.code.data(), sizeof(uint32_t), words, file);
+        }
+    }
+    std::fclose(file);
+    std::rename(temporary.c_str(), m_cache_path.c_str());
 }
 
 uint32_t ShaderRewriter::api_version_to_spirv(uint32_t apiVersion) {
@@ -266,12 +337,23 @@ uint64_t ShaderRewriter::hash_code(const std::vector<uint32_t>& code, uint32_t t
 
 bool ShaderRewriter::validate(const std::vector<uint32_t>& code, uint32_t version) {
     spvtools::SpirvTools tools(env_for_version(version));
-    tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t&, const char* message) {
-        if (message != nullptr) {
-            LOG_OPT_DEBUG("spirv-val: %s", message);
+    std::vector<std::string> messages;
+    tools.SetMessageConsumer([&messages](spv_message_level_t, const char*, const spv_position_t&, const char* message) {
+        if (message != nullptr && messages.size() < 8) {
+            messages.emplace_back(message);
         }
     });
-    return tools.Validate(code);
+    const bool valid = tools.Validate(code);
+    if (!valid) {
+        static std::atomic<uint32_t> failures{0};
+        const uint32_t index = failures.fetch_add(1, std::memory_order_relaxed);
+        if (index < 3) {
+            for (const std::string& message : messages) {
+                LOGW("spirv-val reject: %s", message.c_str());
+            }
+        }
+    }
+    return valid;
 }
 
 bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion) {
@@ -301,7 +383,47 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     output.reserve(code.size());
     output.insert(output.end(), code.begin(), code.begin() + kSpirvHeaderWords);
 
+    // SPIR-V 1.4 relaxed OpEntryPoint interfaces to allow all global variables.
+    // For 1.3 targets only Input/Output variables are legal, so collect each
+    // variable's storage class and filter the interface lists below.
+    std::unordered_map<uint32_t, uint32_t> variable_storage;
+    uint32_t bool_type_id = 0;
+    std::unordered_map<uint32_t, uint32_t> vector_components;
+    std::unordered_map<uint32_t, uint32_t> vector_counts;
+    std::unordered_map<uint32_t, uint32_t> value_types;
+    uint32_t max_id = 0;
+    {
+        size_t scan = kSpirvHeaderWords;
+        while (scan < code.size()) {
+            const uint32_t scan_word = code[scan];
+            const uint32_t scan_count = scan_word >> 16;
+            const uint16_t scan_opcode = static_cast<uint16_t>(scan_word & 0xFFFFu);
+            if (scan_count == 0 || scan + scan_count > code.size()) break;
+            if (scan_opcode == static_cast<uint16_t>(spv::OpTypeBool) && scan_count >= 2) {
+                bool_type_id = code[scan + 1];
+                max_id = std::max(max_id, bool_type_id);
+            } else if (scan_opcode == static_cast<uint16_t>(spv::OpTypeVector) && scan_count >= 4) {
+                vector_components[code[scan + 1]] = code[scan + 2];
+                vector_counts[code[scan + 1]] = code[scan + 3];
+                max_id = std::max(max_id, code[scan + 1]);
+            }
+            if (scan_opcode == static_cast<uint16_t>(spv::OpVariable) && scan_count >= 4) {
+                variable_storage[code[scan + 2]] = code[scan + 3];
+            }
+            if (scan_count >= 3) {
+                value_types[code[scan + 2]] = code[scan + 1];
+                max_id = std::max(max_id, code[scan + 2]);
+            }
+            scan += scan_count;
+        }
+    }
+
     bool dropped_declaration = false;
+    size_t replaced_instructions = 0;
+    size_t dropped_interfaces = 0;
+    size_t type_insert_pos = 0;
+    uint32_t next_id = (code.size() > 3 && code[3] > 0) ? code[3] - 1 : max_id;
+    std::unordered_map<uint32_t, uint32_t> created_bool_vectors;
     size_t offset = kSpirvHeaderWords;
     bool malformed = false;
     while (offset < code.size()) {
@@ -313,7 +435,18 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
             break;
         }
 
+        if (opcode == static_cast<uint16_t>(spv::OpFunction) && type_insert_pos == 0) {
+            type_insert_pos = output.size();
+        }
+
         bool drop = false;
+        uint16_t replacement_opcode = opcode;
+        // SPIR-V 1.6 termination instructions are not valid in the SPIR-V 1.3
+        // modules accepted by this driver. OpKill is the valid 1.0 equivalent.
+        if (opcode == static_cast<uint16_t>(spv::OpTerminateInvocation) ||
+            opcode == static_cast<uint16_t>(spv::OpDemoteToHelperInvocation)) {
+            replacement_opcode = static_cast<uint16_t>(spv::OpKill);
+        }
         if (m_strip_debug && is_debug_opcode(opcode)) {
             drop = true;
         } else if (opcode == static_cast<uint16_t>(spv::OpCapability) && word_count >= 2) {
@@ -326,12 +459,139 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
                     break;
                 }
             }
+        } else if ((opcode == static_cast<uint16_t>(spv::OpDecorate) && word_count >= 3 &&
+                    code[offset + 2] == static_cast<uint32_t>(spv::DecorationNonWritable)) ||
+                   (opcode == static_cast<uint16_t>(spv::OpMemberDecorate) && word_count >= 4 &&
+                    code[offset + 3] == static_cast<uint32_t>(spv::DecorationNonWritable))) {
+            // NonWritable is a pure optimisation hint. SPIR-V 1.3 restricts the
+            // legal targets, and some 1.5/1.6 modules decorate types/members
+            // that the 1.3 validator rejects; dropping it is semantics-preserving.
+            drop = true;
+        }
+
+        if (opcode == static_cast<uint16_t>(spv::OpImageFetch) && word_count >= 6) {
+            const uint32_t image_operands = code[offset + 5];
+            if ((image_operands & static_cast<uint32_t>(spv::ImageOperandsSignExtendMask)) != 0) {
+                const uint32_t new_mask = image_operands & ~static_cast<uint32_t>(spv::ImageOperandsSignExtendMask);
+                std::vector<uint32_t> fetch;
+                fetch.push_back(0);
+                for (size_t i = 1; i < 5; ++i) fetch.push_back(code[offset + i]);
+                if (new_mask != 0) {
+                    fetch.push_back(new_mask);
+                    for (size_t i = 6; i < word_count; ++i) fetch.push_back(code[offset + i]);
+                }
+                fetch[0] = (static_cast<uint32_t>(fetch.size()) << 16) |
+                           static_cast<uint32_t>(spv::OpImageFetch);
+                output.insert(output.end(), fetch.begin(), fetch.end());
+                ++replaced_instructions;
+                offset += word_count;
+                continue;
+            }
+        }
+        if (opcode == static_cast<uint16_t>(spv::OpSelect) && word_count >= 6 && bool_type_id != 0) {
+            const uint32_t result_type = code[offset + 1];
+            auto count_it = vector_counts.find(result_type);
+            auto component_it = vector_components.find(result_type);
+            auto condition_it = value_types.find(code[offset + 3]);
+            if (count_it != vector_counts.end() && component_it != vector_components.end() &&
+                condition_it != value_types.end() && condition_it->second == bool_type_id) {
+                uint32_t bool_vector = 0;
+                for (const auto& vector : vector_counts) {
+                    auto component = vector_components.find(vector.first);
+                    if (component != vector_components.end() &&
+                        component->second == bool_type_id && vector.second == count_it->second) {
+                        bool_vector = vector.first;
+                        break;
+                    }
+                }
+                if (bool_vector == 0) {
+                    auto created = created_bool_vectors.find(count_it->second);
+                    if (created != created_bool_vectors.end()) {
+                        bool_vector = created->second;
+                    } else if (type_insert_pos != 0) {
+                        const uint32_t type_id = ++next_id;
+                        const uint32_t type_words[4] = {
+                            (4u << 16) | static_cast<uint32_t>(spv::OpTypeVector),
+                            type_id,
+                            bool_type_id,
+                            count_it->second,
+                        };
+                        output.insert(output.begin() + type_insert_pos, type_words, type_words + 4);
+                        type_insert_pos += 4;
+                        created_bool_vectors[count_it->second] = type_id;
+                        bool_vector = type_id;
+                    }
+                }
+                if (bool_vector != 0) {
+                    const uint32_t condition = code[offset + 3];
+                    const uint32_t construct_id = ++next_id;
+                    const uint32_t construct_words = 3 + count_it->second;
+                    std::vector<uint32_t> construct;
+                    construct.push_back((construct_words << 16) | static_cast<uint32_t>(spv::OpCompositeConstruct));
+                    construct.push_back(bool_vector);
+                    construct.push_back(construct_id);
+                    for (uint32_t i = 0; i < count_it->second; ++i) construct.push_back(condition);
+                    output.insert(output.end(), construct.begin(), construct.end());
+                    const size_t select_offset = output.size();
+                    output.insert(output.end(), code.begin() + offset, code.begin() + offset + word_count);
+                    output[select_offset + 3] = construct_id;
+                    ++replaced_instructions;
+                    offset += word_count;
+                    continue;
+                }
+            }
+        }
+        if (!drop && opcode == static_cast<uint16_t>(spv::OpEntryPoint) && target < 0x00010400u) {
+            size_t interface_start = 3;
+            while (interface_start < word_count) {
+                const uint32_t name_word = code[offset + interface_start];
+                bool terminated = false;
+                for (int byte = 0; byte < 4; ++byte) {
+                    if (((name_word >> (8 * byte)) & 0xFFu) == 0) {
+                        terminated = true;
+                        break;
+                    }
+                }
+                ++interface_start;
+                if (terminated) break;
+            }
+            if (interface_start > word_count) interface_start = word_count;
+
+            std::vector<uint32_t> entry;
+            entry.reserve(word_count);
+            entry.push_back(0);  // header filled in below
+            entry.push_back(code[offset + 1]);  // execution model
+            entry.push_back(code[offset + 2]);  // entry point id
+            for (size_t i = 3; i < interface_start; ++i) {
+                entry.push_back(code[offset + i]);
+            }
+            for (size_t i = interface_start; i < word_count; ++i) {
+                const uint32_t interface_id = code[offset + i];
+                auto variable = variable_storage.find(interface_id);
+                if (variable != variable_storage.end() &&
+                    (variable->second == static_cast<uint32_t>(spv::StorageClassInput) ||
+                     variable->second == static_cast<uint32_t>(spv::StorageClassOutput))) {
+                    entry.push_back(interface_id);
+                } else {
+                    ++dropped_interfaces;
+                }
+            }
+            entry[0] = (static_cast<uint32_t>(entry.size()) << 16) |
+                       static_cast<uint32_t>(spv::OpEntryPoint);
+            output.insert(output.end(), entry.begin(), entry.end());
+            offset += word_count;
+            continue;
         }
 
         if (drop) {
             dropped_declaration = true;
         } else {
+            const size_t output_offset = output.size();
             output.insert(output.end(), code.begin() + offset, code.begin() + offset + word_count);
+            if (replacement_opcode != opcode) {
+                output[output_offset] = (word & 0xFFFF0000u) | replacement_opcode;
+                ++replaced_instructions;
+            }
         }
         offset += word_count;
     }
@@ -341,6 +601,14 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
         return false;
     }
 
+    if (replaced_instructions > 0) {
+        LOG_OPT_DEBUG("ShaderRewriter: replaced %zu SPIR-V 1.6 termination instruction(s) with OpKill",
+                      replaced_instructions);
+    }
+
+    if (output.size() > 3 && next_id + 1 > output[3]) {
+        output[3] = next_id + 1;
+    }
     output[1] = target;
 
     if (!validate(output, target)) {
@@ -351,6 +619,9 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
                 m_cache_bytes = 0;
             }
             m_cache[key] = CacheEntry{false, {}};
+        }
+        if ((m_new_entries.fetch_add(1, std::memory_order_relaxed) & 31u) == 31u) {
+            save_disk_cache();
         }
         const uint64_t rejected = m_rejected.fetch_add(1, std::memory_order_relaxed) + 1;
         LOG_OPT_DEBUG("ShaderRewriter: %s -> %s rejected by validator, keeping original",
@@ -374,6 +645,10 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
         m_cache[key] = CacheEntry{true, code};
         m_cache_bytes += rewritten_bytes;
     }
+    if (rewritten_bytes <= kMaxCacheBytes / 2 &&
+        (m_new_entries.fetch_add(1, std::memory_order_relaxed) & 31u) == 31u) {
+        save_disk_cache();
+    }
     const uint64_t rewritten = m_rewritten.fetch_add(1, std::memory_order_relaxed) + 1;
     LOG_OPT_DEBUG("ShaderRewriter: downgraded SPIR-V %s -> %s (declarations stripped: %d)",
                   spirv_version_string(current), spirv_version_string(target),
@@ -385,3 +660,5 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     }
     return true;
 }
+
+

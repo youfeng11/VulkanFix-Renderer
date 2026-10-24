@@ -150,6 +150,11 @@ private:
         VkDeviceSize bound_offsets[MAX_VERTEX_BINDINGS]{};
     };
 
+    // Hot path: avoid the state-map mutex for consecutive commands recorded on
+    // the same command buffer.
+    static thread_local VkCommandBuffer t_cached_cmd;
+    static thread_local CmdBufferState* t_cached_state;
+
     struct PhysDeviceInfo {
         bool native_has_ext = false;
         bool native_has_khr = false;
