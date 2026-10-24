@@ -35,7 +35,7 @@ fun getGitCommitCount(): Int {
     }
 }
 
-val pluginVersionName = "0.4.1"
+val pluginVersionName = "0.5.0"
 val pluginVersionCode = getGitCommitCount()
 extra["pluginVersionName"] = pluginVersionName
 extra["pluginVersionCode"] = pluginVersionCode
