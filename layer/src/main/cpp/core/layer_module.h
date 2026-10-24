@@ -169,6 +169,16 @@ public:
         const VkBuffer* pBuffers,
         const VkDeviceSize* pOffsets) {}
 
+    virtual void on_cmd_bind_vertex_buffers2(
+        VkCommandBuffer commandBuffer,
+        uint32_t firstBinding,
+        uint32_t bindingCount,
+        const VkBuffer* pBuffers,
+        const VkDeviceSize* pOffsets,
+        VkDeviceSize* pStrides) {}
+
+    virtual bool has_active_divisor_pipeline(VkCommandBuffer commandBuffer) { return false; }
+
     virtual bool on_cmd_draw(
         VkCommandBuffer commandBuffer,
         uint32_t vertexCount,

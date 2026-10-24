@@ -111,6 +111,17 @@ public:
         const VkBuffer* pBuffers,
         const VkDeviceSize* pOffsets) override;
 
+    // vkCmdBindVertexBuffers2 can override the pipeline's vertex stride. For
+    // divisor bindings the emulation relies on a zero stride plus per-sub-draw
+    // buffer offsets, so zero those dynamic strides before forwarding.
+    void on_cmd_bind_vertex_buffers2(
+        VkCommandBuffer commandBuffer,
+        uint32_t firstBinding,
+        uint32_t bindingCount,
+        const VkBuffer* pBuffers,
+        const VkDeviceSize* pOffsets,
+        VkDeviceSize* pStrides) override;
+
     // 8. Draw call emulation
     bool on_cmd_draw(
         VkCommandBuffer commandBuffer,
@@ -118,6 +129,11 @@ public:
         uint32_t instanceCount,
         uint32_t firstVertex,
         uint32_t firstInstance) override;
+
+    // True when the command buffer's currently bound pipeline needs divisor
+    // expansion. Indirect draws are not expanded, so the layer can warn about
+    // the unsupported combination instead of silently relying on stride 0.
+    bool has_active_divisor_pipeline(VkCommandBuffer commandBuffer) override;
 
     bool on_cmd_draw_indexed(
         VkCommandBuffer commandBuffer,
@@ -186,3 +202,4 @@ private:
 };
 
 #endif // VERTEX_ATTRIBUTE_DIVISOR_H
+

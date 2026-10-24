@@ -1,4 +1,4 @@
-#include "vertex_pipeline_stores_and_atomics.h"
+﻿#include "vertex_pipeline_stores_and_atomics.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
 #include "vk_pnext.h"
@@ -22,6 +22,7 @@ REGISTER_LAYER_MODULE(VertexPipelineStoresAndAtomicsModule);
 
 VertexPipelineStoresAndAtomicsModule::VertexPipelineStoresAndAtomicsModule() {
     LOGI("Initialized Vulkan vertexPipelineStoresAndAtomics emulation module");
+    LOGW("vertexPipelineStoresAndAtomics: capability supplement, no software emulation; relies on unadvertised hardware support");
 }
 
 bool VertexPipelineStoresAndAtomicsModule::is_phys_device_native(VkPhysicalDevice physDev) {
@@ -231,3 +232,4 @@ void VertexPipelineStoresAndAtomicsModule::on_destroy_device(VkDevice device) {
         m_cached_device.store(VK_NULL_HANDLE, std::memory_order_release);
     }
 }
+

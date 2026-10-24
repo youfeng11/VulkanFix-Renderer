@@ -1767,7 +1767,28 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
     }
 
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
-        m_divisor_mod->on_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+        if (pStrides != nullptr && bindingCount > 0) {
+            // The divisor emulation rewrites divisor bindings to stride 0 and
+            // applies the element offset per sub-draw. A dynamic stride from
+            // vkCmdBindVertexBuffers2 would override that, so let the module
+            // zero the strides for divisor bindings before forwarding.
+            std::vector<VkDeviceSize> adjusted(pStrides, pStrides + bindingCount);
+            m_divisor_mod->on_cmd_bind_vertex_buffers2(
+                commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, adjusted.data());
+            VkDevice device = get_device_for_cmd(commandBuffer);
+            const auto& dt = get_dispatch_table(device);
+            if (dt.CmdBindVertexBuffers2) {
+                dt.CmdBindVertexBuffers2(commandBuffer, firstBinding, bindingCount,
+                                         pBuffers, pOffsets, pSizes, adjusted.data());
+                return;
+            }
+            // No vkCmdBindVertexBuffers2 on the driver: the dynamic strides are
+            // dropped together with vkCmdBindVertexBuffers, matching the 1.0
+            // fallback semantics used below.
+        } else {
+            m_divisor_mod->on_cmd_bind_vertex_buffers(
+                commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+        }
     }
 
     VkDevice device = get_device_for_cmd(commandBuffer);
@@ -1849,6 +1870,14 @@ void LayerManager::dispatch_cmd_draw_indirect(
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
+    if (m_divisor_mod && m_divisor_mod->is_enabled() &&
+        m_divisor_mod->has_active_divisor_pipeline(commandBuffer)) {
+        static std::atomic<uint64_t> warned{0};
+        if (warned.fetch_add(1, std::memory_order_relaxed) == 0) {
+            LOGW("VertexAttributeDivisor: indirect draw uses a divisor>1 pipeline; indirect draws are not expanded, instanced attributes may be incorrect");
+        }
+    }
+
     if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
                          m_has_primary_table.load(std::memory_order_relaxed) &&
                          m_primary_multi_draw_bypass.load(std::memory_order_relaxed), 1)) {
@@ -1879,6 +1908,14 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect(
     uint32_t stride
 ) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
+
+    if (m_divisor_mod && m_divisor_mod->is_enabled() &&
+        m_divisor_mod->has_active_divisor_pipeline(commandBuffer)) {
+        static std::atomic<uint64_t> warned{0};
+        if (warned.fetch_add(1, std::memory_order_relaxed) == 0) {
+            LOGW("VertexAttributeDivisor: indirect draw uses a divisor>1 pipeline; indirect draws are not expanded, instanced attributes may be incorrect");
+        }
+    }
 
     if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
                          m_has_primary_table.load(std::memory_order_relaxed) &&
@@ -3558,6 +3595,10 @@ VkResult LayerManager::dispatch_queue_present(
 ) {
     VkResult res = VK_SUCCESS;
     RenderDocManager::get().on_pre_present(queue, pPresentInfo);
+    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
+        VkResult stats_result = VK_SUCCESS;
+        m_push_desc_mod->on_queue_present(queue, pPresentInfo, stats_result);
+    }
     if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
         if (m_swapchain_mod->on_queue_present(queue, pPresentInfo, res)) {
             RenderDocManager::get().on_post_present(queue, pPresentInfo);
@@ -3827,6 +3868,7 @@ VkResult LayerManager::dispatch_set_debug_utils_object_tag(
     }
     return VK_SUCCESS;
 }
+
 
 
 

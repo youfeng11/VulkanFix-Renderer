@@ -328,6 +328,13 @@ bool Synchronization2Module::on_cmd_set_event2(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
+    static std::atomic<uint64_t> emulated_set_event2{0};
+    const uint64_t set_index = emulated_set_event2.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (set_index == 1 || (set_index & 255u) == 0) {
+        LOGI("synchronization2: emulated %llu vkCmdSetEvent2 call(s)",
+             static_cast<unsigned long long>(set_index));
+    }
+
     VkPipelineStageFlags combinedSrc = 0;
     if (pDependencyInfo) {
         for (uint32_t i = 0; i < pDependencyInfo->memoryBarrierCount; ++i) {
@@ -359,6 +366,13 @@ bool Synchronization2Module::on_cmd_reset_event2(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
+    static std::atomic<uint64_t> emulated_reset_event2{0};
+    const uint64_t reset_index = emulated_reset_event2.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (reset_index == 1 || (reset_index & 255u) == 0) {
+        LOGI("synchronization2: emulated %llu vkCmdResetEvent2 call(s)",
+             static_cast<unsigned long long>(reset_index));
+    }
+
     VkPipelineStageFlags stage = stage_flags2_to_stage_flags(stageMask, false);
     if (stage == 0) {
         stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -381,6 +395,13 @@ bool Synchronization2Module::on_cmd_wait_events2(
     if (is_device_native(device)) return false;
 
     if (eventCount == 0 || !pEvents) return true;
+
+    static std::atomic<uint64_t> emulated_wait_events2{0};
+    const uint64_t wait_index = emulated_wait_events2.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (wait_index == 1 || (wait_index & 255u) == 0) {
+        LOGI("synchronization2: emulated %llu vkCmdWaitEvents2 call(s)",
+             static_cast<unsigned long long>(wait_index));
+    }
 
     VkPipelineStageFlags combinedSrc = 0;
     VkPipelineStageFlags combinedDst = 0;
@@ -644,6 +665,13 @@ bool Synchronization2Module::on_cmd_write_timestamp2(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
+    static std::atomic<uint64_t> emulated_write_timestamp2{0};
+    const uint64_t ts_index = emulated_write_timestamp2.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (ts_index == 1 || (ts_index & 255u) == 0) {
+        LOGI("synchronization2: emulated %llu vkCmdWriteTimestamp2 call(s)",
+             static_cast<unsigned long long>(ts_index));
+    }
+
     VkPipelineStageFlags flags = stage_flags2_to_stage_flags(stage, false);
     VkPipelineStageFlagBits singleStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     if (flags & VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) singleStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
@@ -769,5 +797,11 @@ bool Synchronization2Module::on_queue_submit2(
     }
 
     outResult = LayerManager::get().dispatch_queue_submit(queue, (uint32_t)v1Submits.size(), v1Submits.data(), fence);
+    static std::atomic<uint64_t> emulated_submits{0};
+    const uint64_t submit_index = emulated_submits.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (submit_index == 1 || (submit_index & 255u) == 0) {
+        LOGI("synchronization2: emulated %llu vkQueueSubmit2 call(s)",
+             static_cast<unsigned long long>(submit_index));
+    }
     return true;
 }

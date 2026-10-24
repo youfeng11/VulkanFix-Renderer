@@ -1,4 +1,4 @@
-#include "vertex_attribute_divisor.h"
+﻿#include "vertex_attribute_divisor.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
 #include "vk_pnext.h"
@@ -655,6 +655,35 @@ void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers(
     }
 }
 
+void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers2(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstBinding,
+    uint32_t bindingCount,
+    const VkBuffer* pBuffers,
+    const VkDeviceSize* pOffsets,
+    VkDeviceSize* pStrides
+) {
+    on_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+    if (!pStrides || bindingCount == 0) return;
+
+    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
+    if (!state || !state->active_divisor_info ||
+        !state->active_divisor_info->has_divisor_greater_than_one) {
+        return;
+    }
+    for (const BindingDivisorInfo& binding : state->active_divisor_info->divisors) {
+        if (binding.divisor <= 1) continue;
+        if (binding.binding < firstBinding || binding.binding >= firstBinding + bindingCount) continue;
+        pStrides[binding.binding - firstBinding] = 0;
+        LOG_OPT_DEBUG("VertexAttributeDivisor: zeroed dynamic stride for divisor binding %u", binding.binding);
+    }
+}
+
+bool VertexAttributeDivisorModule::has_active_divisor_pipeline(VkCommandBuffer commandBuffer) {
+    if (!m_has_divisor_pipelines.load(std::memory_order_relaxed)) return false;
+    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
+    return state && state->active_divisor_info && state->active_divisor_info->has_divisor_greater_than_one;
+}
 bool VertexAttributeDivisorModule::on_cmd_draw(
     VkCommandBuffer commandBuffer,
     uint32_t vertexCount,
@@ -793,4 +822,5 @@ bool VertexAttributeDivisorModule::on_cmd_draw_indexed(
     vku::cmd_end_label(commandBuffer);
     return true;
 }
+
 

@@ -1,4 +1,4 @@
-#include "push_descriptor.h"
+﻿#include "push_descriptor.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
 #include "vk_pnext.h"
@@ -520,6 +520,14 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set(
     VkDevice device = get_device_for_cmd(commandBuffer);
     if (device == VK_NULL_HANDLE || is_device_native(device)) return false;
 
+    static std::atomic<uint64_t> emulated_pushes{0};
+    const uint64_t push_index = emulated_pushes.fetch_add(1, std::memory_order_relaxed) + 1;
+    m_pushes_since_present.fetch_add(1, std::memory_order_relaxed);
+    if (push_index == 1 || (push_index & 255u) == 0) {
+        LOGI("push descriptor: emulated %llu vkCmdPushDescriptorSet call(s)",
+             static_cast<unsigned long long>(push_index));
+    }
+
     thread_local VkPipelineLayout s_last_layout = VK_NULL_HANDLE;
     thread_local uint32_t s_last_set = 0;
     thread_local VkDescriptorSetLayout s_last_set_layout = VK_NULL_HANDLE;
@@ -594,6 +602,14 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set_with_template(
     VkDevice device = get_device_for_cmd(commandBuffer);
     if (device == VK_NULL_HANDLE || is_device_native(device)) return false;
 
+    static std::atomic<uint64_t> emulated_template_pushes{0};
+    const uint64_t push_index = emulated_template_pushes.fetch_add(1, std::memory_order_relaxed) + 1;
+    m_pushes_since_present.fetch_add(1, std::memory_order_relaxed);
+    if (push_index == 1 || (push_index & 255u) == 0) {
+        LOGI("push descriptor: emulated %llu vkCmdPushDescriptorSetWithTemplate call(s)",
+             static_cast<unsigned long long>(push_index));
+    }
+
     thread_local VkPipelineLayout s_last_layout = VK_NULL_HANDLE;
     thread_local uint32_t s_last_set = 0;
     thread_local VkDescriptorSetLayout s_last_set_layout = VK_NULL_HANDLE;
@@ -644,4 +660,24 @@ bool PushDescriptorModule::on_cmd_push_descriptor_set_with_template(
 
     LOG_OPT_DEBUG("PushDescriptor: emulated vkCmdPushDescriptorSetWithTemplateKHR for cmd %p set %u", commandBuffer, set);
     return true;
+}
+
+bool PushDescriptorModule::on_queue_present(
+    VkQueue queue,
+    const VkPresentInfoKHR* pPresentInfo,
+    VkResult& outResult
+) {
+    (void)queue;
+    (void)pPresentInfo;
+    (void)outResult;
+    const uint64_t pushes = m_pushes_since_present.exchange(0, std::memory_order_relaxed);
+    const uint64_t frame = m_present_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t total = m_present_pushes_total.fetch_add(pushes, std::memory_order_relaxed) + pushes;
+    if (frame == 60 || frame == 300 || (frame % 600u) == 0) {
+        LOGI("push descriptor: %llu frames, %llu pushes total, %llu avg pushes/frame",
+             static_cast<unsigned long long>(frame),
+             static_cast<unsigned long long>(total),
+             static_cast<unsigned long long>(total / frame));
+    }
+    return false;
 }

@@ -117,6 +117,11 @@ public:
 
     bool is_device_native(VkDevice device) override;
 
+    bool on_queue_present(
+        VkQueue queue,
+        const VkPresentInfoKHR* pPresentInfo,
+        VkResult& outResult) override;
+
 private:
     bool is_phys_device_native(VkPhysicalDevice physDev);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
@@ -153,6 +158,12 @@ private:
     std::unordered_set<uint64_t> m_push_layouts;
     std::unordered_map<uint64_t, std::vector<VkDescriptorSetLayout>> m_pipeline_layouts;
     std::unordered_map<uint64_t, CmdPushState> m_cmd_states;
+
+    // Per-present statistics: pushes between presents give the real per-frame
+    // cost of the push-descriptor emulation (as opposed to the one-time load).
+    std::atomic<uint64_t> m_pushes_since_present{0};
+    std::atomic<uint64_t> m_present_frames{0};
+    std::atomic<uint64_t> m_present_pushes_total{0};
 };
 
 #endif // PUSH_DESCRIPTOR_H

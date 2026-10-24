@@ -1,4 +1,4 @@
-#include "modules/vulkan_1_2/indirect_count_shader.h"
+﻿#include "modules/vulkan_1_2/indirect_count_shader.h"
 
 #include <spirv-tools/libspirv.h>
 #include <spirv-tools/libspirv.hpp>
@@ -460,6 +460,15 @@ int main() {
         LOGI("device extension: %s (v%u)", extension.extensionName, extension.specVersion);
     }
 
+    VkPhysicalDeviceFeatures core_features{};
+    vkGetPhysicalDeviceFeatures(ctx.physical, &core_features);
+    VkPhysicalDeviceProperties core_props{};
+    vkGetPhysicalDeviceProperties(ctx.physical, &core_props);
+    LOGI("core features: fillModeNonSolid=%d vertexPipelineStoresAndAtomics=%d",
+         core_features.fillModeNonSolid, core_features.vertexPipelineStoresAndAtomics);
+    LOGI("limits: maxPerStageDescriptorStorageBuffers=%u maxPerStageDescriptorStorageImages=%u",
+         core_props.limits.maxPerStageDescriptorStorageBuffers,
+         core_props.limits.maxPerStageDescriptorStorageImages);
     VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing{};
     descriptor_indexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
     VkPhysicalDeviceBufferDeviceAddressFeatures bda{};
@@ -502,3 +511,4 @@ int main() {
          draw_ok ? "PASS" : "FAIL", indexed_ok ? "PASS" : "FAIL", padded_ok ? "PASS" : "FAIL");
     return (draw_ok && indexed_ok && padded_ok) ? 0 : 1;
 }
+

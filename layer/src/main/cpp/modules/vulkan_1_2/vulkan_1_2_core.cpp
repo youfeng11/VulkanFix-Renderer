@@ -1,4 +1,7 @@
-﻿#include "vulkan_1_2_core.h"
+#include "vulkan_1_2_core.h"
+
+#include <mutex>
+#include <unordered_map>
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
@@ -333,16 +336,27 @@ namespace {
 
 bool driver_has_extension(VkPhysicalDevice physicalDevice, const char* name) {
     if (physicalDevice == VK_NULL_HANDLE || name == nullptr) return false;
-    auto enumerate = (PFN_vkEnumerateDeviceExtensionProperties)
-        get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
-    if (!enumerate) return false;
-    uint32_t count = 0;
-    if (enumerate(physicalDevice, nullptr, &count, nullptr) != VK_SUCCESS) return false;
-    std::vector<VkExtensionProperties> extensions(count);
-    if (count > 0 && enumerate(physicalDevice, nullptr, &count, extensions.data()) != VK_SUCCESS) {
-        return false;
+    // The feature query probes a dozen extensions in a row. Enumerating the
+    // driver extension list for each one is wasteful; cache it per physical
+    // device (the list is immutable for the lifetime of the process).
+    static std::mutex cache_mutex;
+    static std::unordered_map<uint64_t, std::vector<VkExtensionProperties>> cache;
+    const uint64_t key = (uint64_t)(uintptr_t)physicalDevice;
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        auto enumerate = (PFN_vkEnumerateDeviceExtensionProperties)
+            get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+        if (!enumerate) return false;
+        uint32_t count = 0;
+        if (enumerate(physicalDevice, nullptr, &count, nullptr) != VK_SUCCESS) return false;
+        std::vector<VkExtensionProperties> extensions(count);
+        if (count > 0 && enumerate(physicalDevice, nullptr, &count, extensions.data()) != VK_SUCCESS) {
+            return false;
+        }
+        it = cache.emplace(key, std::move(extensions)).first;
     }
-    return vku::has_extension(extensions, name);
+    return vku::has_extension(it->second, name);
 }
 
 void add_extension(std::vector<const char*>& extensions, const char* name) {
@@ -793,6 +807,7 @@ void Vulkan12CoreModule::on_destroy_device(VkDevice device) {
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
 }
+
 
 
 
