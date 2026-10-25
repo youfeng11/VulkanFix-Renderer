@@ -110,196 +110,19 @@ void Vulkan11CoreModule::on_get_properties(
     (void)physicalDevice;
 }
 
-struct Properties11UnlinkData {
-    void* v11_props = nullptr;
-    void* id_props = nullptr;
-    void* subgroup_props = nullptr;
-    void* point_clip_props = nullptr;
-    void* protected_props = nullptr;
-};
-
-void Vulkan11CoreModule::on_pre_get_properties2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceProperties2* pProperties,
-    void*& pUserData
-) {
-    pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pProperties) return;
-
-    auto* unlinks = new Properties11UnlinkData();
-    unlinks->v11_props = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES);
-    unlinks->id_props = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES);
-    unlinks->subgroup_props = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES);
-    unlinks->point_clip_props = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES);
-    unlinks->protected_props = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES);
-    pUserData = unlinks;
+// Native properties and aggregate conversion are owned by PromotedPropertyQuery.
+void Vulkan11CoreModule::on_pre_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2*, void*& data) { data = nullptr; }
+void Vulkan11CoreModule::on_post_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2* properties, void*) {
+    if (properties && claim_vulkan_1_2() && properties->properties.apiVersion < VK_API_VERSION_1_1)
+        properties->properties.apiVersion = VK_API_VERSION_1_1;
 }
 
-void Vulkan11CoreModule::on_post_get_properties2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceProperties2* pProperties,
-    void* pUserData
-) {
-    if (!pProperties) return;
-    if (claim_vulkan_1_2() && pProperties->properties.apiVersion < VK_API_VERSION_1_1) {
-        pProperties->properties.apiVersion = VK_API_VERSION_1_1;
-    }
-
-    if (pUserData) {
-        auto* unlinks = reinterpret_cast<Properties11UnlinkData*>(pUserData);
-
-        if (unlinks->v11_props) {
-            auto* p = reinterpret_cast<VkPhysicalDeviceVulkan11Properties*>(unlinks->v11_props);
-            memset(p->deviceUUID, 0x11, sizeof(p->deviceUUID));
-            memset(p->driverUUID, 0x11, sizeof(p->driverUUID));
-            memset(p->deviceLUID, 0, sizeof(p->deviceLUID));
-            p->deviceNodeMask = 0;
-            p->deviceLUIDValid = VK_FALSE;
-            p->subgroupSize = 32;
-            p->subgroupSupportedStages = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
-            p->subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
-            p->subgroupQuadOperationsInAllStages = VK_FALSE;
-            p->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
-            p->maxMultiviewViewCount = 6;
-            p->maxMultiviewInstanceIndex = 134217727;
-            p->protectedNoFault = VK_FALSE;
-            p->maxPerSetDescriptors = 1024;
-            p->maxMemoryAllocationSize = 0x80000000ULL;
-            vku::relink_pnext(pProperties->pNext, unlinks->v11_props);
-        }
-
-        if (unlinks->id_props) {
-            auto* p = reinterpret_cast<VkPhysicalDeviceIDProperties*>(unlinks->id_props);
-            memset(p->deviceUUID, 0x11, sizeof(p->deviceUUID));
-            memset(p->driverUUID, 0x11, sizeof(p->driverUUID));
-            memset(p->deviceLUID, 0, sizeof(p->deviceLUID));
-            p->deviceNodeMask = 0;
-            p->deviceLUIDValid = VK_FALSE;
-            vku::relink_pnext(pProperties->pNext, unlinks->id_props);
-        }
-
-        if (unlinks->subgroup_props) {
-            auto* p = reinterpret_cast<VkPhysicalDeviceSubgroupProperties*>(unlinks->subgroup_props);
-            p->subgroupSize = 32;
-            p->supportedStages = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
-            p->supportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
-            p->quadOperationsInAllStages = VK_FALSE;
-            vku::relink_pnext(pProperties->pNext, unlinks->subgroup_props);
-        }
-
-        if (unlinks->point_clip_props) {
-            auto* p = reinterpret_cast<VkPhysicalDevicePointClippingProperties*>(unlinks->point_clip_props);
-            p->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
-            vku::relink_pnext(pProperties->pNext, unlinks->point_clip_props);
-        }
-
-        if (unlinks->protected_props) {
-            auto* p = reinterpret_cast<VkPhysicalDeviceProtectedMemoryProperties*>(unlinks->protected_props);
-            p->protectedNoFault = VK_FALSE;
-            vku::relink_pnext(pProperties->pNext, unlinks->protected_props);
-        }
-
-        delete unlinks;
-    }
-}
-
-void Vulkan11CoreModule::on_get_features(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceFeatures* pFeatures
-) {
-    if (!pFeatures || is_phys_device_native(physicalDevice)) return;
-    pFeatures->shaderClipDistance = VK_TRUE;
-    pFeatures->shaderCullDistance = VK_TRUE;
-}
-
-struct Features11UnlinkData {
-    void* v11_features = nullptr;
-    void* storage_16bit_features = nullptr;
-    void* var_ptrs_features = nullptr;
-    void* protected_features = nullptr;
-    void* sampler_ycbcr_features = nullptr;
-    void* shader_draw_params_features = nullptr;
-};
-
-void Vulkan11CoreModule::on_pre_get_features2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceFeatures2* pFeatures,
-    void*& pUserData
-) {
-    pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pFeatures) return;
-
-    auto* unlinks = new Features11UnlinkData();
-    unlinks->v11_features = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
-    unlinks->storage_16bit_features = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES);
-    unlinks->var_ptrs_features = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES);
-    unlinks->protected_features = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES);
-    unlinks->sampler_ycbcr_features = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES);
-    unlinks->shader_draw_params_features = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES);
-    pUserData = unlinks;
-}
-
-void Vulkan11CoreModule::on_post_get_features2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceFeatures2* pFeatures,
-    void* pUserData
-) {
-    if (!pFeatures || !pUserData) return;
-    auto* unlinks = reinterpret_cast<Features11UnlinkData*>(pUserData);
-
-    if (unlinks->v11_features) {
-        auto* f = reinterpret_cast<VkPhysicalDeviceVulkan11Features*>(unlinks->v11_features);
-        f->storageBuffer16BitAccess = VK_FALSE;
-        f->uniformAndStorageBuffer16BitAccess = VK_FALSE;
-        f->storagePushConstant16 = VK_FALSE;
-        f->storageInputOutput16 = VK_FALSE;
-        f->multiview = VK_TRUE;
-        f->multiviewGeometryShader = VK_FALSE;
-        f->multiviewTessellationShader = VK_FALSE;
-        f->variablePointersStorageBuffer = VK_TRUE;
-        f->variablePointers = VK_FALSE;
-        f->protectedMemory = VK_FALSE;
-        f->samplerYcbcrConversion = VK_FALSE;
-        f->shaderDrawParameters = VK_TRUE;
-        vku::relink_pnext(pFeatures->pNext, unlinks->v11_features);
-    }
-
-    if (unlinks->storage_16bit_features) {
-        auto* f = reinterpret_cast<VkPhysicalDevice16BitStorageFeatures*>(unlinks->storage_16bit_features);
-        f->storageBuffer16BitAccess = VK_FALSE;
-        f->uniformAndStorageBuffer16BitAccess = VK_FALSE;
-        f->storagePushConstant16 = VK_FALSE;
-        f->storageInputOutput16 = VK_FALSE;
-        vku::relink_pnext(pFeatures->pNext, unlinks->storage_16bit_features);
-    }
-
-    if (unlinks->var_ptrs_features) {
-        auto* f = reinterpret_cast<VkPhysicalDeviceVariablePointersFeatures*>(unlinks->var_ptrs_features);
-        f->variablePointersStorageBuffer = VK_TRUE;
-        f->variablePointers = VK_FALSE;
-        vku::relink_pnext(pFeatures->pNext, unlinks->var_ptrs_features);
-    }
-
-    if (unlinks->protected_features) {
-        auto* f = reinterpret_cast<VkPhysicalDeviceProtectedMemoryFeatures*>(unlinks->protected_features);
-        f->protectedMemory = VK_FALSE;
-        vku::relink_pnext(pFeatures->pNext, unlinks->protected_features);
-    }
-
-    if (unlinks->sampler_ycbcr_features) {
-        auto* f = reinterpret_cast<VkPhysicalDeviceSamplerYcbcrConversionFeatures*>(unlinks->sampler_ycbcr_features);
-        f->samplerYcbcrConversion = VK_FALSE;
-        vku::relink_pnext(pFeatures->pNext, unlinks->sampler_ycbcr_features);
-    }
-
-    if (unlinks->shader_draw_params_features) {
-        auto* f = reinterpret_cast<VkPhysicalDeviceShaderDrawParametersFeatures*>(unlinks->shader_draw_params_features);
-        f->shaderDrawParameters = VK_TRUE;
-        vku::relink_pnext(pFeatures->pNext, unlinks->shader_draw_params_features);
-    }
-
-    delete unlinks;
-}
+// Aggregate feature queries and device-input ownership are centralized in
+// PromotedFeatureQuery / PromotedDeviceFeatures. Optional bits come from the
+// actual individual feature structures, never from an extension name.
+void Vulkan11CoreModule::on_get_features(VkPhysicalDevice, VkPhysicalDeviceFeatures*) {}
+void Vulkan11CoreModule::on_pre_get_features2(VkPhysicalDevice, VkPhysicalDeviceFeatures2*, void*& data) { data = nullptr; }
+void Vulkan11CoreModule::on_post_get_features2(VkPhysicalDevice, VkPhysicalDeviceFeatures2*, void*) {}
 
 void Vulkan11CoreModule::on_pre_create_device(
     VkPhysicalDevice physicalDevice,
@@ -341,14 +164,9 @@ void Vulkan11CoreModule::on_pre_create_device(
         }
     }
 
-    auto* unlinks = new Features11UnlinkData();
-    unlinks->v11_features = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
-    unlinks->storage_16bit_features = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES);
-    unlinks->var_ptrs_features = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES);
-    unlinks->protected_features = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES);
-    unlinks->sampler_ycbcr_features = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES);
-    unlinks->shader_draw_params_features = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES);
-    pUserData = unlinks;
+    // Native extension feature structures are already expanded and validated.
+    // Do not strip them: doing so disables the feature the application enabled.
+
 }
 
 void Vulkan11CoreModule::on_post_create_device(
@@ -364,9 +182,7 @@ void Vulkan11CoreModule::on_post_create_device(
         LOGI("Device %p created: Vulkan 1.1 core native=%d", device, native);
     }
 
-    if (pUserData) {
-        delete reinterpret_cast<Features11UnlinkData*>(pUserData);
-    }
+
 }
 
 void Vulkan11CoreModule::on_destroy_device(VkDevice device) {

@@ -2,6 +2,7 @@
 #define LAYER_MANAGER_H
 
 #include "layer_module.h"
+#include "subgroup_broadcast.h"
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -162,6 +163,10 @@ public:
     VkPhysicalDevice get_physical_device_for(VkDevice device);
 
     // Intercepted dispatchers
+    VkResult command_recording_error(VkCommandBuffer cmd);
+    void track_descriptor_binding(VkCommandBuffer cmd, VkPipelineBindPoint point,
+        VkPipelineLayout layout, uint32_t first, uint32_t count);
+    void track_command_pool_reset(VkDevice device, VkCommandPool pool, bool destroyed);
     VkResult dispatch_enumerate_device_extensions(
         VkPhysicalDevice physicalDevice,
         const char* pLayerName,
@@ -241,6 +246,7 @@ public:
     // (1.0 -> SPIR-V 1.0, 1.1 -> 1.3, 1.2 -> 1.5, 1.3 -> 1.6). 0 when unknown.
     void set_device_max_spirv_version(VkDevice device, uint32_t version);
     uint32_t get_device_max_spirv_version(VkDevice device);
+    vkfix::SubgroupBroadcastSupport get_device_subgroup_broadcast(VkDevice device);
 
     VkResult dispatch_create_descriptor_set_layout(
         VkDevice device,
@@ -490,45 +496,29 @@ public:
         if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
             return m_primary_device.load(std::memory_order_relaxed);
         }
-        thread_local VkCommandBuffer t_last_cmd = VK_NULL_HANDLE;
-        thread_local VkDevice t_last_dev = VK_NULL_HANDLE;
-        if (__builtin_expect(cmd == t_last_cmd && t_last_dev != VK_NULL_HANDLE, 1)) {
-            return t_last_dev;
-        }
-        VkDevice dev = get_device_for_cmd_slow(cmd);
-        t_last_cmd = cmd;
-        t_last_dev = dev;
-        return dev;
+        return get_device_for_cmd_slow(cmd);
     }
 
     inline VkDevice get_device_for_queue(VkQueue queue) {
         if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
             return m_primary_device.load(std::memory_order_relaxed);
         }
-        thread_local VkQueue t_last_queue = VK_NULL_HANDLE;
-        thread_local VkDevice t_last_queue_dev = VK_NULL_HANDLE;
-        if (__builtin_expect(queue == t_last_queue && t_last_queue_dev != VK_NULL_HANDLE, 1)) {
-            return t_last_queue_dev;
-        }
-        VkDevice dev = get_device_for_queue_slow(queue);
-        t_last_queue = queue;
-        t_last_queue_dev = dev;
-        return dev;
+        return get_device_for_queue_slow(queue);
     }
 
     inline const DeviceDispatchTable& get_dispatch_table(VkDevice device) {
-        if (__builtin_expect(device == m_primary_device.load(std::memory_order_relaxed) && m_has_primary_table.load(std::memory_order_relaxed), 1)) {
-            return m_primary_table;
+        // Retain an immutable snapshot when vkDestroyDevice erases the map entry.
+        // A generation also invalidates another thread's cache on handle reuse.
+        thread_local VkDevice cached_device = VK_NULL_HANDLE;
+        thread_local uint64_t cached_generation = 0;
+        thread_local std::shared_ptr<const DeviceDispatchTable> cached_table;
+        const uint64_t generation = m_table_generation.load(std::memory_order_acquire);
+        if (__builtin_expect(device != cached_device || cached_generation != generation, 0)) {
+            cached_table = get_dispatch_table_slow(device);
+            cached_device = device;
+            cached_generation = generation;
         }
-        thread_local VkDevice t_last_table_dev = VK_NULL_HANDLE;
-        thread_local const DeviceDispatchTable* t_last_table_ptr = nullptr;
-        if (__builtin_expect(device == t_last_table_dev && t_last_table_ptr != nullptr, 1)) {
-            return *t_last_table_ptr;
-        }
-        const DeviceDispatchTable& dt = get_dispatch_table_slow(device);
-        t_last_table_dev = device;
-        t_last_table_ptr = &dt;
-        return dt;
+        return *cached_table;
     }
 
     void init_device_dispatch_table(VkDevice device);
@@ -536,7 +526,7 @@ public:
 
     VkDevice get_device_for_cmd_slow(VkCommandBuffer cmd);
     VkDevice get_device_for_queue_slow(VkQueue queue);
-    const DeviceDispatchTable& get_dispatch_table_slow(VkDevice device);
+    std::shared_ptr<const DeviceDispatchTable> get_dispatch_table_slow(VkDevice device);
 
     void dispatch_get_device_queue(
         VkDevice device,
@@ -603,7 +593,7 @@ public:
 
     VkResult dispatch_queue_wait_idle(VkQueue queue);
     VkResult dispatch_device_wait_idle(VkDevice device);
-    bool is_timeline_semaphore(VkSemaphore semaphore);
+    bool is_timeline_semaphore(VkDevice device, VkSemaphore semaphore);
 
     VkResult dispatch_create_semaphore(
         VkDevice device,
@@ -889,15 +879,16 @@ private:
 
     std::atomic<uint32_t> m_device_count{0};
     std::atomic<VkDevice> m_primary_device{VK_NULL_HANDLE};
-    DeviceDispatchTable m_primary_table{};
     std::atomic<bool> m_has_primary_table{false};
 
+    std::atomic<uint64_t> m_table_generation{1};
     std::shared_mutex m_table_rw_mutex;
-    std::unordered_map<uint64_t, DeviceDispatchTable> m_device_tables;
+    std::unordered_map<uint64_t, std::shared_ptr<const DeviceDispatchTable>> m_device_tables;
 
     // Per-device SPIR-V version ceiling, used by the shader rewriter.
     std::shared_mutex m_device_info_mutex;
     std::unordered_map<uint64_t, uint32_t> m_device_spirv_versions;
+    std::unordered_map<uint64_t, vkfix::SubgroupBroadcastSupport> m_device_subgroup_broadcast;
     std::atomic<uint32_t> m_primary_spirv_version{0};
 
     IVulkanLayerModule* m_divisor_mod = nullptr;

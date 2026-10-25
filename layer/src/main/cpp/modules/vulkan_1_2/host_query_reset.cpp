@@ -1,5 +1,6 @@
 #include "host_query_reset.h"
 #include "layer_manager.h"
+#include "timeline_scheduler.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
 
@@ -166,19 +167,24 @@ bool HostQueryResetModule::on_reset_query_pool(
             submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &ctx.cmd;
+            auto submit_reset = [&](VkFence fence) {
+                VkResult result=VK_SUCCESS;
+                if(vkfix::TimelineScheduler::get().submit_internal(ctx.queue,1,&submitInfo,fence,result))return result;
+                return real_qs(ctx.queue,1,&submitInfo,fence);
+            };
 
             if (ctx.fence != VK_NULL_HANDLE && real_rf && real_wf) {
                 // Wait only for the reset submission instead of the whole queue
                 // (vkQueueWaitIdle also waits for in-flight frames).
                 real_rf(device, 1, &ctx.fence);
-                if (real_qs(ctx.queue, 1, &submitInfo, ctx.fence) == VK_SUCCESS) {
+                if (submit_reset(ctx.fence) == VK_SUCCESS) {
                     real_wf(device, 1, &ctx.fence, VK_TRUE, UINT64_MAX);
                 } else if (real_qwi) {
-                    real_qwi(ctx.queue);
+                    LayerManager::get().dispatch_queue_wait_idle(ctx.queue);
                 }
             } else {
-                real_qs(ctx.queue, 1, &submitInfo, VK_NULL_HANDLE);
-                if (real_qwi) real_qwi(ctx.queue);
+                submit_reset(VK_NULL_HANDLE);
+                if (real_qwi) LayerManager::get().dispatch_queue_wait_idle(ctx.queue);
             }
         }
     }

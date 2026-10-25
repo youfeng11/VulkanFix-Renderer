@@ -57,29 +57,9 @@ void DeviceGroupModule::on_pre_create_device_custom(
     }
 }
 
-void DeviceGroupModule::on_pre_get_properties2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceProperties2* pProperties,
-    void*& pUserData
-) {
-    pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pProperties) return;
-
-    pUserData = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES);
-}
-
-void DeviceGroupModule::on_post_get_properties2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceProperties2* pProperties,
-    void* pUserData
-) {
-    if (!pProperties || !pUserData) return;
-
-    auto* p = reinterpret_cast<VkPhysicalDeviceMultiviewProperties*>(pUserData);
-    p->maxMultiviewViewCount = 6;
-    p->maxMultiviewInstanceIndex = 134217727;
-    vku::relink_pnext(pProperties->pNext, pUserData);
-}
+// The promotion bridge queries real limits; no synthetic multiview or allocation limits.
+void DeviceGroupModule::on_pre_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2*, void*& data) { data = nullptr; }
+void DeviceGroupModule::on_post_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2*, void*) {}
 
 void DeviceGroupModule::on_pre_get_features2(
     VkPhysicalDevice physicalDevice,

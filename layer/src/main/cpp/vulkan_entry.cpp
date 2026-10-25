@@ -3,10 +3,17 @@
 #include "layer_manager.h"
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
+#include "shader/subgroup_broadcast_lowering.h"
 #include "imageless_framebuffer_manager.h"
 #include "layout_compat.h"
 #include "vk_pnext.h"
+#include "core/vertex_store_emulator.h"
 #include "core/tbdr_barrier_optimizer.h"
+#include "core/timeline_scheduler.h"
+#include "core/extension_dependencies.h"
+#include "core/native_instance_state.h"
+#include <chrono>
+#include <thread>
 #include <string.h>
 #include <string>
 #include <vector>
@@ -74,30 +81,33 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateInstance(
     PFN_vkEnumerateInstanceExtensionProperties real_enum =
         (PFN_vkEnumerateInstanceExtensionProperties) get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties");
     std::vector<std::string> nativeExts;
-    if (real_enum) {
-        uint32_t count = 0;
-        if (real_enum(NULL, &count, NULL) == VK_SUCCESS && count > 0) {
-            std::vector<VkExtensionProperties> ep(count);
-            if (real_enum(NULL, &count, ep.data()) == VK_SUCCESS) {
-                for (const auto& e : ep) nativeExts.push_back(e.extensionName);
-            }
+    auto gatherInstanceExtensions = [&](const char *layer) {
+        if (!real_enum) return VK_ERROR_INITIALIZATION_FAILED;
+        for (unsigned attempt = 0; attempt < 8; ++attempt) {
+            uint32_t count = 0;
+            auto status = real_enum(layer, &count, nullptr);
+            if (status != VK_SUCCESS) return status;
+            std::vector<VkExtensionProperties> values(count);
+            status = count ? real_enum(layer, &count, values.data()) : VK_SUCCESS;
+            if (status == VK_INCOMPLETE) continue;
+            if (status != VK_SUCCESS) return status;
+            for (uint32_t i = 0; i < count; ++i) nativeExts.emplace_back(values[i].extensionName);
+            return VK_SUCCESS;
         }
-    }
+        return VK_ERROR_INITIALIZATION_FAILED;
+    };
+    VkResult enumerationResult = gatherInstanceExtensions(nullptr);
 
     // Also include extensions provided by enabled layers (e.g. RenderDoc / validation layers)
-    if (pCreateInfo->enabledLayerCount > 0 && pCreateInfo->ppEnabledLayerNames && real_enum) {
-        for (uint32_t l = 0; l < pCreateInfo->enabledLayerCount; ++l) {
+    if (pCreateInfo->enabledLayerCount > 0 && pCreateInfo->ppEnabledLayerNames) {
+        for (uint32_t l = 0; enumerationResult == VK_SUCCESS && l < pCreateInfo->enabledLayerCount; ++l) {
             const char* layerName = pCreateInfo->ppEnabledLayerNames[l];
-            if (layerName) {
-                uint32_t lCount = 0;
-                if (real_enum(layerName, &lCount, NULL) == VK_SUCCESS && lCount > 0) {
-                    std::vector<VkExtensionProperties> lep(lCount);
-                    if (real_enum(layerName, &lCount, lep.data()) == VK_SUCCESS) {
-                        for (const auto& e : lep) nativeExts.push_back(e.extensionName);
-                    }
-                }
-            }
+            if (layerName) enumerationResult = gatherInstanceExtensions(layerName);
         }
+    }
+    if (enumerationResult != VK_SUCCESS) {
+        if (pInstance) *pInstance = VK_NULL_HANDLE;
+        return enumerationResult;
     }
 
     // Always preserve debug utils and debug report if RenderDoc is active or requested
@@ -131,7 +141,9 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateInstance(
     VkApplicationInfo appInfoCopy{};
     if (modCI.pApplicationInfo != nullptr) {
         const uint32_t realVersion = query_real_instance_version();
-        if (modCI.pApplicationInfo->apiVersion > realVersion) {
+        // Vulkan 1.1+ loaders must accept higher application versions. Keep
+        // that target so a newer physical device can still expose its API.
+        if (realVersion < VK_API_VERSION_1_1 && modCI.pApplicationInfo->apiVersion > realVersion) {
             appInfoCopy = *modCI.pApplicationInfo;
             appInfoCopy.apiVersion = realVersion;
             modCI.pApplicationInfo = &appInfoCopy;
@@ -140,8 +152,33 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateInstance(
         }
     }
 
+    vkfix::ExtensionEnvironment environment;
+    environment.instance_creation = true;
+    const uint32_t targetApi = modCI.pApplicationInfo && modCI.pApplicationInfo->apiVersion
+                                   ? modCI.pApplicationInfo->apiVersion : VK_API_VERSION_1_0;
+    const uint32_t publicApi = pCreateInfo->pApplicationInfo && pCreateInfo->pApplicationInfo->apiVersion
+                                   ? pCreateInfo->pApplicationInfo->apiVersion : VK_API_VERSION_1_0;
+    environment.instance_api = std::min(targetApi, query_real_instance_version());
+    environment.available.insert(nativeExts.begin(), nativeExts.end());
+    // Core 1.1 queries can require instance extensions on the 1.0 loader.
+    // They must be enabled now, not first discovered during vkCreateDevice.
+    auto promotedInstances = vkfix::promoted_instance_extensions(publicApi, environment);
+    enabledExts.insert(enabledExts.end(), promotedInstances.begin(), promotedInstances.end());
+    auto dependencyPlan = vkfix::close_extension_dependencies(enabledExts, environment);
+    if (dependencyPlan.result != VK_SUCCESS) {
+        LOGE("vkCreateInstance: missing native dependency: %s", dependencyPlan.missing.c_str());
+        if (pInstance) *pInstance = VK_NULL_HANDLE;
+        return dependencyPlan.result;
+    }
+    modCI.enabledExtensionCount = uint32_t(dependencyPlan.names.size());
+    modCI.ppEnabledExtensionNames = dependencyPlan.names.empty() ? nullptr : dependencyPlan.names.data();
     VkResult res = real_fn(&modCI, pAllocator, pInstance);
     if (res == VK_SUCCESS && pInstance && *pInstance != VK_NULL_HANDLE) {
+        std::vector<const char *> enabledLayers;
+        if (pCreateInfo->enabledLayerCount && pCreateInfo->ppEnabledLayerNames)
+            enabledLayers.assign(pCreateInfo->ppEnabledLayerNames,
+                                 pCreateInfo->ppEnabledLayerNames + pCreateInfo->enabledLayerCount);
+        vkfix::remember_native_instance(*pInstance, targetApi, query_real_instance_version(), dependencyPlan.names, enabledLayers);
         set_last_instance(*pInstance);
         LOGI("Created VkInstance %p", *pInstance);
     }
@@ -157,6 +194,7 @@ VK_LAYER_EXPORT void VKAPI_CALL vkDestroyInstance(
     if (real_fn) {
         real_fn(instance, pAllocator);
     }
+    vkfix::forget_native_instance(instance);
     if (get_last_instance() == instance) {
         set_last_instance(VK_NULL_HANDLE);
     }
@@ -604,6 +642,21 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCmdDrawIndexed);
             MATCH(vkCmdDraw);
             MATCH(vkCmdBindPipeline);
+            MATCH(vkCmdBindDescriptorSets);
+            MATCH(vkCmdBindDescriptorSets2);
+            MATCH(vkCmdBindDescriptorSets2KHR);
+            MATCH(vkCmdPushConstants2);
+            MATCH(vkCmdPushConstants2KHR);
+            MATCH(vkCmdBindIndexBuffer2);
+            MATCH(vkCmdBindIndexBuffer2KHR);
+            MATCH(vkCmdBeginConditionalRenderingEXT);
+            MATCH(vkCmdEndConditionalRenderingEXT);
+            MATCH(vkCmdDrawMultiEXT);
+            MATCH(vkCmdDrawMultiIndexedEXT);
+            MATCH(vkCmdBindIndexBuffer);
+            MATCH(vkCmdPushConstants);
+            MATCH(vkCmdBeginQuery);
+            MATCH(vkCmdEndQuery);
             MATCH(vkCmdBindVertexBuffers);
             MATCH(vkCmdBindVertexBuffers2);
             MATCH(vkCmdBindVertexBuffers2EXT);
@@ -632,6 +685,11 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCmdWaitEvents2KHR);
             MATCH(vkCmdWriteTimestamp2);
             MATCH(vkCmdWriteTimestamp2KHR);
+            MATCH(vkCmdSetEvent);
+            MATCH(vkCmdResetEvent);
+            MATCH(vkCmdWaitEvents);
+            MATCH(vkCmdWriteTimestamp);
+            MATCH(vkCmdResetQueryPool);
             MATCH(vkCmdBeginRenderPass2);
             MATCH(vkCmdBeginRenderPass2KHR);
             MATCH(vkCmdNextSubpass2);
@@ -670,6 +728,8 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCreateDebugUtilsMessengerEXT);
         }
         MATCH(vkCreateGraphicsPipelines);
+        MATCH(vkCreateBuffer);
+        MATCH(vkCreateCommandPool);
         MATCH(vkCreateComputePipelines);
         MATCH(vkCreatePipelineCache);
         MATCH(vkCreateDescriptorSetLayout);
@@ -680,6 +740,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vkCreateImageView);
         MATCH(vkCreateSampler);
         MATCH(vkCreateShaderModule);
+        MATCH(vkCreateShadersEXT);
         MATCH(vkCreateFramebuffer);
         MATCH(vkCreateSemaphore);
         MATCH(vkCreateRenderPass2);
@@ -705,6 +766,9 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vkDestroySamplerYcbcrConversionKHR);
         MATCH(vkDestroySwapchainKHR);
         MATCH(vkDestroyDevice);
+        MATCH(vkDestroyShaderModule);
+        MATCH(vkDestroyBuffer);
+        MATCH(vkDestroyCommandPool);
         if (!is_device_only) {
             MATCH(vkDestroyInstance);
             MATCH(vkDestroySurfaceKHR);
@@ -731,6 +795,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkGetPhysicalDeviceSurfacePresentModesKHR);
         }
         MATCH(vkGetDeviceQueue);
+        MATCH(vkGetFenceStatus);
         MATCH(vkGetDeviceQueue2);
         MATCH(vkGetSemaphoreCounterValue);
         MATCH(vkGetSemaphoreCounterValueKHR);
@@ -779,6 +844,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
     }
     case 'Q': {
         MATCH(vkQueueSubmit);
+        MATCH(vkQueueBindSparse);
         MATCH(vkQueueSubmit2);
         MATCH(vkQueueSubmit2KHR);
         MATCH(vkQueueWaitIdle);
@@ -805,6 +871,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
     }
     case 'R': {
         MATCH(vkResetCommandBuffer);
+        MATCH(vkResetCommandPool);
         MATCH(vkResetQueryPool);
         MATCH(vkResetQueryPoolEXT);
         return NULL;
@@ -820,6 +887,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         return NULL;
     }
     case 'W': {
+        MATCH(vkWaitForFences);
         MATCH(vkWaitSemaphores);
         MATCH(vkWaitSemaphoresKHR);
         return NULL;
@@ -835,7 +903,9 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         return NULL;
     }
     case 'E': {
+        MATCH(vkEndCommandBuffer);
         if (!is_device_only) {
+            MATCH(vkEnumeratePhysicalDevices);
             MATCH(vkEnumerateDeviceExtensionProperties);
             MATCH(vkEnumerateInstanceVersion);
         }
@@ -851,58 +921,74 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
     return NULL;
 }
 
-VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
-    VkInstance instance,
-    const char* pName
-) {
-    if (!pName) return NULL;
+static PFN_vkVoidFunction track_native_command(const char *name, PFN_vkVoidFunction proc) {
+    if (proc && strncmp(name, "vkCmd", 5) == 0 && TBDRBarrierOptimizer::get().is_enabled())
+        TBDRBarrierOptimizer::get().on_untracked_command(name);
+    return proc;
+}
+
+VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance,
+                                                                    const char *pName) {
+    if (!pName)
+        return NULL;
 
     PFN_vkVoidFunction custom_proc = LayerManager::get().get_custom_proc(pName);
-    if (custom_proc) return custom_proc;
+    if (custom_proc)
+        return track_native_command(pName, custom_proc);
 
     PFN_vkVoidFunction matched = lookup_layer_proc(pName, false);
-    if (matched) return matched;
+    if (matched)
+        return matched;
 
     init_real_vulkan();
     PFN_vkGetInstanceProcAddr real_gipa = get_real_instance_proc_addr();
     if (real_gipa) {
-        return real_gipa(instance, pName);
+        return track_native_command(pName, real_gipa(instance, pName));
     }
     return NULL;
 }
 
-VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
-    VkDevice device,
-    const char* pName
-) {
-    if (!pName) return NULL;
+VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device,
+                                                                  const char *pName) {
+    if (!pName)
+        return NULL;
 
     PFN_vkVoidFunction custom_proc = LayerManager::get().get_custom_proc(pName);
-    if (custom_proc) return custom_proc;
+    if (custom_proc)
+        return track_native_command(pName, custom_proc);
 
     init_real_vulkan();
     PFN_vkGetDeviceProcAddr real_gdpa = get_real_device_proc_addr();
 
+    // Native shortcuts must not hide actions while exact barrier dedup is active.
+    if (strncmp(pName, "vkCmd", 5) == 0 && TBDRBarrierOptimizer::get().is_enabled()) {
+        if (auto tracked = lookup_layer_proc(pName, true))
+            return tracked;
+    }
+
     // Breakthrough 1: Zero-Overhead Direct Bypass
     // If the device natively supports the requested feature and requires no layer emulation,
     // directly return the real driver's function pointer, completely bypassing the layer!
-    if (device != VK_NULL_HANDLE && !LayerManager::get().should_intercept_device_proc(device, pName)) {
+    if (device != VK_NULL_HANDLE &&
+        !LayerManager::get().should_intercept_device_proc(device, pName)) {
         if (real_gdpa) {
             PFN_vkVoidFunction real_fn = real_gdpa(device, pName);
-            if (real_fn) return real_fn;
+            if (real_fn)
+                return track_native_command(pName, real_fn);
         }
     }
 
     PFN_vkVoidFunction matched = lookup_layer_proc(pName, true);
-    if (matched) return matched;
+    if (matched)
+        return matched;
 
     if (real_gdpa && device != VK_NULL_HANDLE) {
-        return real_gdpa(device, pName);
+        return track_native_command(pName, real_gdpa(device, pName));
     }
 
     PFN_vkGetInstanceProcAddr real_gipa = get_real_instance_proc_addr();
     if (real_gipa) {
-        return real_gipa(get_last_instance(), pName);
+        return track_native_command(pName, real_gipa(get_last_instance(), pName));
     }
     return NULL;
 }
@@ -911,15 +997,19 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
 // Standard Vulkan 1.0 Forwarding Stubs (with static lazy pointer caching)
 // ============================================================================
 
-#define FORWARD_INST(ret, name, args, params) \
-    VK_LAYER_EXPORT ret VKAPI_CALL name args { \
-        typedef ret (VKAPI_PTR *fn_t) args; \
-        static fn_t s_cached_##name = nullptr; \
-        if (__builtin_expect(!s_cached_##name, 0)) { \
-            s_cached_##name = (fn_t) get_real_proc(get_last_instance(), VK_NULL_HANDLE, #name); \
-        } \
-        if (__builtin_expect(s_cached_##name != nullptr, 1)) return s_cached_##name params; \
-        return (ret)0; \
+// Base exports must share the provider that created their object handles.
+#include "core/vulkan10_forwarders.inc"
+
+#define FORWARD_INST(ret, name, args, params)                                                      \
+    VK_LAYER_EXPORT ret VKAPI_CALL name args {                                                     \
+        typedef ret(VKAPI_PTR *fn_t) args;                                                         \
+        static fn_t s_cached_##name = nullptr;                                                     \
+        if (__builtin_expect(!s_cached_##name, 0)) {                                               \
+            s_cached_##name = (fn_t)get_real_proc(get_last_instance(), VK_NULL_HANDLE, #name);     \
+        }                                                                                          \
+        if (__builtin_expect(s_cached_##name != nullptr, 1))                                       \
+            return s_cached_##name params;                                                         \
+        return (ret)0;                                                                             \
     }
 
 #define FORWARD_DEV(ret, name, dev_arg, args, params) \
@@ -954,7 +1044,29 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(
         return (ret)0; \
     }
 
-FORWARD_INST(VkResult, vkEnumeratePhysicalDevices, (VkInstance instance, uint32_t* pCount, VkPhysicalDevice* pDevices), (instance, pCount, pDevices))
+#define TRACK_CORE_COMMAND(name, args, call_args) \
+    VK_LAYER_EXPORT void VKAPI_CALL name args { \
+        TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer); \
+        auto device = LayerManager::get().get_device_for_cmd(commandBuffer); \
+        auto real = (PFN_##name)get_real_proc(get_last_instance(), device, #name); \
+        if (real) real call_args; \
+    }
+TRACK_CORE_COMMAND(vkCmdSetEvent, (VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stages), (commandBuffer,event,stages))
+TRACK_CORE_COMMAND(vkCmdResetEvent, (VkCommandBuffer commandBuffer, VkEvent event, VkPipelineStageFlags stages), (commandBuffer,event,stages))
+TRACK_CORE_COMMAND(vkCmdWriteTimestamp, (VkCommandBuffer commandBuffer, VkPipelineStageFlagBits stage, VkQueryPool pool, uint32_t query), (commandBuffer,stage,pool,query))
+TRACK_CORE_COMMAND(vkCmdResetQueryPool, (VkCommandBuffer commandBuffer, VkQueryPool pool, uint32_t first, uint32_t count), (commandBuffer,pool,first,count))
+TRACK_CORE_COMMAND(vkCmdWaitEvents, (VkCommandBuffer commandBuffer, uint32_t count, const VkEvent* events, VkPipelineStageFlags src, VkPipelineStageFlags dst, uint32_t mc, const VkMemoryBarrier* memory, uint32_t bc, const VkBufferMemoryBarrier* buffers, uint32_t ic, const VkImageMemoryBarrier* images), (commandBuffer,count,events,src,dst,mc,memory,bc,buffers,ic,images))
+#undef TRACK_CORE_COMMAND
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumeratePhysicalDevices(
+    VkInstance instance, uint32_t* pCount, VkPhysicalDevice* pDevices) {
+    auto native = (PFN_vkEnumeratePhysicalDevices)get_real_proc(instance, VK_NULL_HANDLE, "vkEnumeratePhysicalDevices");
+    if (!native) return VK_ERROR_INITIALIZATION_FAILED;
+    auto result = native(instance, pCount, pDevices);
+    if (pDevices && pCount && (result == VK_SUCCESS || result == VK_INCOMPLETE))
+        vkfix::remember_physical_devices(instance, *pCount, pDevices);
+    return result;
+}
 FORWARD_INST(VkResult, vkCreateDebugUtilsMessengerEXT, (VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pMessenger), (instance, pCreateInfo, pAllocator, pMessenger))
 FORWARD_INST(void, vkDestroyDebugUtilsMessengerEXT, (VkInstance instance, VkDebugUtilsMessengerEXT messenger, const VkAllocationCallbacks* pAllocator), (instance, messenger, pAllocator))
 FORWARD_INST(void, vkSubmitDebugUtilsMessageEXT, (VkInstance instance, VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageTypes, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData), (instance, messageSeverity, messageTypes, pCallbackData))
@@ -1068,54 +1180,113 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkDeviceWaitIdle(VkDevice device) {
 }
 FORWARD_DEV(VkResult, vkAllocateMemory, device, (VkDevice device, const VkMemoryAllocateInfo* pAllocateInfo, const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory), (device, pAllocateInfo, pAllocator, pMemory))
 FORWARD_DEV_VOID(vkFreeMemory, device, (VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* pAllocator), (device, memory, pAllocator))
-FORWARD_DEV(VkResult, vkMapMemory, device, (VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** ppData), (device, memory, offset, size, flags, ppData))
-FORWARD_DEV_VOID(vkUnmapMemory, device, (VkDevice device, VkDeviceMemory memory), (device, memory))
-FORWARD_DEV(VkResult, vkCreateBuffer, device, (VkDevice device, const VkBufferCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkBuffer* pBuffer), (device, pCreateInfo, pAllocator, pBuffer))
-FORWARD_DEV_VOID(vkDestroyBuffer, device, (VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* pAllocator), (device, buffer, pAllocator))
-VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateShaderModule(
-    VkDevice device,
-    const VkShaderModuleCreateInfo* pCreateInfo,
-    const VkAllocationCallbacks* pAllocator,
-    VkShaderModule* pShaderModule
-) {
-    static PFN_vkCreateShaderModule s_real_fn = nullptr;
-    if (!s_real_fn) {
-        s_real_fn = (PFN_vkCreateShaderModule)
-            get_real_proc(get_last_instance(), device, "vkCreateShaderModule");
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkQueueBindSparse(VkQueue queue, uint32_t count,
+                                                      const VkBindSparseInfo *infos,
+                                                      VkFence fence) {
+    VkResult result = VK_SUCCESS;
+    if (vkfix::TimelineScheduler::get().bind_sparse(queue, count, infos, fence, result))
+        return result;
+    auto device = LayerManager::get().get_device_for_queue(queue);
+    auto native =
+        (PFN_vkQueueBindSparse)get_real_proc(get_last_instance(), device, "vkQueueBindSparse");
+    return native ? native(queue, count, infos, fence) : VK_ERROR_INITIALIZATION_FAILED;
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetFenceStatus(VkDevice device, VkFence fence) {
+    auto error = vkfix::TimelineScheduler::get().error(device);
+    if (error != VK_SUCCESS)
+        return error;
+    auto native =
+        (PFN_vkGetFenceStatus)get_real_proc(get_last_instance(), device, "vkGetFenceStatus");
+    return native ? vkfix::TimelineScheduler::get().native_fence_call(
+                        device, [&] { return native(device, fence); })
+                  : VK_ERROR_INITIALIZATION_FAILED;
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkWaitForFences(VkDevice device, uint32_t count,
+                                                    const VkFence *fences, VkBool32 all,
+                                                    uint64_t timeout) {
+    auto native =
+        (PFN_vkWaitForFences)get_real_proc(get_last_instance(), device, "vkWaitForFences");
+    if (!native)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    auto &scheduler = vkfix::TimelineScheduler::get();
+    if (!scheduler.active(device))
+        return native(device, count, fences, all, timeout);
+    auto began = std::chrono::steady_clock::now();
+    while (true) {
+        auto error = scheduler.error(device);
+        if (error != VK_SUCCESS)
+            return error;
+        // The worker can still be about to submit the application's fence.
+        // Probe while excluding that native call, then sleep outside the lock
+        // so an unsignaled fence cannot prevent its own submission.
+        auto result = scheduler.native_fence_call(
+            device, [&] { return native(device, count, fences, all, 0); });
+        if (result != VK_TIMEOUT)
+            return result;
+        auto elapsed = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - began)
+                               .count());
+        if (timeout != UINT64_MAX && elapsed >= timeout)
+            return VK_TIMEOUT;
+        auto remaining = timeout == UINT64_MAX ? 1000000ULL : timeout - elapsed;
+        std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<uint64_t>(remaining, 1000000ULL)));
     }
-    if (!s_real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+}
+FORWARD_DEV(VkResult, vkMapMemory, device,
+            (VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size,
+             VkMemoryMapFlags flags, void **ppData),
+            (device, memory, offset, size, flags, ppData))
+FORWARD_DEV_VOID(vkUnmapMemory, device, (VkDevice device, VkDeviceMemory memory), (device, memory))
+VK_LAYER_EXPORT VkResult VKAPI_CALL
+vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInfo,
+                     const VkAllocationCallbacks *pAllocator, VkShaderModule *pShaderModule) {
+    auto real_fn = (PFN_vkCreateShaderModule)get_real_proc(get_last_instance(), device, "vkCreateShaderModule");
+    if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
+    auto create = [&](VkDevice d, const VkShaderModuleCreateInfo* ci, const VkAllocationCallbacks* allocator, VkShaderModule* out) {
+        VkResult result = real_fn(d, ci, allocator, out);
+        if (result == VK_SUCCESS && out) VertexStoreEmulator::get().shader(d, *out, ci);
+        return result;
+    };
 
     if (!pCreateInfo || !pCreateInfo->pCode ||
         pCreateInfo->codeSize < 5 * sizeof(uint32_t) ||
         (pCreateInfo->codeSize % sizeof(uint32_t)) != 0) {
-        return s_real_fn(device, pCreateInfo, pAllocator, pShaderModule);
+        return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 
     const uint32_t targetVersion = LayerManager::get().get_device_max_spirv_version(device);
     if (targetVersion == 0) {
-        return s_real_fn(device, pCreateInfo, pAllocator, pShaderModule);
+        return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 
     // Fast path: on a modern driver there is nothing to lower. Checking the
     // header avoids a heap allocation + memcpy for every shader module.
     const uint32_t* code_words = pCreateInfo->pCode;
-    if (code_words[0] != 0x07230203u || code_words[1] <= targetVersion) {
-        return s_real_fn(device, pCreateInfo, pAllocator, pShaderModule);
+    const auto broadcast_support = LayerManager::get().get_device_subgroup_broadcast(device);
+    if (code_words[0] != 0x07230203u || (code_words[1] <= targetVersion && !broadcast_support)) {
+        return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 
     std::vector<uint32_t> code(pCreateInfo->codeSize / sizeof(uint32_t));
     memcpy(code.data(), pCreateInfo->pCode, pCreateInfo->codeSize);
 
-    if (!ShaderRewriter::get().rewrite(code, targetVersion)) {
-        return s_real_fn(device, pCreateInfo, pAllocator, pShaderModule);
+    bool broadcast_changed = false;
+    if (auto support = broadcast_support) {
+        std::string error;
+        auto result = vkfix::lower_subgroup_broadcasts(code, support.max_size, support.shuffle, error);
+        broadcast_changed = result == vkfix::BroadcastLowering::Changed;
+        if (result == vkfix::BroadcastLowering::Invalid)
+            LOGW("Subgroup broadcast lowering rejected: %s", error.c_str());
+    }
+    if (!ShaderRewriter::get().rewrite(code, targetVersion) && !broadcast_changed) {
+        return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 
     VkShaderModuleCreateInfo modified = *pCreateInfo;
     modified.codeSize = code.size() * sizeof(uint32_t);
     modified.pCode = code.data();
-    return s_real_fn(device, &modified, pAllocator, pShaderModule);
+    return create(device, &modified, pAllocator, pShaderModule);
 }
-FORWARD_DEV_VOID(vkDestroyShaderModule, device, (VkDevice device, VkShaderModule shaderModule, const VkAllocationCallbacks* pAllocator), (device, shaderModule, pAllocator))
 // VK_KHR_separate_depth_stencil_layouts emulation: rewrite the separate
 // depth/stencil layouts to the combined layouts understood by Vulkan 1.0.
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateRenderPass(
@@ -2119,16 +2290,21 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumeratePhysicalDeviceGroups(
     uint32_t* pPhysicalDeviceGroupCount,
     VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties
 ) {
-    return LayerManager::get().dispatch_enumerate_physical_device_groups(
+    auto result = LayerManager::get().dispatch_enumerate_physical_device_groups(
         instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
+    if (pPhysicalDeviceGroupProperties && pPhysicalDeviceGroupCount &&
+        (result == VK_SUCCESS || result == VK_INCOMPLETE))
+        for (uint32_t i = 0; i < *pPhysicalDeviceGroupCount; ++i)
+            vkfix::remember_physical_devices(instance, pPhysicalDeviceGroupProperties[i].physicalDeviceCount,
+                                            pPhysicalDeviceGroupProperties[i].physicalDevices);
+    return result;
 }
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumeratePhysicalDeviceGroupsKHR(
     VkInstance instance,
     uint32_t* pPhysicalDeviceGroupCount,
     VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties
 ) {
-    return LayerManager::get().dispatch_enumerate_physical_device_groups(
-        instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
+    return vkEnumeratePhysicalDeviceGroups(instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
 }
 
 // Physical Device Properties 2
@@ -2635,3 +2811,256 @@ VK_LAYER_EXPORT void VKAPI_CALL vkDestroySurfaceKHR(
 }
 
 } // extern "C"
+
+// Stateful entry points needed by the opt-in vertex compute/replay fallback.
+VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateBuffer(VkDevice device, const VkBufferCreateInfo *ci,
+               const VkAllocationCallbacks *allocator, VkBuffer *out) {
+    auto real = (PFN_vkCreateBuffer)get_real_proc(get_last_instance(), device, "vkCreateBuffer");
+    if (!real)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    auto modified = ci ? VertexStoreEmulator::get().buffer_info(device, *ci) : VkBufferCreateInfo{};
+    const auto result = real(device, ci ? &modified : ci, allocator, out);
+    if (result == VK_SUCCESS && out)
+        VertexStoreEmulator::get().buffer(device, *out, ci ? &modified : ci);
+    return result;
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(VkDevice device, VkBuffer buffer,
+                                                           const VkAllocationCallbacks *allocator) {
+    VertexStoreEmulator::get().erase_buffer(device, buffer);
+    auto real = (PFN_vkDestroyBuffer)get_real_proc(get_last_instance(), device, "vkDestroyBuffer");
+    if (real)
+        real(device, buffer, allocator);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyShaderModule(
+    VkDevice device, VkShaderModule module, const VkAllocationCallbacks *allocator) {
+    VertexStoreEmulator::get().erase_shader(device, module);
+    auto real = (PFN_vkDestroyShaderModule)get_real_proc(get_last_instance(), device,
+                                                         "vkDestroyShaderModule");
+    if (real)
+        real(device, module, allocator);
+}
+VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo *ci,
+                    const VkAllocationCallbacks *allocator, VkCommandPool *out) {
+    auto real =
+        (PFN_vkCreateCommandPool)get_real_proc(get_last_instance(), device, "vkCreateCommandPool");
+    if (!real)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    auto result = real(device, ci, allocator, out);
+    if (result == VK_SUCCESS && out && ci)
+        VertexStoreEmulator::get().pool(device, *out, ci->queueFamilyIndex);
+    return result;
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL
+vkDestroyCommandPool(VkDevice device, VkCommandPool pool, const VkAllocationCallbacks *allocator) {
+    LayerManager::get().track_command_pool_reset(device, pool, true);
+    VertexStoreEmulator::get().destroy_pool(device, pool);
+    auto real = (PFN_vkDestroyCommandPool)get_real_proc(get_last_instance(), device,
+                                                        "vkDestroyCommandPool");
+    if (real)
+        real(device, pool, allocator);
+}
+VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandPool(VkDevice device,
+                                                                  VkCommandPool pool,
+                                                                  VkCommandPoolResetFlags flags) {
+    auto real =
+        (PFN_vkResetCommandPool)get_real_proc(get_last_instance(), device, "vkResetCommandPool");
+    if (!real)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    auto result = real(device, pool, flags);
+    if (result == VK_SUCCESS) {
+        VertexStoreEmulator::get().clear_pool(device, pool);
+        LayerManager::get().track_command_pool_reset(device, pool, false);
+    }
+    return result;
+}
+VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkEndCommandBuffer(VkCommandBuffer cmd) {
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    auto real =
+        (PFN_vkEndCommandBuffer)get_real_proc(get_last_instance(), device, "vkEndCommandBuffer");
+    if (!real)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    auto result = real(cmd);
+    if (result != VK_SUCCESS)
+        return result;
+    auto descriptor_result = LayerManager::get().command_recording_error(cmd);
+    return descriptor_result != VK_SUCCESS ? descriptor_result :
+        VertexStoreEmulator::get().recording_error(cmd);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
+    VkCommandBuffer cmd, VkPipelineBindPoint point, VkPipelineLayout layout, uint32_t first,
+    uint32_t count, const VkDescriptorSet *sets, uint32_t dynamic_count, const uint32_t *offsets) {
+    LayerManager::get().track_descriptor_binding(cmd, point, layout, first, count);
+    VertexStoreEmulator::get().bind_sets(cmd, point, layout, first, count, sets, dynamic_count,
+                                         offsets);
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    auto real = (PFN_vkCmdBindDescriptorSets)get_real_proc(get_last_instance(), device,
+                                                           "vkCmdBindDescriptorSets");
+    if (real)
+        real(cmd, point, layout, first, count, sets, dynamic_count, offsets);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer cmd,
+                                                                VkBuffer buffer,
+                                                                VkDeviceSize offset,
+                                                                VkIndexType type) {
+    VertexStoreEmulator::get().bind_index(cmd, buffer, offset, type);
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    auto real = (PFN_vkCmdBindIndexBuffer)get_real_proc(get_last_instance(), device,
+                                                        "vkCmdBindIndexBuffer");
+    if (real)
+        real(cmd, buffer, offset, type);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer cmd,
+                                                              VkPipelineLayout layout,
+                                                              VkShaderStageFlags stages,
+                                                              uint32_t offset, uint32_t size,
+                                                              const void *data) {
+    VertexStoreEmulator::get().push(cmd, layout, stages, offset, size, data);
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    auto real =
+        (PFN_vkCmdPushConstants)get_real_proc(get_last_instance(), device, "vkCmdPushConstants");
+    if (real)
+        real(cmd, layout, stages, offset, size, data);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBeginQuery(VkCommandBuffer cmd, VkQueryPool pool,
+                                                           uint32_t query,
+                                                           VkQueryControlFlags flags) {
+    VertexStoreEmulator::get().query(cmd, true);
+    TBDRBarrierOptimizer::get().on_cmd_action(cmd);
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    auto real = (PFN_vkCmdBeginQuery)get_real_proc(get_last_instance(), device, "vkCmdBeginQuery");
+    if (real)
+        real(cmd, pool, query, flags);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdEndQuery(VkCommandBuffer cmd, VkQueryPool pool,
+                                                         uint32_t query) {
+    VertexStoreEmulator::get().query(cmd, false);
+    TBDRBarrierOptimizer::get().on_cmd_action(cmd);
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    auto real = (PFN_vkCmdEndQuery)get_real_proc(get_last_instance(), device, "vkCmdEndQuery");
+    if (real)
+        real(cmd, pool, query);
+}
+
+namespace {
+void track_sets2(VkCommandBuffer cmd, const VkBindDescriptorSetsInfo *info) {
+    if (!info)
+        return;
+    auto &emulator = VertexStoreEmulator::get();
+    if (info->pNext)
+        emulator.unsupported(cmd, "descriptor binding extensions are unsupported");
+    for (auto point : {VK_PIPELINE_BIND_POINT_GRAPHICS, VK_PIPELINE_BIND_POINT_COMPUTE}) {
+        const auto mask = point == VK_PIPELINE_BIND_POINT_GRAPHICS ? VK_SHADER_STAGE_ALL_GRAPHICS
+                                                                   : VK_SHADER_STAGE_COMPUTE_BIT;
+        if (info->stageFlags & mask) {
+            LayerManager::get().track_descriptor_binding(cmd, point, info->layout,
+                info->firstSet, info->descriptorSetCount);
+            emulator.bind_sets(cmd, point, info->layout, info->firstSet, info->descriptorSetCount,
+                               info->pDescriptorSets, info->dynamicOffsetCount,
+                               info->pDynamicOffsets);
+        }
+    }
+}
+void track_push2(VkCommandBuffer cmd, const VkPushConstantsInfo *info) {
+    if (!info)
+        return;
+    if (info->pNext)
+        VertexStoreEmulator::get().unsupported(cmd, "push constant extensions are unsupported");
+    VertexStoreEmulator::get().push(cmd, info->layout, info->stageFlags, info->offset, info->size,
+                                    info->pValues);
+}
+} // namespace
+#define VERTEX_STORE_BIND2(suffix)                                                                 \
+    VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2##suffix(                   \
+        VkCommandBuffer cmd, const VkBindDescriptorSetsInfo *info) {                               \
+        track_sets2(cmd, info);                                                                    \
+        auto device = LayerManager::get().get_device_for_cmd(cmd);                                 \
+        auto real = (PFN_vkCmdBindDescriptorSets2)get_real_proc(                                   \
+            get_last_instance(), device, "vkCmdBindDescriptorSets2" #suffix);                      \
+        if (real)                                                                                  \
+            real(cmd, info);                                                                       \
+    }                                                                                              \
+    VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants2##suffix(                        \
+        VkCommandBuffer cmd, const VkPushConstantsInfo *info) {                                    \
+        track_push2(cmd, info);                                                                    \
+        auto device = LayerManager::get().get_device_for_cmd(cmd);                                 \
+        auto real = (PFN_vkCmdPushConstants2)get_real_proc(get_last_instance(), device,            \
+                                                           "vkCmdPushConstants2" #suffix);         \
+        if (real)                                                                                  \
+            real(cmd, info);                                                                       \
+    }                                                                                              \
+    VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer2##suffix(                      \
+        VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size,              \
+        VkIndexType type) {                                                                        \
+        VertexStoreEmulator::get().bind_index(cmd, buffer, offset, type);                          \
+        auto device = LayerManager::get().get_device_for_cmd(cmd);                                 \
+        auto real = (PFN_vkCmdBindIndexBuffer2)get_real_proc(get_last_instance(), device,          \
+                                                             "vkCmdBindIndexBuffer2" #suffix);     \
+        if (real)                                                                                  \
+            real(cmd, buffer, offset, size, type);                                                 \
+    }
+VERTEX_STORE_BIND2()
+VERTEX_STORE_BIND2(KHR)
+#undef VERTEX_STORE_BIND2
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBeginConditionalRenderingEXT(
+    VkCommandBuffer cmd, const VkConditionalRenderingBeginInfoEXT *info) {
+    VertexStoreEmulator::get().query(cmd, true);
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    auto real = (PFN_vkCmdBeginConditionalRenderingEXT)get_real_proc(
+        get_last_instance(), device, "vkCmdBeginConditionalRenderingEXT");
+    if (real)
+        real(cmd, info);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdEndConditionalRenderingEXT(VkCommandBuffer cmd) {
+    VertexStoreEmulator::get().query(cmd, false);
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    auto real = (PFN_vkCmdEndConditionalRenderingEXT)get_real_proc(
+        get_last_instance(), device, "vkCmdEndConditionalRenderingEXT");
+    if (real)
+        real(cmd);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdDrawMultiEXT(VkCommandBuffer cmd, uint32_t count,
+                                                             const VkMultiDrawInfoEXT *info,
+                                                             uint32_t instances,
+                                                             uint32_t first_instance,
+                                                             uint32_t stride) {
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    if (VertexStoreEmulator::get().enabled(device)) {
+        VertexStoreEmulator::get().unsupported(
+            cmd, "VK_EXT_multi_draw is not implemented by vertex compute/replay");
+        return;
+    }
+    auto real =
+        (PFN_vkCmdDrawMultiEXT)get_real_proc(get_last_instance(), device, "vkCmdDrawMultiEXT");
+    if (real)
+        real(cmd, count, info, instances, first_instance, stride);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdDrawMultiIndexedEXT(
+    VkCommandBuffer cmd, uint32_t count, const VkMultiDrawIndexedInfoEXT *info, uint32_t instances,
+    uint32_t first_instance, uint32_t stride, const int32_t *vertex_offset) {
+    auto device = LayerManager::get().get_device_for_cmd(cmd);
+    if (VertexStoreEmulator::get().enabled(device)) {
+        VertexStoreEmulator::get().unsupported(
+            cmd, "VK_EXT_multi_draw is not implemented by vertex compute/replay");
+        return;
+    }
+    auto real = (PFN_vkCmdDrawMultiIndexedEXT)get_real_proc(get_last_instance(), device,
+                                                            "vkCmdDrawMultiIndexedEXT");
+    if (real)
+        real(cmd, count, info, instances, first_instance, stride, vertex_offset);
+}
+
+VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateShadersEXT(VkDevice device, uint32_t count, const VkShaderCreateInfoEXT *infos,
+                   const VkAllocationCallbacks *allocator, VkShaderEXT *shaders) {
+    if (VertexStoreEmulator::get().enabled(device)) {
+        if (shaders)
+            for (uint32_t i = 0; i < count; ++i)
+                shaders[i] = VK_NULL_HANDLE;
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    auto real =
+        (PFN_vkCreateShadersEXT)get_real_proc(get_last_instance(), device, "vkCreateShadersEXT");
+    return real ? real(device, count, infos, allocator, shaders) : VK_ERROR_FEATURE_NOT_PRESENT;
+}

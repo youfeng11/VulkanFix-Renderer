@@ -702,6 +702,11 @@ void DynamicRenderingModule::on_destroy_image_view(
                 if (real_destroy_fb) {
                     real_destroy_fb(device, fbIt->second, NULL);
                 }
+                auto resources = m_device_resources.find((uint64_t)(uintptr_t)device);
+                if (resources != m_device_resources.end()) {
+                    auto& owned = resources->second.framebuffers;
+                    owned.erase(std::remove(owned.begin(), owned.end(), fbIt->second), owned.end());
+                }
                 m_framebuffer_cache.erase(fbIt);
             }
         }
@@ -1036,21 +1041,11 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         clampedRenderArea.extent.height = fb_h - (uint32_t)clampedRenderArea.offset.y;
     }
 
-    // 4. Cache Lookup with Thread-Local MRU Caching (O(1) lockless hit for repeated frame passes)
-    thread_local DynamicRenderPassKey t_last_rp_key{};
-    thread_local VkRenderPass t_last_rp = VK_NULL_HANDLE;
-
+    // Resolve through the live caches so view/command-buffer destruction cannot
+    // leave a thread-local handle or state pointer pointing at freed resources.
     VkRenderPass renderPass = VK_NULL_HANDLE;
-    if (__builtin_expect(t_last_rp != VK_NULL_HANDLE && rpKey == t_last_rp_key, 1)) {
-        renderPass = t_last_rp;
-    } else {
-        auto rpIt = m_dynamic_rp_cache.find(rpKey);
-        if (rpIt != m_dynamic_rp_cache.end()) {
-            renderPass = rpIt->second;
-            t_last_rp_key = rpKey;
-            t_last_rp = renderPass;
-        }
-    }
+    auto rpIt = m_dynamic_rp_cache.find(rpKey);
+    if (rpIt != m_dynamic_rp_cache.end()) renderPass = rpIt->second;
 
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     FramebufferKey fbKey;
@@ -1064,19 +1059,8 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         fbKey.height = fb_h;
         fbKey.layers = fb_layers;
 
-        thread_local FramebufferKey t_last_fb_key{};
-        thread_local VkFramebuffer t_last_fb = VK_NULL_HANDLE;
-
-        if (__builtin_expect(t_last_fb != VK_NULL_HANDLE && fbKey == t_last_fb_key, 1)) {
-            framebuffer = t_last_fb;
-        } else {
-            auto fbIt = m_framebuffer_cache.find(fbKey);
-            if (fbIt != m_framebuffer_cache.end()) {
-                framebuffer = fbIt->second;
-                t_last_fb_key = fbKey;
-                t_last_fb = framebuffer;
-            }
-        }
+        auto fbIt = m_framebuffer_cache.find(fbKey);
+        if (fbIt != m_framebuffer_cache.end()) framebuffer = fbIt->second;
     }
 
     // Fast-path: both renderPass and framebuffer already cached (common runtime hot path)
@@ -1084,23 +1068,13 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         // Release read lock before proceeding
         readLock.unlock();
 
-        thread_local VkCommandBuffer t_last_rendering_cmd = VK_NULL_HANDLE;
-        thread_local CmdRenderingState* t_last_rendering_state = nullptr;
-
-        if (__builtin_expect(commandBuffer == t_last_rendering_cmd && t_last_rendering_state != nullptr, 1)) {
-            t_last_rendering_state->device = device;
-            t_last_rendering_state->is_rendering = true;
-            t_last_rendering_state->activeRenderPass = renderPass;
-            t_last_rendering_state->activeFramebuffer = framebuffer;
-        } else {
+        {
             std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
-            CmdRenderingState& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
+            auto& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
             state.device = device;
             state.is_rendering = true;
             state.activeRenderPass = renderPass;
             state.activeFramebuffer = framebuffer;
-            t_last_rendering_cmd = commandBuffer;
-            t_last_rendering_state = &state;
         }
 
         VkRenderPassBeginInfo beginInfo{};
@@ -1259,23 +1233,13 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         real_begin_rp(commandBuffer, &beginInfo, contents);
     }
 
-    thread_local VkCommandBuffer t_last_rendering_cmd = VK_NULL_HANDLE;
-    thread_local CmdRenderingState* t_last_rendering_state = nullptr;
-
-    if (__builtin_expect(commandBuffer == t_last_rendering_cmd && t_last_rendering_state != nullptr, 1)) {
-        t_last_rendering_state->device = device;
-        t_last_rendering_state->is_rendering = true;
-        t_last_rendering_state->activeRenderPass = renderPass;
-        t_last_rendering_state->activeFramebuffer = framebuffer;
-    } else {
+    {
         std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
-        CmdRenderingState& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
+        auto& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
         state.device = device;
         state.is_rendering = true;
         state.activeRenderPass = renderPass;
         state.activeFramebuffer = framebuffer;
-        t_last_rendering_cmd = commandBuffer;
-        t_last_rendering_state = &state;
     }
 
     LOG_OPT_DEBUG("DynamicRendering: emulated vkCmdBeginRenderingKHR for cmd %p", commandBuffer);
@@ -1298,19 +1262,10 @@ bool DynamicRenderingModule::on_cmd_end_rendering(VkCommandBuffer commandBuffer)
     }
     vku::cmd_end_label(commandBuffer);
 
-    thread_local VkCommandBuffer t_last_end_cmd = VK_NULL_HANDLE;
-    thread_local CmdRenderingState* t_last_end_state = nullptr;
-
-    if (__builtin_expect(commandBuffer == t_last_end_cmd && t_last_end_state != nullptr, 1)) {
-        t_last_end_state->is_rendering = false;
-    } else {
+    {
         std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
         auto it = m_cmd_rendering_states.find((uint64_t)(uintptr_t)commandBuffer);
-        if (it != m_cmd_rendering_states.end()) {
-            it->second.is_rendering = false;
-            t_last_end_cmd = commandBuffer;
-            t_last_end_state = &it->second;
-        }
+        if (it != m_cmd_rendering_states.end()) it->second.is_rendering = false;
     }
 
     LOG_OPT_DEBUG("DynamicRendering: emulated vkCmdEndRenderingKHR for cmd %p", commandBuffer);

@@ -1,28 +1,29 @@
 ﻿#include "vertex_pipeline_stores_and_atomics.h"
+#include "core/vertex_store_emulator.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
 #include "vk_pnext.h"
 
-// Capability supplement: expose vertexPipelineStoresAndAtomics (and the
-// per-stage SSBO/Image descriptor limits that make it usable) to applications
-// that require it, even when the driver does not advertise the bit.
-//
-// This is intentionally NOT a simulation: shaders that actually perform
-// vertex-stage storage-buffer writes / atomics still execute on the real
-// hardware. The module therefore:
-//   1. reports the feature as available in vkGetPhysicalDeviceFeatures{,2};
-//   2. strips it from VkDeviceCreateInfo before forwarding to the driver, so
-//      vkCreateDevice does not fail with VK_ERROR_FEATURE_NOT_PRESENT.
-//
-// It can be disabled per device with
-//   VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE=skip
-// (or =force to always expose it), which is also what the launcher toggle maps to.
+// Automatic compute/replay fallback. Unsupported pipeline and command forms fail
+// explicitly rather than executing vertex stores on an unsupported driver.
+static EmulationMode compute_emulation_mode() {
+    const auto feature =
+        parse_emulation_mode("VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE",
+                             "FORCE_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE");
+    if (feature != EmulationMode::Auto)
+        return feature;
+    return parse_emulation_mode("VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS",
+                                "FORCE_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS");
+}
+
 REGISTER_LAYER_MODULE(VertexPipelineStoresAndAtomicsModule);
 
-
 VertexPipelineStoresAndAtomicsModule::VertexPipelineStoresAndAtomicsModule() {
-    LOGI("Initialized Vulkan vertexPipelineStoresAndAtomics emulation module");
-    LOGW("vertexPipelineStoresAndAtomics: capability supplement, no software emulation; relies on unadvertised hardware support");
+    LOGI("Initialized vertexPipelineStoresAndAtomics capability module");
+    if (compute_emulation_mode() == EmulationMode::ForceEmulate) {
+        LOGW("vertexPipelineStoresAndAtomics: compute/replay fallback selected; unsupported draws "
+             "will fail explicitly");
+    }
 }
 
 bool VertexPipelineStoresAndAtomicsModule::is_phys_device_native(VkPhysicalDevice physDev) {
@@ -32,22 +33,8 @@ bool VertexPipelineStoresAndAtomicsModule::is_phys_device_native(VkPhysicalDevic
         return it->second;
     }
 
-    EmulationMode mode = parse_emulation_mode(
-        "VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS",
-        "FORCE_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS");
-    if (mode == EmulationMode::ForceEmulate) {
-        LOGI("Vertex Pipeline Stores And Atomics: FORCE EMULATE enabled for physical device %p", physDev);
-        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = false;
-        return false;
-    }
-    if (mode == EmulationMode::Skip) {
-        LOGI("Vertex Pipeline Stores And Atomics: SKIP/BYPASS enabled for physical device %p", physDev);
-        m_phys_native_support[(uint64_t)(uintptr_t)physDev] = true;
-        return true;
-    }
-
-    PFN_vkGetPhysicalDeviceFeatures real_fn =
-        (PFN_vkGetPhysicalDeviceFeatures) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures");
+    PFN_vkGetPhysicalDeviceFeatures real_fn = (PFN_vkGetPhysicalDeviceFeatures)get_real_proc(
+        get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures");
     bool native = false;
     if (real_fn) {
         VkPhysicalDeviceFeatures feat{};
@@ -56,15 +43,25 @@ bool VertexPipelineStoresAndAtomicsModule::is_phys_device_native(VkPhysicalDevic
     }
     m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
     if (!native) {
-        LOGI("Physical device %p lacks native vertexPipelineStoresAndAtomics, enabling automatic emulation!", physDev);
+        LOGI("Physical device %p lacks native vertexPipelineStoresAndAtomics; compute/replay "
+             "fallback available",
+             physDev);
     } else {
         LOGI("Physical device %p natively supports vertexPipelineStoresAndAtomics", physDev);
     }
     return native;
 }
 
+bool VertexPipelineStoresAndAtomicsModule::should_emulate(VkPhysicalDevice physicalDevice) {
+    const auto mode = compute_emulation_mode();
+    if (mode == EmulationMode::Skip)
+        return false;
+    return mode == EmulationMode::ForceEmulate || !is_phys_device_native(physicalDevice);
+}
+
 bool VertexPipelineStoresAndAtomicsModule::is_device_native(VkDevice device) {
-    if (device == VK_NULL_HANDLE) return false;
+    if (device == VK_NULL_HANDLE)
+        return false;
     if (__builtin_expect(device == m_cached_device.load(std::memory_order_relaxed), 1)) {
         return m_cached_device_native.load(std::memory_order_relaxed);
     }
@@ -77,7 +74,7 @@ bool VertexPipelineStoresAndAtomicsModule::is_device_native(VkDevice device) {
     }
     if (!m_phys_native_support.empty()) {
         bool all_native = true;
-        for (const auto& kv : m_phys_native_support) {
+        for (const auto &kv : m_phys_native_support) {
             if (!kv.second) {
                 all_native = false;
                 break;
@@ -88,148 +85,101 @@ bool VertexPipelineStoresAndAtomicsModule::is_device_native(VkDevice device) {
     return false;
 }
 
-void VertexPipelineStoresAndAtomicsModule::on_get_features(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceFeatures* pFeatures
-) {
-    if (!pFeatures) return;
-    EmulationMode featMode = parse_emulation_mode(
-        "VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE",
-        "FORCE_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE");
-    bool should_inject = false;
-    if (featMode == EmulationMode::ForceEmulate) {
-        should_inject = true;
-    } else if (featMode == EmulationMode::Skip) {
-        should_inject = false;
-    } else {
-        should_inject = !is_phys_device_native(physicalDevice);
-    }
-
-    if (should_inject) {
+void VertexPipelineStoresAndAtomicsModule::on_get_features(VkPhysicalDevice physicalDevice,
+                                                           VkPhysicalDeviceFeatures *pFeatures) {
+    if (!pFeatures)
+        return;
+    if (should_emulate(physicalDevice)) {
         pFeatures->vertexPipelineStoresAndAtomics = VK_TRUE;
-        LOG_OPT_DEBUG("Emulated vertexPipelineStoresAndAtomics = VK_TRUE in vkGetPhysicalDeviceFeatures");
+        LOG_OPT_DEBUG(
+            "Emulated vertexPipelineStoresAndAtomics = VK_TRUE in vkGetPhysicalDeviceFeatures");
     }
 }
 
 void VertexPipelineStoresAndAtomicsModule::on_post_get_features2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceFeatures2* pFeatures,
-    void* pUserData
-) {
-    if (!pFeatures) return;
-    EmulationMode featMode = parse_emulation_mode(
-        "VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE",
-        "FORCE_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE");
-    bool should_inject = false;
-    if (featMode == EmulationMode::ForceEmulate) {
-        should_inject = true;
-    } else if (featMode == EmulationMode::Skip) {
-        should_inject = false;
-    } else {
-        should_inject = !is_phys_device_native(physicalDevice);
-    }
-
-    if (should_inject) {
+    VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures2 *pFeatures, void *pUserData) {
+    if (!pFeatures)
+        return;
+    if (should_emulate(physicalDevice)) {
         pFeatures->features.vertexPipelineStoresAndAtomics = VK_TRUE;
-        void* curr = pFeatures->pNext;
+        void *curr = pFeatures->pNext;
         while (curr != nullptr) {
-            auto* h = static_cast<VkBaseOutStructure*>(curr);
+            auto *h = static_cast<VkBaseOutStructure *>(curr);
             if (h->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2) {
-                auto* f2 = reinterpret_cast<VkPhysicalDeviceFeatures2*>(h);
+                auto *f2 = reinterpret_cast<VkPhysicalDeviceFeatures2 *>(h);
                 f2->features.vertexPipelineStoresAndAtomics = VK_TRUE;
             }
             curr = h->pNext;
         }
-        LOG_OPT_DEBUG("Emulated vertexPipelineStoresAndAtomics = VK_TRUE in vkGetPhysicalDeviceFeatures2");
+        LOG_OPT_DEBUG(
+            "Emulated vertexPipelineStoresAndAtomics = VK_TRUE in vkGetPhysicalDeviceFeatures2");
     }
 }
 
-void VertexPipelineStoresAndAtomicsModule::on_get_properties(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceProperties* pProperties
-) {
-    if (!pProperties) return;
-    if (!is_phys_device_native(physicalDevice)) {
-        if (pProperties->limits.maxPerStageDescriptorStorageBuffers < 4) {
-            pProperties->limits.maxPerStageDescriptorStorageBuffers = 4;
-            LOG_OPT_DEBUG("Emulated vertexPipelineStoresAndAtomics: bumped maxPerStageDescriptorStorageBuffers to 4 in vkGetPhysicalDeviceProperties");
-        }
-        if (pProperties->limits.maxPerStageDescriptorStorageImages < 4) {
-            pProperties->limits.maxPerStageDescriptorStorageImages = 4;
-            LOG_OPT_DEBUG("Emulated vertexPipelineStoresAndAtomics: bumped maxPerStageDescriptorStorageImages to 4 in vkGetPhysicalDeviceProperties");
-        }
-    }
-}
-
-void VertexPipelineStoresAndAtomicsModule::on_post_get_properties2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceProperties2* pProperties,
-    void* pUserData
-) {
-    if (!pProperties) return;
-    if (!is_phys_device_native(physicalDevice)) {
-        if (pProperties->properties.limits.maxPerStageDescriptorStorageBuffers < 4) {
-            pProperties->properties.limits.maxPerStageDescriptorStorageBuffers = 4;
-            LOG_OPT_DEBUG("Emulated vertexPipelineStoresAndAtomics: bumped maxPerStageDescriptorStorageBuffers to 4 in vkGetPhysicalDeviceProperties2");
-        }
-        if (pProperties->properties.limits.maxPerStageDescriptorStorageImages < 4) {
-            pProperties->properties.limits.maxPerStageDescriptorStorageImages = 4;
-            LOG_OPT_DEBUG("Emulated vertexPipelineStoresAndAtomics: bumped maxPerStageDescriptorStorageImages to 4 in vkGetPhysicalDeviceProperties2");
-        }
-    }
-}
+void VertexPipelineStoresAndAtomicsModule::on_get_properties(VkPhysicalDevice,
+                                                             VkPhysicalDeviceProperties *) {}
+void VertexPipelineStoresAndAtomicsModule::on_post_get_properties2(VkPhysicalDevice,
+                                                                   VkPhysicalDeviceProperties2 *,
+                                                                   void *) {}
 
 void VertexPipelineStoresAndAtomicsModule::on_pre_create_device(
-    VkPhysicalDevice physicalDevice,
-    VkDeviceCreateInfo* pCreateInfo,
-    VkPhysicalDeviceFeatures* pEnabledFeatures,
-    std::vector<const char*>& enabledExtensions,
-    void*& pUserData
-) {
-    if (is_phys_device_native(physicalDevice) || !pCreateInfo) return;
+    VkPhysicalDevice physicalDevice, VkDeviceCreateInfo *pCreateInfo,
+    VkPhysicalDeviceFeatures *pEnabledFeatures, std::vector<const char *> &enabledExtensions,
+    void *&pUserData) {
+    pUserData = nullptr;
+    if (!pCreateInfo || !should_emulate(physicalDevice))
+        return;
 
-    // 1. If application enabled vertexPipelineStoresAndAtomics in pEnabledFeatures, strip it for real driver
+    // 1. If application enabled vertexPipelineStoresAndAtomics in pEnabledFeatures, strip it for
+    // real driver
     if (pEnabledFeatures && pEnabledFeatures->vertexPipelineStoresAndAtomics) {
+        pUserData = reinterpret_cast<void *>(uintptr_t(1));
         pEnabledFeatures->vertexPipelineStoresAndAtomics = VK_FALSE;
-        LOGI("vkCreateDevice: stripped vertexPipelineStoresAndAtomics from pEnabledFeatures to prevent hardware driver failure");
+        LOGI("vkCreateDevice: stripped vertexPipelineStoresAndAtomics from pEnabledFeatures to "
+             "prevent hardware driver failure");
     }
 
     // 2. If application chained VkPhysicalDeviceFeatures2 in pCreateInfo->pNext, strip it as well
-    void* curr = (void*) pCreateInfo->pNext;
+    void *curr = (void *)pCreateInfo->pNext;
     while (curr != NULL) {
-        VkBaseOutStructure* h = (VkBaseOutStructure*) curr;
+        VkBaseOutStructure *h = (VkBaseOutStructure *)curr;
         if (h->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2) {
-            VkPhysicalDeviceFeatures2* f2 = (VkPhysicalDeviceFeatures2*) h;
+            VkPhysicalDeviceFeatures2 *f2 = (VkPhysicalDeviceFeatures2 *)h;
             if (f2->features.vertexPipelineStoresAndAtomics) {
+                pUserData = reinterpret_cast<void *>(uintptr_t(1));
                 f2->features.vertexPipelineStoresAndAtomics = VK_FALSE;
-                LOGI("vkCreateDevice: stripped vertexPipelineStoresAndAtomics from VkPhysicalDeviceFeatures2 in pNext");
+                LOGI("vkCreateDevice: stripped vertexPipelineStoresAndAtomics from "
+                     "VkPhysicalDeviceFeatures2 in pNext");
             }
         }
-        curr = (void*) h->pNext;
+        curr = (void *)h->pNext;
     }
 }
 
-void VertexPipelineStoresAndAtomicsModule::on_post_create_device(
-    VkPhysicalDevice physicalDevice,
-    VkDevice device,
-    VkResult result,
-    void* pUserData
-) {
+void VertexPipelineStoresAndAtomicsModule::on_post_create_device(VkPhysicalDevice physicalDevice,
+                                                                 VkDevice device, VkResult result,
+                                                                 void *pUserData) {
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
-        bool native = is_phys_device_native(physicalDevice);
+        // Remember this create call's decision, including whether the feature
+        // was requested. Environment changes cannot reroute an existing device.
+        const bool emulate = pUserData != nullptr;
+        bool native = is_phys_device_native(physicalDevice) && !emulate;
+        if (emulate)
+            VertexStoreEmulator::get().enable(device, physicalDevice);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
         m_cached_device.store(device, std::memory_order_release);
         m_cached_device_native.store(native, std::memory_order_release);
-        LOGI("Device %p created: vertexPipelineStoresAndAtomics %s", device, native ? "NATIVE" : "EMULATED");
+        LOGI("Device %p created: vertexPipelineStoresAndAtomics %s", device,
+             native ? "NATIVE" : (emulate ? "EMULATED" : "DISABLED"));
     }
 }
 
 void VertexPipelineStoresAndAtomicsModule::on_destroy_device(VkDevice device) {
+    VertexStoreEmulator::get().destroy_device(device);
     std::lock_guard<std::mutex> lock(m_mutex);
     m_device_native_support.erase((uint64_t)(uintptr_t)device);
     if (m_cached_device.load(std::memory_order_relaxed) == device) {
         m_cached_device.store(VK_NULL_HANDLE, std::memory_order_release);
     }
 }
-

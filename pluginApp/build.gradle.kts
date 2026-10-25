@@ -5,6 +5,7 @@ import com.launchers_plugin.renderer.buildscript.legacyManifest
 import com.launchers_plugin.renderer.buildscript.nativePath
 import com.launchers_plugin.renderer.buildscript.renderer
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.security.MessageDigest
 
 plugins {
     id("com.launchers_plugin.renderer.dsl")
@@ -12,6 +13,15 @@ plugins {
     id("com.google.devtools.ksp")
     id("kotlinx-serialization")
 }
+
+// Explicit diagnostic build only; ordinary offline APK builds do not download
+// or package the validation provider.
+val vulkanValidation = providers.gradleProperty("vulkanValidation").orNull
+require(vulkanValidation == null || vulkanValidation in setOf("core", "sync")) {
+    "vulkanValidation must be core or sync"
+}
+val diagnosticName = if (vulkanValidation == null) "Vulkan Fix" else
+    "Vulkan Fix ($vulkanValidation validation)"
 
 android {
     namespace = "com.launchers_plugin.renderer"
@@ -22,11 +32,31 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = rootProject.extra["pluginVersionCode"] as Int
-        versionName = rootProject.extra["pluginVersionName"] as String
+        versionName = (rootProject.extra["pluginVersionName"] as String) +
+            (vulkanValidation?.let { "-validation-$it" } ?: "")
     }
 
     buildFeatures {
         resValues = true
+    }
+    if (vulkanValidation != null) {
+        val staged = layout.buildDirectory.dir("validation-jniLibs").get().asFile
+        for (abi in listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")) {
+            for (library in listOf("libVkLayer_khronos_validation.so", "libvulkan_fix_validation_driver.so")) {
+                require(staged.resolve("$abi/$library").isFile) {
+                    "Missing validation payload $abi/$library. Run tools/prepare_validation_diagnostics.py first."
+                }
+            }
+        }
+        sourceSets.getByName("main").jniLibs.srcDir(staged)
+        sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("validation-assets").get().asFile)
+        val metadata = layout.buildDirectory.file("validation-assets/VulkanFix-validation-build.json").get().asFile
+        val recordedSource = Regex("\"bridge_source_sha256\"\\s*:\\s*\"([0-9a-f]{64})\"")
+            .find(metadata.readText())?.groupValues?.get(1)
+        val currentSource = MessageDigest.getInstance("SHA-256")
+            .digest(rootProject.file("layer/src/main/cpp/diagnostics/validation_driver.cpp").readBytes())
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        require(recordedSource == currentSource) { "Validation payload is stale; stage it again" }
     }
 
     packaging {
@@ -57,7 +87,7 @@ android {
             // 新架构渲染器配置 (Vulkan Fix)
             resValue("string", "config", buildJsonValue {
                 renderer(
-                    displayName = "Vulkan Fix",
+                    displayName = diagnosticName,
                     rendererId = "opengles3",
                     rendererGLPath = nativePath("libvulkan_fix.so"),
                     rendererEGLPath = nativePath("libvulkan_fix.so"),
@@ -65,6 +95,10 @@ android {
                     env = buildEnvs {
                         normal("POJAV_VULKAN_WRAPPER", "1")
                         normal("LIBGL_ES", "3")
+                        if (vulkanValidation != null) {
+                            normal("VULKAN_FIX_VALIDATION_DRIVER", "1")
+                            normal("VK_VALIDATION_VALIDATE_SYNC", if (vulkanValidation == "sync") "1" else "0")
+                        }
                         toggleable(
                             key = "VULKAN_FIX_DEBUG",
                             value = "1",
@@ -147,8 +181,8 @@ android {
 
             // 兼容旧版渲染器插件架构
             manifestPlaceholders.putAll(legacyManifest {
-                displayName     = "Vulkan Fix"
-                rendererName    = "Vulkan Fix"
+                displayName     = diagnosticName
+                rendererName    = diagnosticName
                 rendererLib     = "libvulkan_fix.so"
                 eglLib          = "libvulkan_fix.so"
                 minMCVer        = ""
@@ -158,11 +192,19 @@ android {
                     put("POJAV_RENDERER", "opengles3")
                     put("POJAV_VULKAN_WRAPPER", "1")
                     put("LIBGL_ES", "3")
+                    if (vulkanValidation != null) {
+                        put("VULKAN_FIX_VALIDATION_DRIVER", "1")
+                        put("VK_VALIDATION_VALIDATE_SYNC", if (vulkanValidation == "sync") "1" else "0")
+                    }
                 }
                 pojavEnv {
                     put("POJAV_RENDERER", "opengles3")
                     put("POJAV_VULKAN_WRAPPER", "1")
                     put("LIBGL_ES", "3")
+                    if (vulkanValidation != null) {
+                        put("VULKAN_FIX_VALIDATION_DRIVER", "1")
+                        put("VK_VALIDATION_VALIDATE_SYNC", if (vulkanValidation == "sync") "1" else "0")
+                    }
                 }
             })
         }

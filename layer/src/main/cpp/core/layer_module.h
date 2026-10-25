@@ -209,6 +209,13 @@ public:
         uint32_t stride) { return false; }
 
     // 10. Descriptor Update Template:
+    virtual VkResult command_recording_error(VkCommandBuffer) { return VK_SUCCESS; }
+    virtual void on_cmd_bind_descriptor_sets(VkCommandBuffer, VkPipelineBindPoint,
+        VkPipelineLayout, uint32_t, uint32_t) {}
+    virtual void on_reset_command_pool(VkDevice, VkCommandPool) {}
+    virtual void on_destroy_command_pool(VkDevice, VkCommandPool) {}
+    virtual void on_post_create_descriptor_update_template(VkDevice,
+        const VkDescriptorUpdateTemplateCreateInfo*, VkResult, VkDescriptorUpdateTemplate) {}
     virtual void on_pre_create_descriptor_update_template(
         VkDevice device,
         VkDescriptorUpdateTemplateCreateInfo& createInfo) {}
@@ -368,7 +375,7 @@ public:
 
     virtual void on_queue_wait_idle(VkQueue queue) {}
     virtual void on_device_wait_idle(VkDevice device) {}
-    virtual bool is_timeline_semaphore(VkSemaphore semaphore) { return false; }
+    virtual bool is_timeline_semaphore(VkDevice device, VkSemaphore semaphore) { return false; }
 
     // 16. Host Query Reset:
     virtual bool on_reset_query_pool(

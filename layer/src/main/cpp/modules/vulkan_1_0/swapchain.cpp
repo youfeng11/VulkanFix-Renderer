@@ -1,5 +1,6 @@
 #include "swapchain.h"
 #include "layer_manager.h"
+#include "timeline_scheduler.h"
 #include "driver_loader.h"
 #include <string.h>
 #include <strings.h>
@@ -712,7 +713,9 @@ bool SwapchainModule::on_acquire_next_image(
                     si.signalSemaphoreCount = 1;
                     si.pSignalSemaphores = &semaphore;
                 }
-                real_qs(queue, (semaphore != VK_NULL_HANDLE) ? 1 : 0, (semaphore != VK_NULL_HANDLE) ? &si : nullptr, fence);
+                VkResult result=VK_SUCCESS;
+                if (!vkfix::TimelineScheduler::get().submit_internal(queue,(semaphore!=VK_NULL_HANDLE)?1:0,(semaphore!=VK_NULL_HANDLE)?&si:nullptr,fence,result))
+                    real_qs(queue,(semaphore!=VK_NULL_HANDLE)?1:0,(semaphore!=VK_NULL_HANDLE)?&si:nullptr,fence);
             }
         }
     }
@@ -750,7 +753,9 @@ bool SwapchainModule::on_queue_present(
         si.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
         si.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
         si.pWaitDstStageMask = waitStages.data();
-        real_qs(queue, 1, &si, VK_NULL_HANDLE);
+        VkResult result=VK_SUCCESS;
+        if (!vkfix::TimelineScheduler::get().submit_internal(queue,1,&si,VK_NULL_HANDLE,result))
+            real_qs(queue,1,&si,VK_NULL_HANDLE);
     }
 
     // 2. Read back & post to ANativeWindow if window is attached
@@ -817,10 +822,12 @@ bool SwapchainModule::on_queue_present(
                 copySubmit.commandBufferCount = 1;
                 copySubmit.pCommandBuffers = &curSc->cmdBuffer;
                 if (real_qs) {
-                    real_qs(queue, 1, &copySubmit, VK_NULL_HANDLE);
+                    VkResult result=VK_SUCCESS;
+                    if (!vkfix::TimelineScheduler::get().submit_internal(queue,1,&copySubmit,VK_NULL_HANDLE,result))
+                        real_qs(queue,1,&copySubmit,VK_NULL_HANDLE);
                 }
                 if (real_qwi) {
-                    real_qwi(queue);
+                    LayerManager::get().dispatch_queue_wait_idle(queue);
                 }
 
                 ANativeWindow_Buffer winBuf{};

@@ -2,6 +2,7 @@
 #include <dlfcn.h>
 #include <mutex>
 #include <atomic>
+#include <string>
 
 static std::atomic<void*> g_real_vulkan_handle{nullptr};
 static std::atomic<PFN_vkGetInstanceProcAddr> g_real_vkGetInstanceProcAddr{nullptr};
@@ -18,9 +19,25 @@ void init_real_vulkan() {
 
     void* handle = nullptr;
 
+    const char* validation = getenv("VULKAN_FIX_VALIDATION_DRIVER");
+    if (validation && strcmp(validation, "1") == 0) {
+        Dl_info own{};
+        if (dladdr((void*)&init_real_vulkan, &own) && own.dli_fname) {
+            std::string path = own.dli_fname;
+            auto separator = path.find_last_of('/');
+            path = separator == std::string::npos ? "./" : path.substr(0, separator + 1);
+            path += "libvulkan_fix_validation_driver.so";
+            handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+            if (handle) LOGI("Loaded opt-in validation provider: %s", path.c_str());
+            else LOGE("Validation provider load failed: %s", dlerror());
+        }
+        // A diagnostic run must not silently become an unvalidated run.
+        if (!handle) return;
+    }
+
     // 1. Check custom path from environment
     const char* custom_path = getenv("VULKAN_FIX_DRIVER_PATH");
-    if (custom_path && custom_path[0] != '\0') {
+    if (!handle && custom_path && custom_path[0] != '\0') {
         handle = dlopen(custom_path, RTLD_NOW | RTLD_LOCAL);
         if (handle) {
             LOGI("Loaded real Vulkan from custom path: %s", custom_path);

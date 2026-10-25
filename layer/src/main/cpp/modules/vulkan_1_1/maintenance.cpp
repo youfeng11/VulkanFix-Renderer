@@ -51,29 +51,9 @@ void MaintenanceModule::on_pre_create_device_custom(
     }
 }
 
-void MaintenanceModule::on_pre_get_properties2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceProperties2* pProperties,
-    void*& pUserData
-) {
-    pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pProperties) return;
-
-    pUserData = vku::unlink_pnext(pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES);
-}
-
-void MaintenanceModule::on_post_get_properties2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceProperties2* pProperties,
-    void* pUserData
-) {
-    if (!pProperties || !pUserData) return;
-
-    auto* p = reinterpret_cast<VkPhysicalDeviceMaintenance3Properties*>(pUserData);
-    p->maxPerSetDescriptors = 1024;
-    p->maxMemoryAllocationSize = 0x80000000ULL;
-    vku::relink_pnext(pProperties->pNext, pUserData);
-}
+// The promotion bridge queries real limits; no synthetic multiview or allocation limits.
+void MaintenanceModule::on_pre_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2*, void*& data) { data = nullptr; }
+void MaintenanceModule::on_post_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2*, void*) {}
 
 bool MaintenanceModule::on_get_descriptor_set_layout_support(
     VkDevice device,

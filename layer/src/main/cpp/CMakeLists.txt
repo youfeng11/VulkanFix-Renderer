@@ -209,3 +209,86 @@ target_link_libraries(indirect_expander_test PRIVATE
 )
 
 # Cache reuse check: the SPIRV-Tools tree above is intentionally stable across AGP .cxx hashes.
+
+# Opt-in: AGP explicitly builds executable targets even with EXCLUDE_FROM_ALL.
+option(VULKAN_FIX_BUILD_REGRESSION_TESTS "Build mock-driver regression runner" OFF)
+if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
+    add_executable(extension_dependencies_test EXCLUDE_FROM_ALL
+        tests/extension_dependencies_test.cpp core/extension_dependencies.cpp core/native_instance_state.cpp)
+    target_include_directories(extension_dependencies_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(extension_dependencies_test PRIVATE Vulkan::Headers)
+    add_library(extension_dependencies_driver SHARED EXCLUDE_FROM_ALL tests/extension_dependencies_driver.cpp)
+    target_link_libraries(extension_dependencies_driver PRIVATE Vulkan::Headers)
+    target_link_options(extension_dependencies_driver PRIVATE "-Wl,-Bsymbolic-functions")
+    add_executable(extension_dependencies_integration_test EXCLUDE_FROM_ALL tests/extension_dependencies_integration_test.cpp)
+    target_link_libraries(extension_dependencies_integration_test PRIVATE Vulkan::Headers dl)
+    add_executable(validation_driver_test EXCLUDE_FROM_ALL tests/validation_driver_test.cpp)
+    target_link_libraries(validation_driver_test PRIVATE Vulkan::Headers dl)
+    add_executable(push_descriptor_gpu_test EXCLUDE_FROM_ALL tests/push_descriptor_gpu_test.cpp)
+    target_include_directories(push_descriptor_gpu_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(push_descriptor_gpu_test PRIVATE vulkan_fix Vulkan::Headers SPIRV-Tools-static ${LOG_LIB} vulkan dl)
+    add_executable(barrier_optimizer_test EXCLUDE_FROM_ALL
+        tests/barrier_optimizer_test.cpp core/tbdr_barrier_optimizer.cpp)
+    target_include_directories(barrier_optimizer_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(barrier_optimizer_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    add_executable(timeline_scheduler_test EXCLUDE_FROM_ALL
+        tests/timeline_scheduler_test.cpp core/timeline_scheduler.cpp core/input_pnext_copy.cpp)
+    target_include_directories(timeline_scheduler_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(timeline_scheduler_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    add_executable(timeline_gpu_test EXCLUDE_FROM_ALL tests/timeline_gpu_test.cpp)
+    target_include_directories(timeline_gpu_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(timeline_gpu_test PRIVATE vulkan_fix Vulkan::Headers ${LOG_LIB} vulkan dl)
+    add_executable(subgroup_broadcast_test EXCLUDE_FROM_ALL
+        tests/subgroup_broadcast_test.cpp shader/subgroup_broadcast_lowering.cpp shader/shader_rewriter.cpp)
+    target_include_directories(subgroup_broadcast_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(subgroup_broadcast_test PRIVATE Vulkan::Headers SPIRV-Tools-static ${LOG_LIB})
+    add_executable(subgroup_broadcast_gpu_test EXCLUDE_FROM_ALL tests/subgroup_broadcast_gpu_test.cpp)
+    target_include_directories(subgroup_broadcast_gpu_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(subgroup_broadcast_gpu_test PRIVATE vulkan_fix Vulkan::Headers SPIRV-Tools-static ${LOG_LIB} vulkan dl)
+    add_executable(promoted_properties_test EXCLUDE_FROM_ALL
+        tests/promoted_properties_test.cpp core/promoted_properties.cpp core/native_instance_state.cpp)
+    target_include_directories(promoted_properties_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(promoted_properties_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    add_executable(core_properties_gpu_test EXCLUDE_FROM_ALL tests/core_properties_gpu_test.cpp)
+    target_include_directories(core_properties_gpu_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(core_properties_gpu_test PRIVATE vulkan_fix ${LOG_LIB} vulkan dl)
+    add_executable(promoted_features_test EXCLUDE_FROM_ALL
+        tests/promoted_features_test.cpp core/promoted_features.cpp
+        core/subgroup_broadcast.cpp core/promoted_properties.cpp core/native_instance_state.cpp)
+    target_include_directories(promoted_features_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(promoted_features_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    add_executable(core_features_gpu_test EXCLUDE_FROM_ALL tests/core_features_gpu_test.cpp)
+    target_include_directories(core_features_gpu_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(core_features_gpu_test PRIVATE vulkan_fix ${LOG_LIB} vulkan dl)
+    # Deterministic regression runner with a mock driver; no GPU is required.
+    # Explicit target only, to avoid duplicating the native build during packaging.
+    set(REGRESSION_CORE_SOURCES ${CORE_SOURCES})
+    list(FILTER REGRESSION_CORE_SOURCES EXCLUDE REGEX "driver_loader\\.cpp$")
+    add_executable(compatibility_regression_test EXCLUDE_FROM_ALL
+        tests/compatibility_regression_test.cpp
+        tests/timeline_regression_cases.cpp
+        tests/push_descriptor_regression_cases.cpp
+        ${REGRESSION_CORE_SOURCES}
+        ${MODULE_SOURCES}
+        ${SHADER_SOURCES}
+    )
+    target_include_directories(compatibility_regression_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>
+    )
+    target_link_libraries(compatibility_regression_test PRIVATE
+        Vulkan::Headers SPIRV-Tools-static ${LOG_LIB} ${ANDROID_LIB} dl
+    )
+    add_executable(vertex_store_gpu_test EXCLUDE_FROM_ALL tests/vertex_store_gpu_test.cpp)
+    target_include_directories(vertex_store_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(vertex_store_gpu_test PRIVATE vulkan_fix SPIRV-Tools-static ${LOG_LIB} vulkan dl)
+endif()

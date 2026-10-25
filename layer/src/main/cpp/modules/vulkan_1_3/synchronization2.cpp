@@ -1,6 +1,7 @@
 #include "synchronization2.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
+#include "timeline_scheduler.h"
 #include "vk_pnext.h"
 #include <string.h>
 #include <strings.h>
@@ -700,12 +701,24 @@ bool Synchronization2Module::on_queue_submit2(
     VkResult& outResult
 ) {
     VkDevice device = LayerManager::get().get_device_for_queue(queue);
-    if (is_device_native(device)) {
-        const auto& dt = LayerManager::get().get_dispatch_table(device);
+    bool emulated_timeline = false;
+    if (pSubmits)
+        for (uint32_t s = 0; s < submitCount; ++s) {
+            for (uint32_t i = 0; i < pSubmits[s].waitSemaphoreInfoCount; ++i)
+                emulated_timeline |= LayerManager::get().is_timeline_semaphore(
+                    device, pSubmits[s].pWaitSemaphoreInfos[i].semaphore);
+            for (uint32_t i = 0; i < pSubmits[s].signalSemaphoreInfoCount; ++i)
+                emulated_timeline |= LayerManager::get().is_timeline_semaphore(
+                    device, pSubmits[s].pSignalSemaphoreInfos[i].semaphore);
+        }
+    if (is_device_native(device) && !emulated_timeline && !vkfix::TimelineScheduler::get().active(device)) {
+        const auto &dt = LayerManager::get().get_dispatch_table(device);
         if (dt.QueueSubmit2) {
             return false;
         }
-        LOGW("synchronization2: device %p claimed native support but dt.QueueSubmit2 is null, falling back to emulation", device);
+        LOGW("synchronization2: device %p claimed native support but dt.QueueSubmit2 is null, "
+             "falling back to emulation",
+             device);
     }
 
     if (submitCount == 0 || !pSubmits) {
@@ -744,7 +757,7 @@ bool Synchronization2Module::on_queue_submit2(
                 if (stage == 0) stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
                 storage.waitDstStageMask.push_back(stage);
                 storage.waitValues.push_back(w.value);
-                if (w.value != 0 || LayerManager::get().is_timeline_semaphore(w.semaphore)) storage.hasTimelineValues = true;
+                if (w.value != 0 || LayerManager::get().is_timeline_semaphore(device, w.semaphore)) storage.hasTimelineValues = true;
             }
         }
 
@@ -762,7 +775,7 @@ bool Synchronization2Module::on_queue_submit2(
                 const auto& sig = sub2.pSignalSemaphoreInfos[i];
                 storage.signalSemaphores.push_back(sig.semaphore);
                 storage.signalValues.push_back(sig.value);
-                if (sig.value != 0 || LayerManager::get().is_timeline_semaphore(sig.semaphore)) storage.hasTimelineValues = true;
+                if (sig.value != 0 || LayerManager::get().is_timeline_semaphore(device, sig.semaphore)) storage.hasTimelineValues = true;
             }
         }
 

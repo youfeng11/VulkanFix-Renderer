@@ -15,17 +15,10 @@ void BufferDeviceAddressModule::on_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
     std::vector<VkExtensionProperties>& extensions
 ) {
-    ExtensionModuleBase::on_enumerate_device_extensions(physicalDevice, extensions);
-
-    if (!is_phys_device_native(physicalDevice)) {
-        if (!vku::has_extension(extensions, VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
-            VkExtensionProperties prop{};
-            memset(&prop, 0, sizeof(prop));
-            strncpy(prop.extensionName, VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
-            prop.specVersion = VK_EXT_BUFFER_DEVICE_ADDRESS_SPEC_VERSION;
-            extensions.push_back(prop);
-        }
-    }
+    // There is no software address emulation. Preserve the driver's extension
+    // list, including the distinction between the EXT and KHR variants.
+    (void)physicalDevice;
+    (void)extensions;
 }
 
 bool BufferDeviceAddressModule::on_get_buffer_device_address(
@@ -68,6 +61,7 @@ bool BufferDeviceAddressModule::on_get_buffer_device_address(
         return true;
     }
 
-    outAddress = pInfo ? (VkDeviceAddress)(uintptr_t)pInfo->buffer : 0;
+    // An opaque buffer handle is not a GPU address.
+    outAddress = 0;
     return true;
 }
