@@ -17,11 +17,13 @@ plugins {
 // Explicit diagnostic build only; ordinary offline APK builds do not download
 // or package the validation provider.
 val vulkanValidation = providers.gradleProperty("vulkanValidation").orNull
+val renderdocCapture = providers.gradleProperty("renderdocCapture").orNull == "true"
+require(!renderdocCapture || vulkanValidation == null) { "Select RenderDoc capture or validation, not both" }
 require(vulkanValidation == null || vulkanValidation in setOf("core", "sync")) {
     "vulkanValidation must be core or sync"
 }
-val diagnosticName = if (vulkanValidation == null) "Vulkan Fix" else
-    "Vulkan Fix ($vulkanValidation validation)"
+val diagnosticName = if (renderdocCapture) "Vulkan Fix (RenderDoc)" else
+    if (vulkanValidation == null) "Vulkan Fix" else "Vulkan Fix ($vulkanValidation validation)"
 
 android {
     namespace = "com.launchers_plugin.renderer"
@@ -33,7 +35,8 @@ android {
         targetSdk = 34
         versionCode = rootProject.extra["pluginVersionCode"] as Int
         versionName = (rootProject.extra["pluginVersionName"] as String) +
-            (vulkanValidation?.let { "-validation-$it" } ?: "")
+            (if (renderdocCapture) "-renderdoc" else vulkanValidation?.let { "-validation-$it" } ?: "")
+        if (renderdocCapture) ndk { abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a")) }
     }
 
     buildFeatures {
@@ -57,6 +60,21 @@ android {
             .digest(rootProject.file("layer/src/main/cpp/diagnostics/validation_driver.cpp").readBytes())
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
         require(recordedSource == currentSource) { "Validation payload is stale; stage it again" }
+    }
+    if (renderdocCapture) {
+        val staged = layout.buildDirectory.dir("renderdoc-jniLibs").get().asFile
+        for (abi in listOf("arm64-v8a", "armeabi-v7a"))
+            for (library in listOf("libVkLayer_GLES_RenderDoc.so", "libvulkan_fix_renderdoc_driver.so"))
+                require(staged.resolve("$abi/$library").isFile) { "Run tools/prepare_renderdoc_capture.py first" }
+        val metadata = layout.buildDirectory.file("renderdoc-assets/VulkanFix-renderdoc-build.json").get().asFile
+        val recordedSource = Regex("\"bridge_source_sha256\"\\s*:\\s*\"([0-9a-f]{64})\"")
+            .find(metadata.readText())?.groupValues?.get(1)
+        val currentSource = MessageDigest.getInstance("SHA-256")
+            .digest(rootProject.file("layer/src/main/cpp/diagnostics/renderdoc_driver.cpp").readBytes())
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        require(recordedSource == currentSource) { "RenderDoc payload is stale; stage it again" }
+        sourceSets.getByName("main").jniLibs.srcDir(staged)
+        sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("renderdoc-assets").get().asFile)
     }
 
     packaging {
@@ -95,6 +113,7 @@ android {
                     env = buildEnvs {
                         normal("POJAV_VULKAN_WRAPPER", "1")
                         normal("LIBGL_ES", "3")
+                        if (renderdocCapture) normal("VULKAN_FIX_RENDERDOC_DRIVER", "1")
                         if (vulkanValidation != null) {
                             normal("VULKAN_FIX_VALIDATION_DRIVER", "1")
                             normal("VK_VALIDATION_VALIDATE_SYNC", if (vulkanValidation == "sync") "1" else "0")
@@ -192,6 +211,7 @@ android {
                     put("POJAV_RENDERER", "opengles3")
                     put("POJAV_VULKAN_WRAPPER", "1")
                     put("LIBGL_ES", "3")
+                    if (renderdocCapture) put("VULKAN_FIX_RENDERDOC_DRIVER", "1")
                     if (vulkanValidation != null) {
                         put("VULKAN_FIX_VALIDATION_DRIVER", "1")
                         put("VK_VALIDATION_VALIDATE_SYNC", if (vulkanValidation == "sync") "1" else "0")
@@ -201,6 +221,7 @@ android {
                     put("POJAV_RENDERER", "opengles3")
                     put("POJAV_VULKAN_WRAPPER", "1")
                     put("LIBGL_ES", "3")
+                    if (renderdocCapture) put("VULKAN_FIX_RENDERDOC_DRIVER", "1")
                     if (vulkanValidation != null) {
                         put("VULKAN_FIX_VALIDATION_DRIVER", "1")
                         put("VK_VALIDATION_VALIDATE_SYNC", if (vulkanValidation == "sync") "1" else "0")

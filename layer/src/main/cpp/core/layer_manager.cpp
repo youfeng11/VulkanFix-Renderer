@@ -306,7 +306,6 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
         m_has_primary_table.store(true, std::memory_order_release);
     }
     m_table_generation.fetch_add(1, std::memory_order_release);
-    RenderDocManager::get().on_device_created(device);
 }
 
 void LayerManager::remove_device_dispatch_table(VkDevice device) {
@@ -386,6 +385,22 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
     if (VertexStoreEmulator::get().enabled(device)) return true;
 
     if (!pName) return true;
+    // Tiler scope/lifetime tracking is required even for native entry points.
+    if (m_dyn_rendering_mod && m_dyn_rendering_mod->needs_tiler_tracking(device)) {
+        if (!strncmp(pName, "vkCmdDraw", 9) ||
+            !strncmp(pName, "vkCmdBeginRenderPass", 20) ||
+            !strncmp(pName, "vkCmdEndRenderPass", 18) ||
+            !strncmp(pName, "vkCmdNextSubpass", 16) ||
+            !strncmp(pName, "vkCmdBeginQuery", 15) ||
+            !strncmp(pName, "vkCmdEndQuery", 13) ||
+            !strcmp(pName, "vkCmdBeginTransformFeedbackEXT") ||
+            !strcmp(pName, "vkCmdEndTransformFeedbackEXT") ||
+            !strcmp(pName, "vkCmdBeginConditionalRenderingEXT") ||
+            !strcmp(pName, "vkCmdEndConditionalRenderingEXT") ||
+            !strcmp(pName, "vkCreateRenderPass2") || !strcmp(pName, "vkCreateRenderPass2KHR") ||
+            !strcmp(pName, "vkCreateCommandPool") || !strcmp(pName, "vkResetCommandPool") ||
+            !strcmp(pName, "vkDestroyCommandPool")) return true;
+    }
     if (m_push_desc_mod && m_push_desc_mod->is_enabled() &&
         !m_push_desc_mod->is_device_native(device) &&
         (!strcmp(pName, "vkCmdBindDescriptorSets") ||
@@ -968,6 +983,7 @@ VkResult LayerManager::dispatch_create_device(
             m_device_phys[(uint64_t)(uintptr_t)*pDevice] = physicalDevice;
         }
         init_device_dispatch_table(*pDevice);
+        RenderDocManager::get().on_device_created(*pDevice, nativeInstance);
         update_device_bypass_flags(*pDevice);
         PipelineCacheManager::get().init_for_device(physicalDevice, *pDevice);
 
@@ -1935,6 +1951,19 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
     }
 }
 
+void LayerManager::block_tiler_split(VkCommandBuffer commandBuffer, bool begin) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->block_tiler_split(commandBuffer, begin);
+}
+
+void LayerManager::track_render_pass(VkDevice device, const VkRenderPassCreateInfo* info,
+                                   VkRenderPass pass) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->track_render_pass(device, info, pass);
+}
+
+void LayerManager::forget_render_pass(VkDevice device, VkRenderPass pass) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->forget_render_pass(device, pass);
+}
+
 void LayerManager::dispatch_cmd_draw(
     VkCommandBuffer commandBuffer,
     uint32_t vertexCount,
@@ -1942,6 +1971,8 @@ void LayerManager::dispatch_cmd_draw(
     uint32_t firstVertex,
     uint32_t firstInstance
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer,
+        uint64_t(vertexCount) * instanceCount);
     if (VertexStoreEmulator::get().draw(commandBuffer, vertexCount, instanceCount, firstVertex, 0, firstInstance, false)) return;
 
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
@@ -1976,6 +2007,8 @@ void LayerManager::dispatch_cmd_draw_indexed(
     int32_t vertexOffset,
     uint32_t firstInstance
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer,
+        uint64_t(indexCount) * instanceCount);
     if (VertexStoreEmulator::get().draw(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance, true)) return;
 
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
@@ -2009,6 +2042,7 @@ void LayerManager::dispatch_cmd_draw_indirect(
     uint32_t drawCount,
     uint32_t stride
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer, 0, drawCount);
     VertexStoreEmulator::get().indirect(commandBuffer);
     if (VertexStoreEmulator::get().recording_error(commandBuffer) != VK_SUCCESS) return;
 
@@ -2052,6 +2086,7 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect(
     uint32_t drawCount,
     uint32_t stride
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer, 0, drawCount);
     VertexStoreEmulator::get().indirect(commandBuffer);
     if (VertexStoreEmulator::get().recording_error(commandBuffer) != VK_SUCCESS) return;
 
@@ -2111,6 +2146,8 @@ void LayerManager::dispatch_cmd_begin_render_pass(
     }
 
     if (dt.CmdBeginRenderPass) {
+        if (m_dyn_rendering_mod)
+            m_dyn_rendering_mod->begin_legacy_rendering(commandBuffer, begin, contents);
         dt.CmdBeginRenderPass(commandBuffer, begin, contents);
     }
 }
@@ -2119,6 +2156,7 @@ void LayerManager::dispatch_cmd_next_subpass(
     VkCommandBuffer commandBuffer,
     VkSubpassContents contents
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->end_legacy_rendering(commandBuffer);
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
@@ -2130,6 +2168,7 @@ void LayerManager::dispatch_cmd_next_subpass(
 void LayerManager::dispatch_cmd_end_render_pass(
     VkCommandBuffer commandBuffer
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->end_legacy_rendering(commandBuffer);
     VertexStoreEmulator::get().legacy_rendering(commandBuffer, false);
 
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
@@ -2801,15 +2840,20 @@ VkResult LayerManager::dispatch_create_render_pass2(
     const VkAllocationCallbacks* pAllocator,
     VkRenderPass* pRenderPass
 ) {
+    auto tracked = [&](VkResult result) {
+        if (result == VK_SUCCESS && pRenderPass && m_dyn_rendering_mod)
+            m_dyn_rendering_mod->track_render_pass2(device, pCreateInfo, *pRenderPass);
+        return result;
+    };
     VkResult res = VK_SUCCESS;
     if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
         if (m_renderpass2_mod->on_create_render_pass2(device, pCreateInfo, pAllocator, pRenderPass, res)) {
-            return res;
+            return tracked(res);
         }
     }
     const auto& dt = get_dispatch_table(device);
     if (dt.CreateRenderPass2) {
-        return dt.CreateRenderPass2(device, pCreateInfo, pAllocator, pRenderPass);
+        return tracked(dt.CreateRenderPass2(device, pCreateInfo, pAllocator, pRenderPass));
     }
     PFN_vkCreateRenderPass2KHR real_fn =
         (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2KHR");
@@ -2817,7 +2861,7 @@ VkResult LayerManager::dispatch_create_render_pass2(
         real_fn = (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2");
     }
     if (real_fn) {
-        return real_fn(device, pCreateInfo, pAllocator, pRenderPass);
+        return tracked(real_fn(device, pCreateInfo, pAllocator, pRenderPass));
     }
     return VK_ERROR_INITIALIZATION_FAILED;
 }
@@ -2842,6 +2886,12 @@ void LayerManager::dispatch_cmd_begin_render_pass2(
         begin = &resolved;
     }
 
+    if (m_dyn_rendering_mod) {
+        m_dyn_rendering_mod->begin_legacy_rendering(commandBuffer, begin,
+            pSubpassBeginInfo ? pSubpassBeginInfo->contents : VK_SUBPASS_CONTENTS_INLINE);
+        if (pSubpassBeginInfo && pSubpassBeginInfo->pNext)
+            m_dyn_rendering_mod->end_legacy_rendering(commandBuffer);
+    }
     if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
         if (m_renderpass2_mod->on_cmd_begin_render_pass2(commandBuffer, begin, pSubpassBeginInfo)) {
             return;
@@ -2862,6 +2912,7 @@ void LayerManager::dispatch_cmd_next_subpass2(
     const VkSubpassBeginInfo* pSubpassBeginInfo,
     const VkSubpassEndInfo* pSubpassEndInfo
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->end_legacy_rendering(commandBuffer);
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
     if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
@@ -2883,6 +2934,7 @@ void LayerManager::dispatch_cmd_end_render_pass2(
     VkCommandBuffer commandBuffer,
     const VkSubpassEndInfo* pSubpassEndInfo
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->end_legacy_rendering(commandBuffer);
     VertexStoreEmulator::get().legacy_rendering(commandBuffer, false);
 
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
@@ -2910,6 +2962,7 @@ void LayerManager::dispatch_cmd_draw_indirect_count(
     uint32_t maxDrawCount,
     uint32_t stride
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer, 0, maxDrawCount);
     VertexStoreEmulator::get().indirect(commandBuffer);
     if (VertexStoreEmulator::get().recording_error(commandBuffer) != VK_SUCCESS) return;
 
@@ -2936,6 +2989,7 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect_count(
     uint32_t maxDrawCount,
     uint32_t stride
 ) {
+    if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer, 0, maxDrawCount);
     VertexStoreEmulator::get().indirect(commandBuffer);
     if (VertexStoreEmulator::get().recording_error(commandBuffer) != VK_SUCCESS) return;
 
@@ -3782,7 +3836,6 @@ VkResult LayerManager::dispatch_queue_present(VkQueue queue, const VkPresentInfo
 
     auto result = vkfix::TimelineScheduler::get().native_queue_call(queue, [&]() -> VkResult {
         VkResult res = VK_SUCCESS;
-        RenderDocManager::get().on_pre_present(queue, pPresentInfo);
         if (TBDRBarrierOptimizer::get().is_enabled()) {
             TBDRBarrierOptimizer::get().maybe_log_stats();
         }
@@ -3792,7 +3845,7 @@ VkResult LayerManager::dispatch_queue_present(VkQueue queue, const VkPresentInfo
         }
         if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
             if (m_swapchain_mod->on_queue_present(queue, pPresentInfo, res)) {
-                RenderDocManager::get().on_post_present(queue, pPresentInfo);
+                RenderDocManager::get().on_post_present(get_device_for_queue(queue), res);
                 return res;
             }
         }
@@ -3809,7 +3862,7 @@ VkResult LayerManager::dispatch_queue_present(VkQueue queue, const VkPresentInfo
                 res = VK_ERROR_EXTENSION_NOT_PRESENT;
             }
         }
-        RenderDocManager::get().on_post_present(queue, pPresentInfo);
+        RenderDocManager::get().on_post_present(device, res);
         return res;
     });
     vkfix::TimelineScheduler::get().after_present(queue, pPresentInfo, result);

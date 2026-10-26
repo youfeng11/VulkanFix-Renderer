@@ -1,49 +1,47 @@
-#ifndef RENDERDOC_MANAGER_H
-#define RENDERDOC_MANAGER_H
-
-#include "vk_common.h"
+#pragma once
 #include "renderdoc_app.h"
+#include "vk_common.h"
 #include <atomic>
-#include <string>
+#include <map>
 #include <mutex>
+#include <string>
 
 class RenderDocManager {
-public:
-    static RenderDocManager& get();
-
+  public:
+    static RenderDocManager &get();
     void init();
-    bool is_available() const { return m_rdoc_api != nullptr; }
-    bool is_capturing() const { return m_capturing.load(std::memory_order_relaxed); }
-
-    void trigger_capture(uint32_t num_frames = 1);
-    void start_capture(VkDevice device = VK_NULL_HANDLE);
-    void end_capture(VkDevice device = VK_NULL_HANDLE);
-
-    void on_device_created(VkDevice device);
+    bool is_available() const { return m_api.load(std::memory_order_acquire) != nullptr; }
+    bool is_capturing() const { return m_capturing.load(std::memory_order_acquire); }
+    void trigger_capture(uint32_t count = 1);
+    bool start_capture(VkDevice device = VK_NULL_HANDLE);
+    bool end_capture(VkDevice device = VK_NULL_HANDLE);
+    void on_device_created(VkDevice device, VkInstance instance);
     void on_device_destroyed(VkDevice device);
+    void on_instance_destroyed(VkInstance instance);
+    void on_post_present(VkDevice device, VkResult result);
+    std::string last_capture_path();
 
-    void on_pre_present(VkQueue queue, const VkPresentInfoKHR* pPresentInfo);
-    void on_post_present(VkQueue queue, const VkPresentInfoKHR* pPresentInfo);
-
-private:
+  private:
+    struct Context {
+        VkInstance instance{};
+        uint64_t frames = 0;
+    };
     RenderDocManager() = default;
-    ~RenderDocManager() = default;
-
-    void check_trigger_file();
-
-    RENDERDOC_API_1_6_0* m_rdoc_api = nullptr;
-    void* m_rdoc_lib = nullptr;
-
-    std::atomic<bool> m_initialized{false};
+    bool start_locked(VkDevice device, bool automatic);
+    bool end_locked();
+    void abort_locked();
+    void status_locked();
+    void fail_locked(const char *error);
+    std::atomic<RENDERDOC_API_1_6_0 *> m_api{nullptr};
     std::atomic<bool> m_capturing{false};
-    std::atomic<uint64_t> m_frame_counter{0};
-    std::atomic<uint64_t> m_target_frame{0};
-    std::atomic<uint32_t> m_remaining_captures{0};
-
-    std::string m_trigger_file;
-    std::string m_capture_dir;
-    VkDevice m_active_device{VK_NULL_HANDLE};
-    std::mutex m_mutex;
+    std::mutex m_init_mutex, m_mutex;
+    std::map<VkDevice, Context> m_devices;
+    void *m_library = nullptr;
+    std::string m_trigger, m_status, m_template, m_last_capture, m_error;
+    RENDERDOC_DevicePointer m_capture_pointer = nullptr;
+    VkDevice m_capture_device = VK_NULL_HANDLE;
+    uint32_t m_before_count = 0, m_pending = 0, m_completed = 0;
+    uint64_t m_target_frame = 0;
+    bool m_automatic = false;
+    bool m_can_discard = false;
 };
-
-#endif // RENDERDOC_MANAGER_H

@@ -3,6 +3,7 @@
 #include "layer_manager.h"
 #include "vk_pnext.h"
 #include "vk_debug_utils.h"
+#include "core/layout_compat.h"
 #include <string.h>
 #include <algorithm>
 
@@ -13,7 +14,7 @@ static inline void hash_combine(size_t& seed, size_t v) {
 }
 
 size_t DynamicRenderingModule::PipelineRenderPassKeyHash::operator()(const PipelineRenderPassKey& k) const {
-    size_t seed = 0;
+    size_t seed = std::hash<VkDevice>{}(k.device);
     for (uint32_t i = 0; i < k.colorAttachmentCount; ++i) {
         hash_combine(seed, std::hash<uint32_t>()((uint32_t)k.colorFormats[i]));
     }
@@ -25,7 +26,7 @@ size_t DynamicRenderingModule::PipelineRenderPassKeyHash::operator()(const Pipel
 }
 
 size_t DynamicRenderingModule::DynamicRenderPassKeyHash::operator()(const DynamicRenderPassKey& k) const {
-    size_t seed = 0;
+    size_t seed = std::hash<VkDevice>{}(k.device);
     for (uint32_t i = 0; i < k.colorAttachmentCount; ++i) {
         const auto& a = k.colorAttachments[i];
         hash_combine(seed, (size_t)a.format);
@@ -54,10 +55,10 @@ size_t DynamicRenderingModule::DynamicRenderPassKeyHash::operator()(const Dynami
 }
 
 size_t DynamicRenderingModule::FramebufferKeyHash::operator()(const FramebufferKey& k) const {
-    size_t seed = 0;
-    hash_combine(seed, (size_t)(uintptr_t)k.renderPass);
+    size_t seed = std::hash<VkDevice>{}(k.device);
+    hash_combine(seed, std::hash<VkRenderPass>{}(k.renderPass));
     for (uint32_t i = 0; i < k.viewCount; ++i) {
-        hash_combine(seed, (size_t)(uintptr_t)k.views[i]);
+        hash_combine(seed, std::hash<VkImageView>{}(k.views[i]));
     }
     hash_combine(seed, (size_t)k.width);
     hash_combine(seed, (size_t)k.height);
@@ -295,8 +296,20 @@ void DynamicRenderingModule::on_post_create_device(
 ) {
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
         bool native = is_phys_device_native(physicalDevice);
+        VkPhysicalDeviceProperties properties{};
+        auto query = (PFN_vkGetPhysicalDeviceProperties)get_real_proc(
+            get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+        if (query) query(physicalDevice, &properties);
+        const char* guard = getenv("VULKAN_FIX_MALI_TILER_GUARD");
+        const bool tilerGuard = !native && properties.vendorID == 0x13B5 &&
+            (!guard || strcmp(guard, "0"));
         std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
+        if (tilerGuard) {
+            m_tiler_devices.insert((uint64_t)(uintptr_t)device);
+            m_has_tiler_guard.store(true, std::memory_order_release);
+            LOGI("Mali tiler guard v2: legacy + emulated dynamic rendering enabled (4 indirect commands / 128 draws / 262144 direct vertices per batch)");
+        }
         if (m_primary_dev.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
             m_primary_native.store(native, std::memory_order_relaxed);
             m_primary_dev.store(device, std::memory_order_release);
@@ -317,6 +330,13 @@ void DynamicRenderingModule::on_destroy_device(VkDevice device) {
     PFN_vkDestroyRenderPass real_destroy_rp = (PFN_vkDestroyRenderPass)
         get_real_proc(get_last_instance(), device, "vkDestroyRenderPass");
 
+    for (auto legacy = m_legacy_continuations.begin(); legacy != m_legacy_continuations.end();) {
+        if (legacy->first.device == device) {
+            if (real_destroy_rp) real_destroy_rp(device, legacy->second, nullptr);
+            legacy = m_legacy_continuations.erase(legacy);
+        } else ++legacy;
+    }
+
     auto it = m_device_resources.find((uint64_t)(uintptr_t)device);
     if (it != m_device_resources.end()) {
         if (real_destroy_fb) {
@@ -333,6 +353,8 @@ void DynamicRenderingModule::on_destroy_device(VkDevice device) {
     }
 
     m_device_native_support.erase((uint64_t)(uintptr_t)device);
+    m_tiler_devices.erase((uint64_t)(uintptr_t)device);
+    m_has_tiler_guard.store(!m_tiler_devices.empty(), std::memory_order_release);
 
     // Drop per-command-buffer state belonging to this device. Without this the
     // maps keep growing across device create/destroy cycles (e.g. world reloads)
@@ -342,6 +364,8 @@ void DynamicRenderingModule::on_destroy_device(VkDevice device) {
         for (auto cmdIt = m_cmd_devices.begin(); cmdIt != m_cmd_devices.end();) {
             if (cmdIt->second == device) {
                 m_cmd_rendering_states.erase(cmdIt->first);
+                m_primary_commands.erase(cmdIt->first);
+                m_split_blockers.erase(cmdIt->first);
                 cmdIt = m_cmd_devices.erase(cmdIt);
             } else {
                 ++cmdIt;
@@ -349,18 +373,20 @@ void DynamicRenderingModule::on_destroy_device(VkDevice device) {
         }
     }
 
-    if (m_device_resources.empty()) {
-        m_pipeline_rp_cache.clear();
-        m_dynamic_rp_cache.clear();
-        m_framebuffer_cache.clear();
-        m_image_view_to_framebuffers.clear();
-        // Image / view metadata is keyed by handle only, so it can only be
-        // dropped safely once every device is gone.
-        m_images.clear();
-        m_image_views.clear();
-        m_cmd_rendering_states.clear();
-        m_cmd_devices.clear();
-    }
+    // Erase only this device. Cached handles from a destroyed device must never
+    // be returned to a surviving/new device, even when handle values coincide.
+    auto eraseDevice = [device](auto& cache) {
+        for (auto entry = cache.begin(); entry != cache.end();) {
+            if (entry->first.device == device) entry = cache.erase(entry);
+            else ++entry;
+        }
+    };
+    eraseDevice(m_pipeline_rp_cache);
+    eraseDevice(m_dynamic_rp_cache);
+    eraseDevice(m_framebuffer_cache);
+    eraseDevice(m_image_view_to_framebuffers);
+    eraseDevice(m_images);
+    eraseDevice(m_image_views);
 }
 
 bool DynamicRenderingModule::needs_pipeline_interception(
@@ -401,7 +427,9 @@ VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     }
 
     PipelineRenderPassKey key;
-    key.colorAttachmentCount = std::min(effectiveColorCount, MAX_KEY_ATTACHMENTS);
+    key.device = device;
+    key.colorAttachmentCount = effectiveColorCount;
+    key.colorFormats.resize(effectiveColorCount);
     if (effectiveColorCount > 0 && pColorAttachmentFormats != NULL) {
         for (uint32_t i = 0; i < key.colorAttachmentCount; ++i) {
             key.colorFormats[i] = pColorAttachmentFormats[i];
@@ -492,7 +520,13 @@ VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     VkResult res = real_create_rp(device, &rpInfo, NULL, &rp);
     if (res == VK_SUCCESS && rp != VK_NULL_HANDLE) {
         std::unique_lock<std::shared_mutex> writeLock(m_rw_mutex);
-        m_pipeline_rp_cache[key] = rp;
+        auto inserted = m_pipeline_rp_cache.emplace(key, rp);
+        if (!inserted.second) {
+            auto destroy = (PFN_vkDestroyRenderPass)get_real_proc(
+                get_last_instance(), device, "vkDestroyRenderPass");
+            if (destroy) destroy(device, rp, nullptr);
+            return inserted.first->second;
+        }
         m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(rp);
         LOGI("Created cached pipeline compatible renderPass %p", (void*)(uintptr_t)rp);
         return rp;
@@ -553,6 +587,9 @@ void DynamicRenderingModule::on_post_allocate_command_buffers(
         std::lock_guard<std::mutex> lock(m_cmd_mutex);
         for (uint32_t i = 0; i < pAllocateInfo->commandBufferCount; ++i) {
             m_cmd_devices[(uint64_t)(uintptr_t)pCommandBuffers[i]] = device;
+            auto key = (uint64_t)(uintptr_t)pCommandBuffers[i];
+            if (pAllocateInfo->level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) m_primary_commands.insert(key);
+            else m_primary_commands.erase(key);
         }
     }
 }
@@ -566,6 +603,8 @@ void DynamicRenderingModule::on_free_command_buffers(
     for (uint32_t i = 0; i < count; ++i) {
         m_cmd_devices.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
         m_cmd_rendering_states.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
+        m_primary_commands.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
+        m_split_blockers.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
     }
 }
 
@@ -574,15 +613,21 @@ void DynamicRenderingModule::on_begin_command_buffer(
     const VkCommandBufferBeginInfo* pBeginInfo
 ) {
     std::lock_guard<std::mutex> lock(m_cmd_mutex);
-    m_cmd_rendering_states.erase((uint64_t)(uintptr_t)commandBuffer);
+    auto state = m_cmd_rendering_states.find((uint64_t)(uintptr_t)commandBuffer);
+    if (state != m_cmd_rendering_states.end()) {
+        state->second.is_rendering = false;
+        state->second.continuation = VK_NULL_HANDLE;
+        state->second.attachmentViews.clear();
+        state->second.budget = {};
+    }
+    m_split_blockers.erase((uint64_t)(uintptr_t)commandBuffer);
 }
 
 void DynamicRenderingModule::on_reset_command_buffer(
     VkCommandBuffer commandBuffer,
     VkCommandBufferResetFlags flags
 ) {
-    std::lock_guard<std::mutex> lock(m_cmd_mutex);
-    m_cmd_rendering_states.erase((uint64_t)(uintptr_t)commandBuffer);
+    on_begin_command_buffer(commandBuffer, nullptr);
 }
 
 void DynamicRenderingModule::on_pre_begin_command_buffer(
@@ -642,7 +687,7 @@ void DynamicRenderingModule::on_post_create_image(
         meta.samples = pCreateInfo->samples;
         meta.extent = pCreateInfo->extent;
         meta.usage = pCreateInfo->usage;
-        m_images[(uint64_t)(uintptr_t)image] = meta;
+        m_images[vkfix::DeviceObjectKey::make(device, image)] = meta;
     }
 }
 
@@ -651,7 +696,7 @@ void DynamicRenderingModule::on_destroy_image(
     VkImage image
 ) {
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
-    m_images.erase((uint64_t)(uintptr_t)image);
+    m_images.erase(vkfix::DeviceObjectKey::make(device, image));
 }
 
 void DynamicRenderingModule::on_post_create_image_view(
@@ -669,18 +714,19 @@ void DynamicRenderingModule::on_post_create_image_view(
         meta.extent = {0, 0};
         meta.usage = 0;
 
-        auto it = m_images.find((uint64_t)(uintptr_t)pCreateInfo->image);
+        auto it = m_images.find(vkfix::DeviceObjectKey::make(device, pCreateInfo->image));
         if (it != m_images.end()) {
             meta.samples = it->second.samples;
-            meta.extent.width = it->second.extent.width;
-            meta.extent.height = it->second.extent.height;
+            const uint32_t mip = pCreateInfo->subresourceRange.baseMipLevel;
+            meta.extent.width = std::max(1u, mip < 32 ? it->second.extent.width >> mip : 0u);
+            meta.extent.height = std::max(1u, mip < 32 ? it->second.extent.height >> mip : 0u);
             meta.usage = it->second.usage;
             if (meta.format == VK_FORMAT_UNDEFINED) {
                 meta.format = it->second.format;
             }
         }
 
-        m_image_views[(uint64_t)(uintptr_t)imageView] = meta;
+        m_image_views[vkfix::DeviceObjectKey::make(device, imageView)] = meta;
     }
 }
 
@@ -689,14 +735,17 @@ void DynamicRenderingModule::on_destroy_image_view(
     VkImageView imageView
 ) {
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
-    m_image_views.erase((uint64_t)(uintptr_t)imageView);
+    const auto viewKey = vkfix::DeviceObjectKey::make(device, imageView);
+    m_image_views.erase(viewKey);
 
-    auto listIt = m_image_view_to_framebuffers.find((uint64_t)(uintptr_t)imageView);
+    auto listIt = m_image_view_to_framebuffers.find(viewKey);
     if (listIt != m_image_view_to_framebuffers.end()) {
         PFN_vkDestroyFramebuffer real_destroy_fb = (PFN_vkDestroyFramebuffer)
             get_real_proc(get_last_instance(), device, "vkDestroyFramebuffer");
 
-        for (const FramebufferKey& fbKey : listIt->second) {
+        auto keys = std::move(listIt->second);
+        m_image_view_to_framebuffers.erase(listIt);
+        for (const FramebufferKey& fbKey : keys) {
             auto fbIt = m_framebuffer_cache.find(fbKey);
             if (fbIt != m_framebuffer_cache.end()) {
                 if (real_destroy_fb) {
@@ -704,13 +753,20 @@ void DynamicRenderingModule::on_destroy_image_view(
                 }
                 auto resources = m_device_resources.find((uint64_t)(uintptr_t)device);
                 if (resources != m_device_resources.end()) {
-                    auto& owned = resources->second.framebuffers;
-                    owned.erase(std::remove(owned.begin(), owned.end(), fbIt->second), owned.end());
+                    resources->second.framebuffers.erase(fbIt->second);
                 }
                 m_framebuffer_cache.erase(fbIt);
             }
+            // Remove the framebuffer from every sibling view as well. A depth
+            // view can outlive thousands of transient color/resolve targets.
+            for (VkImageView sibling : fbKey.views) {
+                auto peer = m_image_view_to_framebuffers.find(
+                    vkfix::DeviceObjectKey::make(device, sibling));
+                if (peer == m_image_view_to_framebuffers.end()) continue;
+                peer->second.erase(fbKey);
+                if (peer->second.empty()) m_image_view_to_framebuffers.erase(peer);
+            }
         }
-        m_image_view_to_framebuffers.erase(listIt);
     }
 }
 
@@ -733,10 +789,10 @@ void DynamicRenderingModule::on_post_get_swapchain_images(
         meta.samples = VK_SAMPLE_COUNT_1_BIT;
         meta.extent = {extent.width, extent.height, 1};
         meta.usage = usage;
-        m_images[(uint64_t)(uintptr_t)image] = meta;
+        m_images[vkfix::DeviceObjectKey::make(device, image)] = meta;
 
         for (auto& pair : m_image_views) {
-            if (pair.second.image == image) {
+            if (pair.first.device == device && pair.second.image == image) {
                 pair.second.extent = extent;
                 pair.second.usage = usage;
                 pair.second.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -746,6 +802,302 @@ void DynamicRenderingModule::on_post_get_swapchain_images(
             }
         }
     }
+}
+
+VkRenderPass DynamicRenderingModule::continuation_render_pass(
+    VkDevice device, const DynamicRenderPassKey& originalKey,
+    const std::vector<VkAttachmentDescription>& attachments,
+    const std::vector<VkAttachmentReference>& colorRefs,
+    const VkAttachmentReference* depthRef, const VkRenderingInfo& rendering) {
+    thread_local DynamicRenderPassKey key;
+    key = originalKey;
+    for (uint32_t i = 0; i < key.colorAttachmentCount; ++i) {
+        if (colorRefs[i].attachment == VK_ATTACHMENT_UNUSED) continue;
+        key.colorAttachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    }
+    if (depthRef) {
+        if (rendering.pDepthAttachment && rendering.pDepthAttachment->imageView) {
+            key.depthStencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        }
+        if (rendering.pStencilAttachment && rendering.pStencilAttachment->imageView) {
+            key.depthStencilAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        }
+    }
+    {
+        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+        auto it = m_dynamic_rp_cache.find(key);
+        if (it != m_dynamic_rp_cache.end()) return it->second;
+    }
+    // Most begins hit the LOAD cache. Copy attachment storage only on a miss.
+    auto preserved = attachments;
+    for (uint32_t i = 0; i < key.colorAttachmentCount; ++i)
+        if (colorRefs[i].attachment != VK_ATTACHMENT_UNUSED)
+            preserved[colorRefs[i].attachment].loadOp = key.colorAttachments[i].loadOp;
+    if (depthRef) {
+        preserved[depthRef->attachment].loadOp = key.depthStencilAttachment.loadOp;
+        preserved[depthRef->attachment].stencilLoadOp = key.depthStencilAttachment.stencilLoadOp;
+    }
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = (uint32_t)colorRefs.size();
+    subpass.pColorAttachments = colorRefs.data();
+    subpass.pDepthStencilAttachment = depthRef;
+    VkRenderPassCreateInfo create{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    create.attachmentCount = (uint32_t)preserved.size();
+    create.pAttachments = preserved.data();
+    create.subpassCount = 1;
+    create.pSubpasses = &subpass;
+    auto real = (PFN_vkCreateRenderPass)get_real_proc(get_last_instance(), device, "vkCreateRenderPass");
+    VkRenderPass pass{};
+    if (!real || real(device, &create, nullptr, &pass) != VK_SUCCESS || !pass) {
+        LOGE("Mali tiler guard: could not create LOAD continuation render pass");
+        return VK_NULL_HANDLE;
+    }
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+    auto inserted = m_dynamic_rp_cache.emplace(key, pass);
+    if (!inserted.second) {
+        auto destroy = (PFN_vkDestroyRenderPass)get_real_proc(get_last_instance(), device, "vkDestroyRenderPass");
+        if (destroy) destroy(device, pass, nullptr);
+        return inserted.first->second;
+    }
+    m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(pass);
+    return pass;
+}
+
+void DynamicRenderingModule::block_tiler_split(VkCommandBuffer commandBuffer, bool begin) {
+    if (!m_has_tiler_guard.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
+    auto key = (uint64_t)(uintptr_t)commandBuffer;
+    if (begin) ++m_split_blockers[key];
+    else {
+        auto it = m_split_blockers.find(key);
+        if (it != m_split_blockers.end() && !--it->second) m_split_blockers.erase(it);
+    }
+}
+
+bool DynamicRenderingModule::needs_tiler_tracking(VkDevice device) {
+    if (!m_has_tiler_guard.load(std::memory_order_acquire)) return false;
+    std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+    return m_tiler_devices.count((uint64_t)(uintptr_t)device) != 0;
+}
+
+void DynamicRenderingModule::track_render_pass(VkDevice device,
+    const VkRenderPassCreateInfo* info, VkRenderPass pass) {
+    if (!m_has_tiler_guard.load(std::memory_order_acquire) || !info || !pass) return;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+        if (!m_tiler_devices.count((uint64_t)(uintptr_t)device)) return;
+    }
+    // Multi-subpass, resolves, input attachments and extension state need their
+    // original tile lifetime. BSL's shadow and scene passes are single-subpass.
+    if (info->pNext || info->flags || info->subpassCount != 1 || !info->pSubpasses ||
+        !info->attachmentCount || !info->pAttachments) return;
+    const auto& subpass = info->pSubpasses[0];
+    if (subpass.flags || subpass.pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS ||
+        subpass.inputAttachmentCount || subpass.pResolveAttachments ||
+        subpass.preserveAttachmentCount) return;
+    std::vector<VkAttachmentDescription> attachments(info->pAttachments,
+        info->pAttachments + info->attachmentCount);
+    auto preserve = [&](const VkAttachmentReference& ref, bool color) {
+        if (ref.attachment == VK_ATTACHMENT_UNUSED) return true;
+        if (ref.attachment >= attachments.size()) return false;
+        auto& a = attachments[ref.attachment];
+        if (a.flags || a.samples != VK_SAMPLE_COUNT_1_BIT ||
+            ref.layout == VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT) return false;
+        const bool stencil = !color && (a.format == VK_FORMAT_S8_UINT ||
+            a.format == VK_FORMAT_D16_UNORM_S8_UINT || a.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+            a.format == VK_FORMAT_D32_SFLOAT_S8_UINT);
+        const bool depth = !color && a.format != VK_FORMAT_S8_UINT;
+        if (((color || depth) && a.storeOp != VK_ATTACHMENT_STORE_OP_STORE) ||
+            (stencil && a.stencilStoreOp != VK_ATTACHMENT_STORE_OP_STORE)) return false;
+        // Ending the original pass performs its final layout transition. The
+        // next pass starts from that layout, never from UNDEFINED / initial.
+        a.initialLayout = a.finalLayout;
+        if (color || depth) a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        if (stencil) a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        return true;
+    };
+    for (uint32_t i = 0; i < subpass.colorAttachmentCount; ++i)
+        if (!subpass.pColorAttachments || !preserve(subpass.pColorAttachments[i], true)) return;
+    if (subpass.pDepthStencilAttachment && !preserve(*subpass.pDepthStencilAttachment, false)) return;
+    auto create = *info;
+    create.pAttachments = attachments.data();
+    auto real = (PFN_vkCreateRenderPass)get_real_proc(get_last_instance(), device, "vkCreateRenderPass");
+    VkRenderPass continuation{};
+    if (!real || real(device, &create, nullptr, &continuation) != VK_SUCCESS || !continuation) {
+        LOGE("Mali tiler guard: could not create legacy LOAD continuation");
+        return;
+    }
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+    auto inserted = m_legacy_continuations.emplace(
+        vkfix::DeviceObjectKey::make(device, pass), continuation);
+    if (!inserted.second) {
+        auto destroy = (PFN_vkDestroyRenderPass)get_real_proc(get_last_instance(), device, "vkDestroyRenderPass");
+        if (destroy) destroy(device, continuation, nullptr);
+        return;
+    }
+    LOGI("Mali tiler guard: legacy render pass %p protected (%u attachments)",
+        (void*)pass, info->attachmentCount);
+}
+
+void DynamicRenderingModule::track_render_pass2(VkDevice device,
+    const VkRenderPassCreateInfo2* info, VkRenderPass pass) {
+    if (!m_has_tiler_guard.load(std::memory_order_acquire) || !info || info->pNext ||
+        info->subpassCount != 1 || !info->pSubpasses || info->correlatedViewMaskCount) return;
+    const auto& src = info->pSubpasses[0];
+    if (src.pNext || src.viewMask || src.inputAttachmentCount || src.pResolveAttachments) return;
+    const bool sanitize = LayoutCompat::get().is_emulated(device);
+    auto layout = [&](VkImageLayout value) { return sanitize ? LayoutCompat::sanitize(value) : value; };
+    std::vector<VkAttachmentDescription> attachments(info->attachmentCount);
+    for (uint32_t i = 0; i < info->attachmentCount; ++i) {
+        const auto& a = info->pAttachments[i];
+        if (a.pNext) return;
+        attachments[i] = {a.flags, a.format, a.samples, a.loadOp, a.storeOp,
+            a.stencilLoadOp, a.stencilStoreOp, layout(a.initialLayout), layout(a.finalLayout)};
+    }
+    std::vector<VkAttachmentReference> colors(src.colorAttachmentCount);
+    for (uint32_t i = 0; i < src.colorAttachmentCount; ++i) {
+        if (src.pColorAttachments[i].pNext) return;
+        colors[i] = {src.pColorAttachments[i].attachment, layout(src.pColorAttachments[i].layout)};
+    }
+    VkAttachmentReference depth{};
+    if (src.pDepthStencilAttachment) {
+        if (src.pDepthStencilAttachment->pNext) return;
+        depth = {src.pDepthStencilAttachment->attachment, layout(src.pDepthStencilAttachment->layout)};
+    }
+    std::vector<VkSubpassDependency> dependencies(info->dependencyCount);
+    for (uint32_t i = 0; i < info->dependencyCount; ++i) {
+        const auto& d = info->pDependencies[i];
+        if (d.pNext || d.viewOffset || (d.dependencyFlags & VK_DEPENDENCY_VIEW_LOCAL_BIT)) return;
+        dependencies[i] = {d.srcSubpass, d.dstSubpass, d.srcStageMask, d.dstStageMask,
+            d.srcAccessMask, d.dstAccessMask, d.dependencyFlags};
+    }
+    VkSubpassDescription subpass{};
+    subpass.flags = src.flags;
+    subpass.pipelineBindPoint = src.pipelineBindPoint;
+    subpass.colorAttachmentCount = (uint32_t)colors.size();
+    subpass.pColorAttachments = colors.data();
+    subpass.pDepthStencilAttachment = src.pDepthStencilAttachment ? &depth : nullptr;
+    subpass.preserveAttachmentCount = src.preserveAttachmentCount;
+    VkRenderPassCreateInfo create{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    create.flags = info->flags;
+    create.attachmentCount = (uint32_t)attachments.size();
+    create.pAttachments = attachments.data();
+    create.subpassCount = 1;
+    create.pSubpasses = &subpass;
+    create.dependencyCount = (uint32_t)dependencies.size();
+    create.pDependencies = dependencies.data();
+    track_render_pass(device, &create, pass);
+}
+
+void DynamicRenderingModule::forget_render_pass(VkDevice device, VkRenderPass pass) {
+    if (!m_has_tiler_guard.load(std::memory_order_acquire)) return;
+    std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
+    auto it = m_legacy_continuations.find(vkfix::DeviceObjectKey::make(device, pass));
+    if (it == m_legacy_continuations.end()) return;
+    auto destroy = (PFN_vkDestroyRenderPass)get_real_proc(get_last_instance(), device, "vkDestroyRenderPass");
+    if (destroy) destroy(device, it->second, nullptr);
+    m_legacy_continuations.erase(it);
+}
+
+void DynamicRenderingModule::begin_legacy_rendering(VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo* info, VkSubpassContents contents) {
+    if (!m_has_tiler_guard.load(std::memory_order_acquire)) return;
+    VkDevice device = get_device_for_cmd(commandBuffer);
+    VkRenderPass continuation{};
+    const VkRenderPassAttachmentBeginInfo* views = nullptr;
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (info && contents == VK_SUBPASS_CONTENTS_INLINE && dt.CmdBeginRenderPass &&
+        dt.CmdEndRenderPass && dt.CmdPipelineBarrier) {
+        std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
+        auto it = m_legacy_continuations.find(vkfix::DeviceObjectKey::make(device, info->renderPass));
+        if (it != m_legacy_continuations.end()) {
+            bool supported = true;
+            if (info->pNext) {
+                views = (const VkRenderPassAttachmentBeginInfo*)info->pNext;
+                supported = views->sType == VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO &&
+                    !views->pNext && (!views->attachmentCount || views->pAttachments);
+            }
+            if (supported) continuation = it->second;
+        }
+    }
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
+    auto key = (uint64_t)(uintptr_t)commandBuffer;
+    auto& state = m_cmd_rendering_states[key];
+    state.device = device;
+    state.legacy = true;
+    state.is_rendering = continuation != VK_NULL_HANDLE;
+    state.continuation = m_primary_commands.count(key) ? continuation : VK_NULL_HANDLE;
+    state.budget = {};
+    state.attachmentViews.clear();
+    if (state.continuation) {
+        state.activeRenderPass = info->renderPass;
+        state.activeFramebuffer = info->framebuffer;
+        state.renderArea = info->renderArea;
+        if (views && views->attachmentCount)
+            state.attachmentViews.assign(views->pAttachments, views->pAttachments + views->attachmentCount);
+    }
+}
+
+void DynamicRenderingModule::end_legacy_rendering(VkCommandBuffer commandBuffer) {
+    if (!m_has_tiler_guard.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(m_cmd_mutex);
+    auto it = m_cmd_rendering_states.find((uint64_t)(uintptr_t)commandBuffer);
+    if (it != m_cmd_rendering_states.end()) {
+        it->second.is_rendering = false;
+        it->second.continuation = VK_NULL_HANDLE;
+        it->second.attachmentViews.clear();
+    }
+}
+
+void DynamicRenderingModule::before_draw(VkCommandBuffer commandBuffer, uint64_t vertices,
+                                        uint32_t indirectDraws) {
+    if (!m_has_tiler_guard.load(std::memory_order_acquire) || (!vertices && !indirectDraws)) return;
+    VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    VkRenderPassAttachmentBeginInfo attachments{VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO};
+    std::vector<VkImageView> views;
+    bool legacy = false;
+    VkDevice device{};
+    {
+        std::lock_guard<std::mutex> lock(m_cmd_mutex);
+        auto key = (uint64_t)(uintptr_t)commandBuffer;
+        auto it = m_cmd_rendering_states.find(key);
+        if (it == m_cmd_rendering_states.end() || !it->second.is_rendering ||
+            !it->second.continuation) return;
+        auto& state = it->second;
+        const bool split = !m_split_blockers.count(key) && state.budget.needs_split(vertices, indirectDraws);
+        if (split) {
+            begin.renderPass = state.continuation;
+            begin.framebuffer = state.activeFramebuffer;
+            begin.renderArea = state.renderArea;
+            views = state.attachmentViews;
+            device = state.device;
+            legacy = state.legacy;
+            state.activeRenderPass = state.continuation;
+            state.budget = {};
+        }
+        state.budget.add(vertices, indirectDraws);
+        if (!split) return;
+    }
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    if (!views.empty()) {
+        attachments.attachmentCount = (uint32_t)views.size();
+        attachments.pAttachments = views.data();
+        begin.pNext = &attachments;
+    }
+    dt.CmdEndRenderPass(commandBuffer);
+    // Finish fragment work before the next vertex/tiling batch can reuse the
+    // finite tiler heap. No intermediate CLEAR and no splitting a multi-draw.
+    VkMemoryBarrier memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    memory.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    memory.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    dt.CmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+        VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 1, &memory, 0, nullptr, 0, nullptr);
+    dt.CmdBeginRenderPass(commandBuffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
+    auto count = m_tiler_splits.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count == 1 || (count & 255u) == 0)
+        LOGI("Mali tiler guard: %llu preserving render-pass continuation(s), path=%s",
+            (unsigned long long)count, legacy ? "legacy" : "dynamic");
 }
 
 bool DynamicRenderingModule::on_cmd_begin_rendering(
@@ -771,6 +1123,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
 
     struct ThreadScratchBuffers {
         DynamicRenderPassKey rpKey;
+        FramebufferKey fbKey;
         std::vector<VkAttachmentDescription> attachments;
         std::vector<VkAttachmentReference> colorRefs;
         std::vector<VkAttachmentReference> resolveRefs;
@@ -779,9 +1132,12 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
 
         void clear() {
             rpKey.colorAttachmentCount = 0;
+            rpKey.colorAttachments.clear();
             rpKey.has_depth_stencil = false;
             rpKey.depthStencilAttachment = {};
             rpKey.resolveAttachmentCount = 0;
+            rpKey.resolveAttachments.clear();
+            fbKey.views.clear();
             attachments.clear();
             colorRefs.clear();
             resolveRefs.clear();
@@ -793,6 +1149,9 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     scratch.clear();
 
     DynamicRenderPassKey& rpKey = scratch.rpKey;
+    rpKey.device = device;
+    FramebufferKey& fbKey = scratch.fbKey;
+    fbKey.device = device;
 
     std::vector<VkAttachmentDescription>& attachments = scratch.attachments;
     attachments.reserve(maxAttCount);
@@ -838,7 +1197,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     for (uint32_t i = 0; i < colorCount; ++i) {
         const auto& att = pRenderingInfo->pColorAttachments[i];
         if (att.imageView != VK_NULL_HANDLE) {
-            auto it = m_image_views.find((uint64_t)(uintptr_t)att.imageView);
+            auto it = m_image_views.find(vkfix::DeviceObjectKey::make(device, att.imageView));
             VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
             VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
             if (it != m_image_views.end()) {
@@ -860,9 +1219,8 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             aDesc.refLayout = (sanitized == VK_IMAGE_LAYOUT_UNDEFINED) ?
                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : sanitized;
             aDesc.finalLayout = aDesc.refLayout;
-            if (rpKey.colorAttachmentCount < MAX_KEY_ATTACHMENTS) {
-                rpKey.colorAttachments[rpKey.colorAttachmentCount++] = aDesc;
-            }
+            rpKey.colorAttachments.push_back(aDesc);
+            ++rpKey.colorAttachmentCount;
 
             VkAttachmentDescription vkDesc{};
             vkDesc.format = aDesc.format;
@@ -885,9 +1243,8 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         } else {
             DynamicRenderPassKey::AttachmentDesc aDesc;
             aDesc.format = VK_FORMAT_UNDEFINED;
-            if (rpKey.colorAttachmentCount < MAX_KEY_ATTACHMENTS) {
-                rpKey.colorAttachments[rpKey.colorAttachmentCount++] = aDesc;
-            }
+            rpKey.colorAttachments.push_back(aDesc);
+            ++rpKey.colorAttachmentCount;
 
             VkAttachmentReference ref{};
             ref.attachment = VK_ATTACHMENT_UNUSED;
@@ -900,7 +1257,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     if (dsView != VK_NULL_HANDLE) {
         rpKey.has_depth_stencil = true;
         DynamicRenderPassKey::AttachmentDesc& dsDesc = rpKey.depthStencilAttachment;
-        auto it = m_image_views.find((uint64_t)(uintptr_t)dsView);
+        auto it = m_image_views.find(vkfix::DeviceObjectKey::make(device, dsView));
         if (it != m_image_views.end()) {
             if (it->second.format != VK_FORMAT_UNDEFINED) dsDesc.format = it->second.format;
             dsDesc.samples = it->second.samples;
@@ -963,7 +1320,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         for (uint32_t i = 0; i < colorCount; ++i) {
             const auto& att = pRenderingInfo->pColorAttachments[i];
             if (att.resolveImageView != VK_NULL_HANDLE) {
-                auto it = m_image_views.find((uint64_t)(uintptr_t)att.resolveImageView);
+                auto it = m_image_views.find(vkfix::DeviceObjectKey::make(device, att.resolveImageView));
                 VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
                 if (it != m_image_views.end()) {
                     if (it->second.format != VK_FORMAT_UNDEFINED) fmt = it->second.format;
@@ -983,9 +1340,8 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                 rDesc.refLayout = (sanitized == VK_IMAGE_LAYOUT_UNDEFINED) ?
                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : sanitized;
                 rDesc.finalLayout = rDesc.refLayout;
-                if (rpKey.resolveAttachmentCount < MAX_KEY_ATTACHMENTS) {
-                    rpKey.resolveAttachments[rpKey.resolveAttachmentCount++] = rDesc;
-                }
+                rpKey.resolveAttachments.push_back(rDesc);
+                ++rpKey.resolveAttachmentCount;
 
                 VkAttachmentDescription vkDesc{};
                 vkDesc.format = rDesc.format;
@@ -1010,6 +1366,8 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                 ref.attachment = VK_ATTACHMENT_UNUSED;
                 ref.layout = VK_IMAGE_LAYOUT_UNDEFINED;
                 resolveRefs.push_back(ref);
+                rpKey.resolveAttachments.emplace_back();
+                ++rpKey.resolveAttachmentCount;
             }
         }
     }
@@ -1048,13 +1406,10 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     if (rpIt != m_dynamic_rp_cache.end()) renderPass = rpIt->second;
 
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    FramebufferKey fbKey;
     if (renderPass != VK_NULL_HANDLE) {
         fbKey.renderPass = renderPass;
-        fbKey.viewCount = std::min((uint32_t)fbViews.size(), MAX_KEY_ATTACHMENTS);
-        for (uint32_t i = 0; i < fbKey.viewCount; ++i) {
-            fbKey.views[i] = fbViews[i];
-        }
+        fbKey.viewCount = (uint32_t)fbViews.size();
+        fbKey.views = fbViews;
         fbKey.width = fb_w;
         fbKey.height = fb_h;
         fbKey.layers = fb_layers;
@@ -1063,18 +1418,52 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         if (fbIt != m_framebuffer_cache.end()) framebuffer = fbIt->second;
     }
 
+    // Only ordinary inline, single-sample STORE scopes are safe to split.
+    // Preserve query/transform-feedback scopes and caller-owned resolve work.
+    bool tilerEligible = m_tiler_devices.count((uint64_t)(uintptr_t)device) &&
+        !pRenderingInfo->flags && !pRenderingInfo->pNext && !pRenderingInfo->viewMask &&
+        !attachments.empty();
+    auto storable = [&](const VkRenderingAttachmentInfo* attachment) {
+        if (!attachment || !attachment->imageView) return true;
+        auto view = m_image_views.find(vkfix::DeviceObjectKey::make(device, attachment->imageView));
+        return !attachment->pNext && attachment->resolveMode == VK_RESOLVE_MODE_NONE &&
+            !attachment->resolveImageView && attachment->storeOp == VK_ATTACHMENT_STORE_OP_STORE &&
+            attachment->imageLayout != VK_IMAGE_LAYOUT_UNDEFINED && view != m_image_views.end() &&
+            view->second.usage != 0 && view->second.samples == VK_SAMPLE_COUNT_1_BIT &&
+            !(view->second.usage & (VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+                                   VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT));
+    };
+    for (uint32_t i = 0; tilerEligible && i < colorCount; ++i)
+        tilerEligible = storable(&pRenderingInfo->pColorAttachments[i]);
+    tilerEligible = tilerEligible && storable(pRenderingInfo->pDepthAttachment) &&
+        storable(pRenderingInfo->pStencilAttachment);
+    {
+        std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
+        tilerEligible = tilerEligible && m_primary_commands.count((uint64_t)(uintptr_t)commandBuffer);
+    }
+    readLock.unlock();
+    VkRenderPass continuation = VK_NULL_HANDLE;
+    if (tilerEligible) {
+        const auto& dt = LayerManager::get().get_dispatch_table(device);
+        if (dt.CmdBeginRenderPass && dt.CmdEndRenderPass && dt.CmdPipelineBarrier)
+            continuation = continuation_render_pass(device, rpKey, attachments, colorRefs,
+                dsView != VK_NULL_HANDLE ? &depthRef : nullptr, *pRenderingInfo);
+    }
+
     // Fast-path: both renderPass and framebuffer already cached (common runtime hot path)
     if (__builtin_expect(renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE, 1)) {
-        // Release read lock before proceeding
-        readLock.unlock();
-
         {
             std::lock_guard<std::mutex> cmdLock(m_cmd_mutex);
             auto& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
             state.device = device;
             state.is_rendering = true;
+            state.legacy = false;
             state.activeRenderPass = renderPass;
             state.activeFramebuffer = framebuffer;
+            state.continuation = continuation;
+            state.renderArea = clampedRenderArea;
+            state.attachmentViews.clear();
+            state.budget = {};
         }
 
         VkRenderPassBeginInfo beginInfo{};
@@ -1102,8 +1491,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         return true;
     }
 
-    // Cold path: unlock read lock before calling Vulkan driver creation APIs
-    readLock.unlock();
+    // Cold path: creation uses the same continuation and attachment policy.
 
     if (renderPass == VK_NULL_HANDLE) {
         VkSubpassDescription subpass{};
@@ -1148,10 +1536,8 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
 
     if (framebuffer == VK_NULL_HANDLE) {
         fbKey.renderPass = renderPass;
-        fbKey.viewCount = std::min((uint32_t)fbViews.size(), MAX_KEY_ATTACHMENTS);
-        for (uint32_t i = 0; i < fbKey.viewCount; ++i) {
-            fbKey.views[i] = fbViews[i];
-        }
+        fbKey.viewCount = (uint32_t)fbViews.size();
+        fbKey.views = fbViews;
         fbKey.width = fb_w;
         fbKey.height = fb_h;
         fbKey.layers = fb_layers;
@@ -1193,12 +1579,12 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                     if (real_destroy_fb) real_destroy_fb(device, framebuffer, NULL);
                     framebuffer = it->second;
                 } else {
-                    m_device_resources[(uint64_t)(uintptr_t)device].framebuffers.push_back(framebuffer);
+                    m_device_resources[(uint64_t)(uintptr_t)device].framebuffers.insert(framebuffer);
                     vku::set_object_name(device, VK_OBJECT_TYPE_FRAMEBUFFER, (uint64_t)framebuffer, "[VulkanFix] DynamicRendering Framebuffer");
                     for (uint32_t i = 0; i < fbKey.viewCount; ++i) {
                         VkImageView v = fbKey.views[i];
                         if (v != VK_NULL_HANDLE) {
-                            m_image_view_to_framebuffers[(uint64_t)(uintptr_t)v].push_back(fbKey);
+                            m_image_view_to_framebuffers[vkfix::DeviceObjectKey::make(device, v)].insert(fbKey);
                         }
                     }
                 }
@@ -1238,8 +1624,13 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         auto& state = m_cmd_rendering_states[(uint64_t)(uintptr_t)commandBuffer];
         state.device = device;
         state.is_rendering = true;
+        state.legacy = false;
         state.activeRenderPass = renderPass;
         state.activeFramebuffer = framebuffer;
+        state.continuation = continuation;
+        state.renderArea = clampedRenderArea;
+        state.attachmentViews.clear();
+        state.budget = {};
     }
 
     LOG_OPT_DEBUG("DynamicRendering: emulated vkCmdBeginRenderingKHR for cmd %p", commandBuffer);

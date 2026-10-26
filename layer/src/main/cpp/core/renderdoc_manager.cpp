@@ -1,265 +1,298 @@
 #include "renderdoc_manager.h"
+#include "driver_loader.h"
 #include <dlfcn.h>
+#include <sys/stat.h>
 #include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
+#include <vector>
 
-RenderDocManager& RenderDocManager::get() {
-    static RenderDocManager s_instance;
-    return s_instance;
+namespace {
+std::string setting(const char *name, const std::string &fallback) {
+    const char *value = getenv(name);
+    return value && *value ? value : fallback;
 }
-
-void RenderDocManager::init() {
-    if (m_initialized.exchange(true)) return;
-
-    pRENDERDOC_GetAPI get_api = nullptr;
-
-    // 1. Check if RenderDoc is already resident in process memory (e.g. injected by RenderDoc server/layer)
-#if defined(__linux__) || defined(__ANDROID__)
-    void* self_mod = dlopen(NULL, RTLD_NOW);
-    if (self_mod) {
-        get_api = (pRENDERDOC_GetAPI)dlsym(self_mod, "RENDERDOC_GetAPI");
-        dlclose(self_mod);
+std::string json(const std::string &value) {
+    std::string out = "\"";
+    for (unsigned char c : value) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += char(c);
+        } else if (c < 32) {
+            char escaped[7];
+            snprintf(escaped, sizeof(escaped), "\\u%04x", c);
+            out += escaped;
+        } else
+            out += char(c);
     }
-
-    // 2. If not found in global namespace, check configured or default library locations
+    return out + '"';
+}
+} // namespace
+RenderDocManager &RenderDocManager::get() {
+    static RenderDocManager manager;
+    return manager;
+}
+void RenderDocManager::init() {
+    if (is_available())
+        return;
+    std::lock_guard<std::mutex> initialization(m_init_mutex);
+    if (is_available())
+        return;
+    auto get_api =
+        (pRENDERDOC_GetAPI)get_real_proc(VK_NULL_HANDLE, VK_NULL_HANDLE, "RENDERDOC_GetAPI");
+    if (!get_api)
+        get_api = (pRENDERDOC_GetAPI)dlsym(RTLD_DEFAULT, "RENDERDOC_GetAPI");
     if (!get_api) {
-        const char* custom_lib = getenv("VULKAN_FIX_RENDERDOC_LIB");
-        const char* search_libs[] = {
-            custom_lib,
-            "libVkLayer_GLES_RenderDoc.so",
-            "libVkLayer_renderdoc_capture.so",
-            "librenderdoc.so",
-            "/data/local/tmp/libVkLayer_GLES_RenderDoc.so",
-            "/data/local/tmp/libVkLayer_renderdoc_capture.so",
-            "/data/local/tmp/librenderdoc.so"
-        };
-        for (const char* lib_name : search_libs) {
-            if (!lib_name || lib_name[0] == '\0') continue;
-            void* mod = dlopen(lib_name, RTLD_NOW | RTLD_LOCAL);
-            if (mod) {
-                get_api = (pRENDERDOC_GetAPI)dlsym(mod, "RENDERDOC_GetAPI");
-                if (get_api) {
-                    m_rdoc_lib = mod;
-                    LOGI("RenderDocManager: Loaded RenderDoc from %s", lib_name);
-                    break;
-                }
-                dlclose(mod);
+        const char *paths[] = {getenv("VULKAN_FIX_RENDERDOC_LIB"),
+                               "libVkLayer_GLES_RenderDoc.so",
+                               "libVkLayer_renderdoc_capture.so",
+                               "librenderdoc.so",
+                               "/data/local/tmp/libVkLayer_GLES_RenderDoc.so",
+                               "/data/local/tmp/librenderdoc.so"};
+        for (auto path : paths) {
+            if (!path || !*path)
+                continue;
+            // Discover an injected layer without loading capture tooling into
+            // ordinary runs merely because a library exists in /data/local/tmp.
+            const auto custom = getenv("VULKAN_FIX_RENDERDOC_LIB");
+            const bool explicit_path = custom && *custom && !strcmp(path, custom);
+            auto library = dlopen(path, RTLD_NOW | RTLD_LOCAL | (explicit_path ? 0 : RTLD_NOLOAD));
+            if (!library)
+                continue;
+            get_api = (pRENDERDOC_GetAPI)dlsym(library, "RENDERDOC_GetAPI");
+            if (get_api) {
+                m_library = library;
+                break;
             }
+            dlclose(library);
         }
     }
-#endif
-
-    if (!get_api) {
-        LOG_OPT_DEBUG("RenderDocManager: RenderDoc library not detected (running normally)");
+    if (!get_api)
+        return;
+    RENDERDOC_API_1_6_0 *api = nullptr;
+    bool obtained = false;
+    for (auto version : {eRENDERDOC_API_Version_1_6_0, eRENDERDOC_API_Version_1_4_0,
+                         eRENDERDOC_API_Version_1_1_2}) {
+        api = nullptr;
+        if (get_api(version, (void **)&api) == 1 && api) {
+            m_can_discard = version >= eRENDERDOC_API_Version_1_4_0;
+            obtained = true;
+            break;
+        }
+    }
+    if (!obtained || !api || !api->SetCaptureOptionU32 || !api->SetCaptureFilePathTemplate ||
+        !api->IsFrameCapturing || !api->StartFrameCapture || !api->EndFrameCapture ||
+        !api->GetCapture || !api->GetNumCaptures)
+        return;
+    api->SetCaptureOptionU32(eRENDERDOC_Option_RefAllResources, 0);
+    auto home = setting("HOME", "/data/local/tmp");
+    if (home == "/")
+        home = access("/sdcard/Download", W_OK) == 0 ? "/sdcard/Download" : "/data/local/tmp";
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_template = setting("VULKAN_FIX_CAPTURE_DIR", home + "/vulkanfix_capture");
+    m_trigger = setting("VULKAN_FIX_CAPTURE_TRIGGER", home + "/vulkanfix_capture.trigger");
+    m_status = setting("VULKAN_FIX_CAPTURE_STATUS", home + "/vulkanfix-renderdoc.json");
+    m_target_frame = strtoull(setting("VULKAN_FIX_CAPTURE_FRAME", "0").c_str(), nullptr, 10);
+    m_pending = uint32_t(strtoul(setting("VULKAN_FIX_CAPTURE_COUNT", "0").c_str(), nullptr, 10));
+    api->SetCaptureFilePathTemplate(m_template.c_str());
+    m_api.store(api, std::memory_order_release);
+    status_locked();
+    LOGI("RenderDoc: control API available; Vulkan capture is unverified until a new RDC is "
+         "written. status=%s trigger=%s",
+         m_status.c_str(), m_trigger.c_str());
+}
+void RenderDocManager::status_locked() {
+    if (!is_available() || m_status.empty())
+        return;
+    const auto temporary = m_status + ".tmp";
+    auto file = fopen(temporary.c_str(), "w");
+    if (!file) {
+        LOGW("RenderDoc: cannot write status %s", temporary.c_str());
         return;
     }
-
-    // Request RenderDoc API (supporting 1.6.0 down to 1.1.2)
-    int ret = get_api(eRENDERDOC_API_Version_1_6_0, (void**)&m_rdoc_api);
-    if (ret != 1 || !m_rdoc_api) {
-        ret = get_api(eRENDERDOC_API_Version_1_4_0, (void**)&m_rdoc_api);
-    }
-    if (ret != 1 || !m_rdoc_api) {
-        ret = get_api(eRENDERDOC_API_Version_1_1_2, (void**)&m_rdoc_api);
-    }
-
-    if (ret == 1 && m_rdoc_api) {
-        int major = 0, minor = 0, patch = 0;
-        m_rdoc_api->GetAPIVersion(&major, &minor, &patch);
-        LOGI("RenderDocManager: Successfully connected to RenderDoc In-App API v%d.%d.%d", major, minor, patch);
-
-        // Optimal capture options for Vulkan graphics debugging
-        m_rdoc_api->SetCaptureOptionU32(eRENDERDOC_Option_CaptureAllCmdLists, 1);
-        m_rdoc_api->SetCaptureOptionU32(eRENDERDOC_Option_SaveAllInitials, 1);
-        m_rdoc_api->SetCaptureOptionU32(eRENDERDOC_Option_RefAllResources, 1);
-        m_rdoc_api->SetCaptureOptionU32(eRENDERDOC_Option_APIValidation, 1);
-
-        // Configure capture directory
-        const char* custom_dir = getenv("VULKAN_FIX_CAPTURE_DIR");
-        if (custom_dir && custom_dir[0] != '\0') {
-            m_capture_dir = custom_dir;
-        } else {
-            const char* home = getenv("HOME");
-            if (home && home[0] != '\0' && strcmp(home, "/") != 0) {
-                m_capture_dir = std::string(home) + "/vulkanfix_capture";
-            } else if (access("/sdcard/Download", W_OK) == 0) {
-                m_capture_dir = "/sdcard/Download/vulkanfix_capture";
-            } else {
-                m_capture_dir = "/data/local/tmp/vulkanfix_capture";
-            }
-        }
-        m_rdoc_api->SetCaptureFilePathTemplate(m_capture_dir.c_str());
-        LOGI("RenderDocManager: Capture path template set to '%s'", m_capture_dir.c_str());
-
-        // Configure trigger file
-        const char* custom_trigger = getenv("VULKAN_FIX_CAPTURE_TRIGGER");
-        if (custom_trigger && custom_trigger[0] != '\0') {
-            m_trigger_file = custom_trigger;
-        } else {
-            const char* home = getenv("HOME");
-            if (home && home[0] != '\0' && strcmp(home, "/") != 0) {
-                m_trigger_file = std::string(home) + "/vulkanfix_capture.trigger";
-            } else if (access("/sdcard", W_OK) == 0) {
-                m_trigger_file = "/sdcard/vulkanfix_capture.trigger";
-            } else {
-                m_trigger_file = "/data/local/tmp/vulkanfix_capture.trigger";
-            }
-        }
-
-        // Configure target frame if set
-        const char* target_str = getenv("VULKAN_FIX_CAPTURE_FRAME");
-        if (target_str && target_str[0] != '\0') {
-            uint64_t target = (uint64_t)strtoull(target_str, nullptr, 10);
-            if (target > 0) {
-                m_target_frame.store(target);
-                LOGI("RenderDocManager: Scheduled capture for frame %" PRIu64, target);
-            }
-        }
-
-        const char* count_str = getenv("VULKAN_FIX_CAPTURE_COUNT");
-        if (count_str && count_str[0] != '\0') {
-            uint32_t count = (uint32_t)strtoul(count_str, nullptr, 10);
-            if (count > 0) {
-                m_remaining_captures.store(count);
-            }
-        }
-    }
+    fprintf(file,
+            "{\"pid\":%d,\"api_available\":true,\"capturing\":%s,\"completed\":%u,\"pending\":%u,"
+            "\"devices\":%zu,\"trigger\":%s,\"capture_template\":%s,\"last_capture\":%s,\"error\":%"
+            "s}\n",
+            getpid(), is_capturing() ? "true" : "false", m_completed, m_pending, m_devices.size(),
+            json(m_trigger).c_str(), json(m_template).c_str(), json(m_last_capture).c_str(),
+            json(m_error).c_str());
+    const bool written = !ferror(file);
+    const int closed = fclose(file);
+    if (!written || closed || rename(temporary.c_str(), m_status.c_str()))
+        LOGW("RenderDoc: status update failed for %s", m_status.c_str());
 }
-
-void RenderDocManager::trigger_capture(uint32_t num_frames) {
-    if (!m_rdoc_api) return;
-    uint32_t n = (num_frames > 0) ? num_frames : 1;
-    m_remaining_captures.store(n, std::memory_order_release);
-    LOGI("RenderDocManager: Capture manually triggered for %u frame(s)", n);
+void RenderDocManager::fail_locked(const char *error) {
+    m_error = error;
+    LOGW("RenderDoc: %s", error);
+    status_locked();
 }
-
-void RenderDocManager::start_capture(VkDevice device) {
-    if (!m_rdoc_api) return;
-    VkDevice dev = device;
-    if (dev == VK_NULL_HANDLE) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        dev = m_active_device;
-    }
-    m_rdoc_api->StartFrameCapture(dev, NULL);
-    m_capturing.store(true, std::memory_order_release);
-    LOGI("RenderDocManager: StartFrameCapture initiated (device: %p)", dev);
-}
-
-void RenderDocManager::end_capture(VkDevice device) {
-    if (!m_rdoc_api) return;
-    VkDevice dev = device;
-    if (dev == VK_NULL_HANDLE) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        dev = m_active_device;
-    }
-    m_rdoc_api->EndFrameCapture(dev, NULL);
-    m_capturing.store(false, std::memory_order_release);
-    LOGI("RenderDocManager: EndFrameCapture completed (device: %p)", dev);
-
-    uint32_t numCaptures = m_rdoc_api->GetNumCaptures();
-    if (numCaptures > 0) {
-        char path[1024] = {0};
-        uint32_t pathLen = sizeof(path);
-        uint64_t timestamp = 0;
-        if (m_rdoc_api->GetCapture(numCaptures - 1, path, &pathLen, &timestamp)) {
-            LOGI("RenderDocManager: Capture file successfully written to: %s", path);
-        }
-    }
-}
-
-void RenderDocManager::on_device_created(VkDevice device) {
+void RenderDocManager::trigger_capture(uint32_t count) {
+    init();
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_active_device = device;
+    if (!is_available()) {
+        LOGW("RenderDoc: capture requested without a control API");
+        return;
+    }
+    m_pending = count ? count : 1;
+    m_error.clear();
+    status_locked();
 }
-
+bool RenderDocManager::start_locked(VkDevice device, bool automatic) {
+    auto api = m_api.load(std::memory_order_acquire);
+    if (!api)
+        return false;
+    if (is_capturing() || api->IsFrameCapturing()) {
+        fail_locked("another capture is already active");
+        return false;
+    }
+    if (!device && m_devices.size() == 1)
+        device = m_devices.begin()->first;
+    auto context = m_devices.find(device);
+    if (context == m_devices.end() || !context->second.instance) {
+        fail_locked("capture requires a known device and its owning VkInstance");
+        return false;
+    }
+    auto pointer = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(context->second.instance);
+    m_before_count = api->GetNumCaptures();
+    api->StartFrameCapture(pointer, nullptr);
+    if (!api->IsFrameCapturing()) {
+        fail_locked("StartFrameCapture did not start; check the Vulkan capture layer chain");
+        return false;
+    }
+    m_capture_pointer = pointer;
+    m_capture_device = device;
+    m_automatic = automatic;
+    m_capturing.store(true, std::memory_order_release);
+    m_error.clear();
+    status_locked();
+    LOGI("RenderDoc: capture started for device %p", device);
+    return true;
+}
+bool RenderDocManager::start_capture(VkDevice device) {
+    init();
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return start_locked(device, false);
+}
+bool RenderDocManager::end_locked() {
+    if (!is_capturing())
+        return false;
+    auto api = m_api.load(std::memory_order_acquire);
+    const bool ended = api->EndFrameCapture(m_capture_pointer, nullptr) == 1;
+    if (!ended && api->IsFrameCapturing()) {
+        fail_locked("EndFrameCapture failed; capture remains active");
+        return false;
+    }
+    m_capturing.store(false, std::memory_order_release);
+    m_capture_device = VK_NULL_HANDLE;
+    m_capture_pointer = nullptr;
+    m_automatic = false;
+    if (!ended) {
+        fail_locked("EndFrameCapture failed; no successful capture recorded");
+        return false;
+    }
+    const auto count = api->GetNumCaptures();
+    if (count <= m_before_count) {
+        fail_locked("capture ended without a new RDC file");
+        return false;
+    }
+    uint32_t length = 0;
+    uint64_t timestamp = 0;
+    if (!api->GetCapture(count - 1, nullptr, &length, &timestamp) || !length ||
+        length > 1024 * 1024) {
+        fail_locked("cannot query the new RDC path");
+        return false;
+    }
+    std::vector<char> path(size_t(length) + 1, 0);
+    if (!api->GetCapture(count - 1, path.data(), &length, &timestamp)) {
+        fail_locked("cannot read the new RDC path");
+        return false;
+    }
+    struct stat info {};
+    if (stat(path.data(), &info) || !S_ISREG(info.st_mode) || info.st_size <= 0) {
+        fail_locked("new RDC file is missing or empty");
+        return false;
+    }
+    m_last_capture = path.data();
+    ++m_completed;
+    m_error.clear();
+    status_locked();
+    LOGI("RenderDoc: RDC written: %s (%llu bytes)", m_last_capture.c_str(),
+         (unsigned long long)info.st_size);
+    return true;
+}
+bool RenderDocManager::end_capture(VkDevice device) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (device && device != m_capture_device) {
+        fail_locked("capture belongs to another device");
+        return false;
+    }
+    return end_locked();
+}
+void RenderDocManager::abort_locked() {
+    auto api = m_api.load(std::memory_order_acquire);
+    if (m_can_discard && api && api->DiscardFrameCapture)
+        api->DiscardFrameCapture(m_capture_pointer, nullptr);
+    m_capturing.store(false, std::memory_order_release);
+    m_capture_device = VK_NULL_HANDLE;
+    m_capture_pointer = nullptr;
+    m_automatic = false;
+    fail_locked("capture aborted because its target was destroyed");
+}
+void RenderDocManager::on_device_created(VkDevice device, VkInstance instance) {
+    init();
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_devices[device] = {instance, 0};
+    status_locked();
+}
 void RenderDocManager::on_device_destroyed(VkDevice device) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_active_device == device) {
-        m_active_device = VK_NULL_HANDLE;
-    }
+    if (is_capturing() && device == m_capture_device && !end_locked() && is_capturing())
+        abort_locked();
+    m_devices.erase(device);
+    status_locked();
 }
-
-void RenderDocManager::check_trigger_file() {
-    if (m_trigger_file.empty()) return;
-    if (access(m_trigger_file.c_str(), F_OK) == 0) {
-        LOGI("RenderDocManager: Detected trigger file '%s', starting capture!", m_trigger_file.c_str());
-        unlink(m_trigger_file.c_str());
-        trigger_capture(1);
+void RenderDocManager::on_instance_destroyed(VkInstance instance) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto it = m_devices.begin(); it != m_devices.end();) {
+        if (it->second.instance != instance) {
+            ++it;
+            continue;
+        }
+        if (is_capturing() && it->first == m_capture_device && !end_locked() && is_capturing())
+            abort_locked();
+        it = m_devices.erase(it);
     }
+    status_locked();
 }
-
-void RenderDocManager::on_pre_present(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) {
-    (void)queue;
-    (void)pPresentInfo;
-
-    if (!m_rdoc_api) return;
-
-    if (m_capturing.load(std::memory_order_relaxed)) {
-        VkDevice dev = VK_NULL_HANDLE;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            dev = m_active_device;
-        }
-
-        m_rdoc_api->EndFrameCapture(dev, NULL);
-        m_capturing.store(false, std::memory_order_release);
-
-        uint32_t rem = m_remaining_captures.load(std::memory_order_relaxed);
-        if (rem > 0) {
-            m_remaining_captures.store(rem - 1, std::memory_order_relaxed);
-        }
-
-        uint64_t current_frame = m_frame_counter.load(std::memory_order_relaxed);
-        LOGI("RenderDocManager: Captured frame %" PRIu64 " successfully!", current_frame);
-
-        uint32_t numCaptures = m_rdoc_api->GetNumCaptures();
-        if (numCaptures > 0) {
-            char path[1024] = {0};
-            uint32_t pathLen = sizeof(path);
-            uint64_t timestamp = 0;
-            if (m_rdoc_api->GetCapture(numCaptures - 1, path, &pathLen, &timestamp)) {
-                LOGI("RenderDocManager: RDC file written to: %s", path);
-            }
+void RenderDocManager::on_post_present(VkDevice device, VkResult result) {
+    if (!is_available())
+        return;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto context = m_devices.find(device);
+    if (context == m_devices.end())
+        return;
+    if (is_capturing() && m_automatic && device == m_capture_device)
+        end_locked();
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+        return;
+    const auto frame = ++context->second.frames;
+    if (frame % 15 == 0 && !m_trigger.empty() && access(m_trigger.c_str(), F_OK) == 0) {
+        if (unlink(m_trigger.c_str()) == 0) {
+            m_pending = 1;
+            LOGI("RenderDoc: consumed trigger %s", m_trigger.c_str());
         }
     }
+    if (is_capturing())
+        return;
+    const bool scheduled = m_target_frame && frame + 1 >= m_target_frame;
+    if (!m_pending && !scheduled)
+        return;
+    if (m_pending)
+        --m_pending;
+    if (scheduled)
+        m_target_frame = 0;
+    start_locked(device, true);
 }
-
-void RenderDocManager::on_post_present(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) {
-    (void)queue;
-    (void)pPresentInfo;
-
-    if (!m_rdoc_api) return;
-
-    uint64_t current_frame = ++m_frame_counter;
-
-    // Check trigger file periodically (every 15 frames to minimize syscall overhead)
-    if ((current_frame % 15) == 0) {
-        check_trigger_file();
-    }
-
-    if (!m_capturing.load(std::memory_order_relaxed)) {
-        bool should_start = false;
-
-        uint32_t rem = m_remaining_captures.load(std::memory_order_acquire);
-        if (rem > 0) {
-            should_start = true;
-        } else {
-            uint64_t target = m_target_frame.load(std::memory_order_acquire);
-            if (target > 0 && (current_frame + 1) == target) {
-                should_start = true;
-            }
-        }
-
-        if (should_start) {
-            VkDevice dev = VK_NULL_HANDLE;
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                dev = m_active_device;
-            }
-            m_rdoc_api->StartFrameCapture(dev, NULL);
-            m_capturing.store(true, std::memory_order_release);
-            LOGI("RenderDocManager: Started frame capture for frame %" PRIu64, current_frame + 1);
-        }
-    }
+std::string RenderDocManager::last_capture_path() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_last_capture;
 }

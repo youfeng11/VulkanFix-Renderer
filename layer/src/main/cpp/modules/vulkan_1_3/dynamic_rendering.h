@@ -2,6 +2,8 @@
 #define DYNAMIC_RENDERING_H
 
 #include "layer_module.h"
+#include "core/mali_tiler_budget.h"
+#include "core/device_object_key.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -128,8 +130,20 @@ public:
         VkCommandBuffer commandBuffer) override;
 
     bool is_device_native(VkDevice device) override;
+    void before_draw(VkCommandBuffer commandBuffer, uint64_t vertices, uint32_t indirectDraws = 0) override;
+    void block_tiler_split(VkCommandBuffer commandBuffer, bool begin) override;
+    bool needs_tiler_tracking(VkDevice device) override;
+    void track_render_pass(VkDevice device, const VkRenderPassCreateInfo* info,
+                           VkRenderPass pass) override;
+    void track_render_pass2(VkDevice device, const VkRenderPassCreateInfo2* info,
+                            VkRenderPass pass) override;
+    void forget_render_pass(VkDevice device, VkRenderPass pass) override;
+    void begin_legacy_rendering(VkCommandBuffer commandBuffer,
+        const VkRenderPassBeginInfo* info, VkSubpassContents contents) override;
+    void end_legacy_rendering(VkCommandBuffer commandBuffer) override;
 
 private:
+    friend struct DynamicRenderingTestAccess;
     bool is_phys_device_native(VkPhysicalDevice physDev);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
 
@@ -158,10 +172,9 @@ private:
         VkImageUsageFlags usage = 0;
     };
 
-    static constexpr uint32_t MAX_KEY_ATTACHMENTS = 16;
-
     struct PipelineRenderPassKey {
-        std::array<VkFormat, MAX_KEY_ATTACHMENTS> colorFormats{};
+        VkDevice device{};
+        std::vector<VkFormat> colorFormats;
         uint32_t colorAttachmentCount = 0;
         VkFormat depthFormat = VK_FORMAT_UNDEFINED;
         VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
@@ -169,7 +182,7 @@ private:
         uint32_t viewMask = 0;
 
         bool operator==(const PipelineRenderPassKey& o) const {
-            if (colorAttachmentCount != o.colorAttachmentCount ||
+            if (device != o.device || colorAttachmentCount != o.colorAttachmentCount ||
                 depthFormat != o.depthFormat ||
                 stencilFormat != o.stencilFormat ||
                 samples != o.samples ||
@@ -186,6 +199,7 @@ private:
     };
 
     struct DynamicRenderPassKey {
+        VkDevice device{};
         struct AttachmentDesc {
             VkFormat format = VK_FORMAT_UNDEFINED;
             VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
@@ -210,15 +224,15 @@ private:
             }
         };
 
-        std::array<AttachmentDesc, MAX_KEY_ATTACHMENTS> colorAttachments{};
+        std::vector<AttachmentDesc> colorAttachments;
         uint32_t colorAttachmentCount = 0;
         bool has_depth_stencil = false;
         AttachmentDesc depthStencilAttachment{};
-        std::array<AttachmentDesc, MAX_KEY_ATTACHMENTS> resolveAttachments{};
+        std::vector<AttachmentDesc> resolveAttachments;
         uint32_t resolveAttachmentCount = 0;
 
         bool operator==(const DynamicRenderPassKey& o) const {
-            if (colorAttachmentCount != o.colorAttachmentCount ||
+            if (device != o.device || colorAttachmentCount != o.colorAttachmentCount ||
                 resolveAttachmentCount != o.resolveAttachmentCount ||
                 has_depth_stencil != o.has_depth_stencil) return false;
             if (has_depth_stencil && !(depthStencilAttachment == o.depthStencilAttachment)) return false;
@@ -237,15 +251,16 @@ private:
     };
 
     struct FramebufferKey {
+        VkDevice device{};
         VkRenderPass renderPass = VK_NULL_HANDLE;
-        std::array<VkImageView, MAX_KEY_ATTACHMENTS> views{};
+        std::vector<VkImageView> views;
         uint32_t viewCount = 0;
         uint32_t width = 0;
         uint32_t height = 0;
         uint32_t layers = 1;
 
         bool operator==(const FramebufferKey& o) const {
-            if (renderPass != o.renderPass ||
+            if (device != o.device || renderPass != o.renderPass ||
                 viewCount != o.viewCount ||
                 width != o.width ||
                 height != o.height ||
@@ -264,30 +279,49 @@ private:
     struct CmdRenderingState {
         VkDevice device = VK_NULL_HANDLE;
         bool is_rendering = false;
+        bool legacy = false;
         VkRenderPass activeRenderPass = VK_NULL_HANDLE;
         VkFramebuffer activeFramebuffer = VK_NULL_HANDLE;
+        VkRenderPass continuation = VK_NULL_HANDLE;
+        VkRect2D renderArea{};
+        std::vector<VkImageView> attachmentViews;
+        vkfix::MaliTilerBudget budget;
     };
+
+    VkRenderPass continuation_render_pass(VkDevice device, const DynamicRenderPassKey& originalKey,
+        const std::vector<VkAttachmentDescription>& attachments,
+        const std::vector<VkAttachmentReference>& colorRefs,
+        const VkAttachmentReference* depthRef, const VkRenderingInfo& rendering);
 
     struct DeviceResources {
         std::vector<VkRenderPass> renderPasses;
-        std::vector<VkFramebuffer> framebuffers;
+        std::unordered_set<VkFramebuffer> framebuffers;
     };
 
     mutable std::shared_mutex m_rw_mutex;
     std::mutex m_cmd_mutex;
     std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
     std::atomic<bool> m_primary_native{false};
+    std::atomic<bool> m_has_tiler_guard{false};
+    std::atomic<uint64_t> m_tiler_splits{0};
     std::unordered_map<uint64_t, bool> m_phys_native_support;
     std::unordered_map<uint64_t, bool> m_device_native_support;
+    std::unordered_set<uint64_t> m_tiler_devices;
+    std::unordered_map<vkfix::DeviceObjectKey, VkRenderPass,
+        vkfix::DeviceObjectKeyHash> m_legacy_continuations;
+    std::unordered_set<uint64_t> m_primary_commands;
+    std::unordered_map<uint64_t, uint32_t> m_split_blockers;
     std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
 
-    std::unordered_map<uint64_t, ImageMeta> m_images;
-    std::unordered_map<uint64_t, ImageViewMeta> m_image_views;
+    std::unordered_map<vkfix::DeviceObjectKey, ImageMeta, vkfix::DeviceObjectKeyHash> m_images;
+    std::unordered_map<vkfix::DeviceObjectKey, ImageViewMeta, vkfix::DeviceObjectKeyHash> m_image_views;
 
     std::unordered_map<PipelineRenderPassKey, VkRenderPass, PipelineRenderPassKeyHash> m_pipeline_rp_cache;
     std::unordered_map<DynamicRenderPassKey, VkRenderPass, DynamicRenderPassKeyHash> m_dynamic_rp_cache;
     std::unordered_map<FramebufferKey, VkFramebuffer, FramebufferKeyHash> m_framebuffer_cache;
-    std::unordered_map<uint64_t, std::vector<FramebufferKey>> m_image_view_to_framebuffers;
+    std::unordered_map<vkfix::DeviceObjectKey,
+        std::unordered_set<FramebufferKey, FramebufferKeyHash>,
+        vkfix::DeviceObjectKeyHash> m_image_view_to_framebuffers;
 
     std::unordered_map<uint64_t, CmdRenderingState> m_cmd_rendering_states;
     std::unordered_map<uint64_t, DeviceResources> m_device_resources;

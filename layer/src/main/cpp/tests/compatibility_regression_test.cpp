@@ -12,6 +12,9 @@
 void *timeline_mock_proc(const char *name);
 void run_timeline_regressions(void (*check)(bool, const char *));
 void* push_descriptor_mock_proc(const char* name);
+void* mali_tiler_mock_proc(const char* name);
+void run_mali_tiler_regressions(void (*check)(bool, const char*));
+void run_dynamic_rendering_lifetime_regressions(void (*check)(bool, const char*));
 void run_push_descriptor_regressions(void (*check)(bool, const char*));
 
 // Replace only the driver boundary; exercise the actual modules and manager.
@@ -86,6 +89,7 @@ PFN_vkGetDeviceProcAddr get_real_device_proc_addr() {
     return nullptr;
 }
 void *get_real_proc(VkInstance, VkDevice, const char *name) {
+    if (auto mock = mali_tiler_mock_proc(name)) return mock;
     if (auto mock = push_descriptor_mock_proc(name))
         return mock;
     if (auto mock = timeline_mock_proc(name))
@@ -451,6 +455,8 @@ int main() {
     test_vertex_lowering();
     run_timeline_regressions(check);
     run_push_descriptor_regressions(check);
+    run_mali_tiler_regressions(check);
+    run_dynamic_rendering_lifetime_regressions(check);
     std::printf("Regression failures: %d\n", failures);
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

@@ -20,16 +20,23 @@ void init_real_vulkan() {
     void* handle = nullptr;
 
     const char* validation = getenv("VULKAN_FIX_VALIDATION_DRIVER");
-    if (validation && strcmp(validation, "1") == 0) {
+    const char* capture = getenv("VULKAN_FIX_RENDERDOC_DRIVER");
+    const bool use_validation = validation && strcmp(validation, "1") == 0;
+    const bool use_capture = capture && strcmp(capture, "1") == 0;
+    if (use_validation && use_capture) {
+        LOGE("Select one diagnostic provider: validation or RenderDoc capture");
+        return;
+    }
+    if (use_validation || use_capture) {
         Dl_info own{};
         if (dladdr((void*)&init_real_vulkan, &own) && own.dli_fname) {
             std::string path = own.dli_fname;
             auto separator = path.find_last_of('/');
             path = separator == std::string::npos ? "./" : path.substr(0, separator + 1);
-            path += "libvulkan_fix_validation_driver.so";
+            path += use_capture ? "libvulkan_fix_renderdoc_driver.so" : "libvulkan_fix_validation_driver.so";
             handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-            if (handle) LOGI("Loaded opt-in validation provider: %s", path.c_str());
-            else LOGE("Validation provider load failed: %s", dlerror());
+            if (handle) LOGI("Loaded opt-in diagnostic provider: %s", path.c_str());
+            else LOGE("Diagnostic provider load failed: %s", dlerror());
         }
         // A diagnostic run must not silently become an unvalidated run.
         if (!handle) return;

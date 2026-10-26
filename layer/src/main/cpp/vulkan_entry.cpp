@@ -189,6 +189,7 @@ VK_LAYER_EXPORT void VKAPI_CALL vkDestroyInstance(
     VkInstance instance,
     const VkAllocationCallbacks* pAllocator
 ) {
+    RenderDocManager::get().on_instance_destroyed(instance);
     PFN_vkDestroyInstance real_fn =
         (PFN_vkDestroyInstance) get_real_proc(instance, VK_NULL_HANDLE, "vkDestroyInstance");
     if (real_fn) {
@@ -613,6 +614,12 @@ VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vulkan_fix_end_capture(VkDevice devic
 VK_LAYER_EXPORT VKAPI_ATTR uint32_t VKAPI_CALL vulkan_fix_is_renderdoc_attached() {
     return RenderDocManager::get().is_available() ? 1 : 0;
 }
+VK_LAYER_EXPORT uint32_t VKAPI_CALL vulkan_fix_start_capture_checked(VkDevice device) {
+    return RenderDocManager::get().start_capture(device) ? 1 : 0;
+}
+VK_LAYER_EXPORT uint32_t VKAPI_CALL vulkan_fix_end_capture_checked(VkDevice device) {
+    return RenderDocManager::get().end_capture(device) ? 1 : 0;
+}
 
 // ============================================================================
 // Dispatchers: vkGetInstanceProcAddr & vkGetDeviceProcAddr
@@ -628,6 +635,8 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vulkan_fix_start_capture);
         MATCH(vulkan_fix_end_capture);
         MATCH(vulkan_fix_is_renderdoc_attached);
+        MATCH(vulkan_fix_start_capture_checked);
+        MATCH(vulkan_fix_end_capture_checked);
         return NULL;
     }
 
@@ -657,6 +666,10 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCmdPushConstants);
             MATCH(vkCmdBeginQuery);
             MATCH(vkCmdEndQuery);
+            MATCH(vkCmdBeginQueryIndexedEXT);
+            MATCH(vkCmdEndQueryIndexedEXT);
+            MATCH(vkCmdBeginTransformFeedbackEXT);
+            MATCH(vkCmdEndTransformFeedbackEXT);
             MATCH(vkCmdBindVertexBuffers);
             MATCH(vkCmdBindVertexBuffers2);
             MATCH(vkCmdBindVertexBuffers2EXT);
@@ -744,6 +757,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vkCreateFramebuffer);
         MATCH(vkCreateSemaphore);
         MATCH(vkCreateRenderPass2);
+        MATCH(vkCreateRenderPass);
         MATCH(vkCreateRenderPass2KHR);
         MATCH(vkCreateSamplerYcbcrConversion);
         MATCH(vkCreateSamplerYcbcrConversionKHR);
@@ -761,6 +775,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
         MATCH(vkDestroyImageView);
         MATCH(vkDestroySampler);
         MATCH(vkDestroyFramebuffer);
+        MATCH(vkDestroyRenderPass);
         MATCH(vkDestroySemaphore);
         MATCH(vkDestroySamplerYcbcrConversion);
         MATCH(vkDestroySamplerYcbcrConversionKHR);
@@ -1303,8 +1318,14 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateRenderPass(
     }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
+    auto create = [&](const VkRenderPassCreateInfo* info) {
+        VkResult result = real_fn(device, info, pAllocator, pRenderPass);
+        if (result == VK_SUCCESS && pRenderPass)
+            LayerManager::get().track_render_pass(device, info, *pRenderPass);
+        return result;
+    };
     if (!pCreateInfo || !LayoutCompat::get().any_emulated()) {
-        return real_fn(device, pCreateInfo, pAllocator, pRenderPass);
+        return create(pCreateInfo);
     }
 
     std::vector<VkAttachmentDescription> attachments(pCreateInfo->attachmentCount);
@@ -1350,9 +1371,15 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateRenderPass(
     VkRenderPassCreateInfo modified = *pCreateInfo;
     modified.pAttachments = attachments.empty() ? nullptr : attachments.data();
     modified.pSubpasses = subpasses.empty() ? nullptr : subpasses.data();
-    return real_fn(device, &modified, pAllocator, pRenderPass);
+    return create(&modified);
 }
-FORWARD_DEV_VOID(vkDestroyRenderPass, device, (VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator), (device, renderPass, pAllocator))
+VK_LAYER_EXPORT void VKAPI_CALL vkDestroyRenderPass(
+    VkDevice device, VkRenderPass renderPass, const VkAllocationCallbacks* pAllocator) {
+    LayerManager::get().forget_render_pass(device, renderPass);
+    auto real = (PFN_vkDestroyRenderPass)get_real_proc(
+        get_last_instance(), device, "vkDestroyRenderPass");
+    if (real) real(device, renderPass, pAllocator);
+}
 
 // VK_KHR_imageless_framebuffer emulation: a framebuffer created with
 // VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT gets a synthetic handle; the real
@@ -2927,6 +2954,7 @@ VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBeginQuery(VkCommandBuffer cmd, 
                                                            uint32_t query,
                                                            VkQueryControlFlags flags) {
     VertexStoreEmulator::get().query(cmd, true);
+    LayerManager::get().block_tiler_split(cmd, true);
     TBDRBarrierOptimizer::get().on_cmd_action(cmd);
     auto device = LayerManager::get().get_device_for_cmd(cmd);
     auto real = (PFN_vkCmdBeginQuery)get_real_proc(get_last_instance(), device, "vkCmdBeginQuery");
@@ -2936,12 +2964,39 @@ VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBeginQuery(VkCommandBuffer cmd, 
 VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdEndQuery(VkCommandBuffer cmd, VkQueryPool pool,
                                                          uint32_t query) {
     VertexStoreEmulator::get().query(cmd, false);
+    LayerManager::get().block_tiler_split(cmd, false);
     TBDRBarrierOptimizer::get().on_cmd_action(cmd);
     auto device = LayerManager::get().get_device_for_cmd(cmd);
     auto real = (PFN_vkCmdEndQuery)get_real_proc(get_last_instance(), device, "vkCmdEndQuery");
     if (real)
         real(cmd, pool, query);
 }
+
+// These scopes cannot cross a physical render-pass boundary. Keep the tiler
+// budget pending until all nested query/feedback/conditional scopes have ended.
+#define TILER_SCOPE_COMMAND(name, beginning, params, arguments) \
+    VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL name params { \
+        auto& manager = LayerManager::get(); \
+        TBDRBarrierOptimizer::get().on_cmd_action(cmd); \
+        if (beginning) manager.block_tiler_split(cmd, true); \
+        auto real = (PFN_##name)get_real_proc(get_last_instance(), \
+            manager.get_device_for_cmd(cmd), #name); \
+        if (real) real arguments; \
+        if (!beginning) manager.block_tiler_split(cmd, false); \
+    }
+TILER_SCOPE_COMMAND(vkCmdBeginQueryIndexedEXT, true,
+    (VkCommandBuffer cmd, VkQueryPool pool, uint32_t query, VkQueryControlFlags flags, uint32_t index),
+    (cmd, pool, query, flags, index))
+TILER_SCOPE_COMMAND(vkCmdEndQueryIndexedEXT, false,
+    (VkCommandBuffer cmd, VkQueryPool pool, uint32_t query, uint32_t index),
+    (cmd, pool, query, index))
+TILER_SCOPE_COMMAND(vkCmdBeginTransformFeedbackEXT, true,
+    (VkCommandBuffer cmd, uint32_t first, uint32_t count, const VkBuffer* buffers, const VkDeviceSize* offsets),
+    (cmd, first, count, buffers, offsets))
+TILER_SCOPE_COMMAND(vkCmdEndTransformFeedbackEXT, false,
+    (VkCommandBuffer cmd, uint32_t first, uint32_t count, const VkBuffer* buffers, const VkDeviceSize* offsets),
+    (cmd, first, count, buffers, offsets))
+#undef TILER_SCOPE_COMMAND
 
 namespace {
 void track_sets2(VkCommandBuffer cmd, const VkBindDescriptorSetsInfo *info) {
@@ -3006,6 +3061,7 @@ VERTEX_STORE_BIND2(KHR)
 VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBeginConditionalRenderingEXT(
     VkCommandBuffer cmd, const VkConditionalRenderingBeginInfoEXT *info) {
     VertexStoreEmulator::get().query(cmd, true);
+    LayerManager::get().block_tiler_split(cmd, true);
     auto device = LayerManager::get().get_device_for_cmd(cmd);
     auto real = (PFN_vkCmdBeginConditionalRenderingEXT)get_real_proc(
         get_last_instance(), device, "vkCmdBeginConditionalRenderingEXT");
@@ -3014,6 +3070,7 @@ VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdBeginConditionalRenderingEXT(
 }
 VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkCmdEndConditionalRenderingEXT(VkCommandBuffer cmd) {
     VertexStoreEmulator::get().query(cmd, false);
+    LayerManager::get().block_tiler_split(cmd, false);
     auto device = LayerManager::get().get_device_for_cmd(cmd);
     auto real = (PFN_vkCmdEndConditionalRenderingEXT)get_real_proc(
         get_last_instance(), device, "vkCmdEndConditionalRenderingEXT");

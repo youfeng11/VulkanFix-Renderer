@@ -183,6 +183,7 @@ add_executable(vulkan_fix_test
 )
 
 target_include_directories(vulkan_fix_test BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../../Vulkan-Headers/include
 )
 
@@ -213,6 +214,12 @@ target_link_libraries(indirect_expander_test PRIVATE
 # Opt-in: AGP explicitly builds executable targets even with EXCLUDE_FROM_ALL.
 option(VULKAN_FIX_BUILD_REGRESSION_TESTS "Build mock-driver regression runner" OFF)
 if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
+    add_executable(mali_tiler_gpu_test EXCLUDE_FROM_ALL tests/mali_tiler_gpu_test.cpp)
+    target_include_directories(mali_tiler_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(mali_tiler_gpu_test PRIVATE vulkan_fix Vulkan::Headers SPIRV-Tools-static ${LOG_LIB} vulkan dl)
+    add_executable(renderdoc_manager_test EXCLUDE_FROM_ALL tests/renderdoc_manager_test.cpp core/renderdoc_manager.cpp)
+    target_include_directories(renderdoc_manager_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/core)
+    target_link_libraries(renderdoc_manager_test PRIVATE Vulkan::Headers ${LOG_LIB} dl)
     add_executable(extension_dependencies_test EXCLUDE_FROM_ALL
         tests/extension_dependencies_test.cpp core/extension_dependencies.cpp core/native_instance_state.cpp)
     target_include_directories(extension_dependencies_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -278,6 +285,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
         tests/compatibility_regression_test.cpp
         tests/timeline_regression_cases.cpp
         tests/push_descriptor_regression_cases.cpp
+        tests/mali_tiler_regression_cases.cpp
         ${REGRESSION_CORE_SOURCES}
         ${MODULE_SOURCES}
         ${SHADER_SOURCES}

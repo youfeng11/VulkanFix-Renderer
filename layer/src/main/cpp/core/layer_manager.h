@@ -386,6 +386,9 @@ public:
         const VkDeviceSize* pSizes,
         const VkDeviceSize* pStrides);
 
+    void block_tiler_split(VkCommandBuffer commandBuffer, bool begin);
+    void track_render_pass(VkDevice device, const VkRenderPassCreateInfo* info, VkRenderPass pass);
+    void forget_render_pass(VkDevice device, VkRenderPass pass);
     void dispatch_cmd_draw(
         VkCommandBuffer commandBuffer,
         uint32_t vertexCount,
@@ -854,6 +857,7 @@ public:
     }
 
 private:
+    friend struct DynamicRenderingTestAccess;
     LayerManager() = default;
     ~LayerManager() = default;
     LayerManager(const LayerManager&) = delete;

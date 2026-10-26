@@ -1,338 +1,280 @@
-#include <vulkan/vulkan.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "core/renderdoc_app.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <dlfcn.h>
 #include <vector>
-#include <android/log.h>
+#include <vulkan/vulkan.h>
 
-#define TAG "VulkanFixTest"
-#define LOGI(...) do { printf(__VA_ARGS__); printf("\n"); __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__); } while(0)
-#define LOGE(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__); } while(0)
-
-extern "C" {
-    void vulkan_fix_trigger_capture(uint32_t num_frames);
-    void vulkan_fix_start_capture(VkDevice device);
-    void vulkan_fix_end_capture(VkDevice device);
-    uint32_t vulkan_fix_is_renderdoc_attached();
+extern "C" uint32_t vulkan_fix_start_capture_checked(VkDevice);
+extern "C" uint32_t vulkan_fix_end_capture_checked(VkDevice);
+#define REQUIRE(x)                                                                                 \
+    do {                                                                                           \
+        if (!(x)) {                                                                                \
+            printf("FAIL line %d: %s\n", __LINE__, #x);                                            \
+            return 1;                                                                              \
+        }                                                                                          \
+    } while (0)
+static uint32_t memory_type(const VkPhysicalDeviceMemoryProperties &properties, uint32_t bits,
+                            VkMemoryPropertyFlags flags) {
+    for (uint32_t i = 0; i < properties.memoryTypeCount; ++i)
+        if ((bits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & flags) == flags)
+            return i;
+    return UINT32_MAX;
 }
-#include <chrono>
-
-int main(int argc, char** argv) {
-    LOGI("==================================================");
-    LOGI("  VulkanFix + RenderDoc Validation Test Runner    ");
-    LOGI("==================================================");
-
-    uint32_t rdocAttached = vulkan_fix_is_renderdoc_attached();
-    LOGI("RenderDoc In-App status: %s", rdocAttached ? "ATTACHED" : "NOT ATTACHED (will auto-detect if layer active)");
-
-    // 1. Create Instance
-    VkApplicationInfo appInfo = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
-    appInfo.pApplicationName = "VulkanFixRenderDocTest";
-    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.pEngineName = "VulkanFix";
-    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_1;
-
-    std::vector<const char*> instanceExts;
-    instanceExts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-
-    // Enumerate available instance layers
-    uint32_t layerCount = 0;
-    vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
-    std::vector<VkLayerProperties> availLayers(layerCount);
-    vkEnumerateInstanceLayerProperties(&layerCount, availLayers.data());
-    std::vector<const char*> enabledLayers;
-    for (const auto& l : availLayers) {
-        LOGI("Found layer: %s (%s, v%u)", l.layerName, l.description, l.implementationVersion);
-        if (strcmp(l.layerName, "VK_LAYER_RENDERDOC_Capture") == 0) {
-            enabledLayers.push_back("VK_LAYER_RENDERDOC_Capture");
-            LOGI("Enabling layer: %s", l.layerName);
-        }
+static VKAPI_ATTR VkBool32 VKAPI_CALL
+debug_message(VkDebugUtilsMessageSeverityFlagBitsEXT, VkDebugUtilsMessageTypeFlagsEXT,
+              const VkDebugUtilsMessengerCallbackDataEXT *data, void *user) {
+    if (data && data->messageIdNumber == 0x564658 && user)
+        ++*static_cast<unsigned *>(user);
+    return VK_FALSE;
+}
+int main() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.pApplicationName = "VulkanFix RenderDoc capture verification";
+    app.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ici.pApplicationInfo = &app;
+    const bool game_init = getenv("VULKAN_FIX_TEST_DEBUG_UTILS") != nullptr;
+    const char *game_extensions[]{VK_KHR_SURFACE_EXTENSION_NAME, "VK_KHR_android_surface",
+                                  VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
+    VkDebugUtilsMessengerCreateInfoEXT debug_info{
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+    debug_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                 VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    debug_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                             VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
+    debug_info.pfnUserCallback = debug_message;
+    unsigned debug_messages = 0;
+    debug_info.pUserData = &debug_messages;
+    if (game_init) {
+        app.apiVersion = VK_API_VERSION_1_2;
+        ici.enabledExtensionCount = 3;
+        ici.ppEnabledExtensionNames = game_extensions;
+        ici.pNext = &debug_info;
     }
-
-    VkInstanceCreateInfo instCI = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
-    instCI.pApplicationInfo = &appInfo;
-    instCI.enabledExtensionCount = (uint32_t)instanceExts.size();
-    instCI.ppEnabledExtensionNames = instanceExts.data();
-    instCI.enabledLayerCount = (uint32_t)enabledLayers.size();
-    instCI.ppEnabledLayerNames = enabledLayers.empty() ? nullptr : enabledLayers.data();
-
-    VkInstance instance = VK_NULL_HANDLE;
-    VkResult res = vkCreateInstance(&instCI, nullptr, &instance);
-    if (res != VK_SUCCESS) {
-        LOGE("Failed to create Vulkan instance: %d", res);
-        return 1;
+    VkInstance instance{};
+    REQUIRE(vkCreateInstance(&ici, nullptr, &instance) == VK_SUCCESS);
+    VkDebugUtilsMessengerEXT messenger{};
+    PFN_vkDestroyDebugUtilsMessengerEXT destroy_messenger{};
+    if (game_init) {
+        auto provider = dlopen("./libvulkan_fix_renderdoc_driver.so", RTLD_NOW | RTLD_NOLOAD);
+        REQUIRE(provider);
+        auto get_api = (pRENDERDOC_GetAPI)dlsym(provider, "RENDERDOC_GetAPI");
+        RENDERDOC_API_1_6_0 *capture_api{};
+        REQUIRE(get_api && get_api(eRENDERDOC_API_Version_1_6_0, (void **)&capture_api) == 1);
+        // RenderDoc otherwise intentionally mutes application debug callbacks.
+        REQUIRE(capture_api->SetCaptureOptionU32(eRENDERDOC_Option_DebugOutputMute, 0) == 1);
+        dlclose(provider);
+        auto create_messenger = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            instance, "vkCreateDebugUtilsMessengerEXT");
+        destroy_messenger = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            instance, "vkDestroyDebugUtilsMessengerEXT");
+        REQUIRE(create_messenger && destroy_messenger);
+        REQUIRE(create_messenger(instance, &debug_info, nullptr, &messenger) == VK_SUCCESS);
+        REQUIRE(messenger != VK_NULL_HANDLE);
+        auto submit_message = (PFN_vkSubmitDebugUtilsMessageEXT)vkGetInstanceProcAddr(
+            instance, "vkSubmitDebugUtilsMessageEXT");
+        REQUIRE(submit_message);
+        VkDebugUtilsMessengerCallbackDataEXT message{
+            VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT};
+        message.messageIdNumber = 0x564658;
+        message.pMessageIdName = "VulkanFix regression";
+        message.pMessage = "Debug messenger delivery check";
+        submit_message(instance, VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT, &message);
+        REQUIRE(debug_messages == 1);
+        submit_message(instance, VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT, &message);
+        submit_message(instance, VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT, &message);
+        REQUIRE(debug_messages == 1);
+        destroy_messenger(instance, messenger, nullptr);
+        messenger = VK_NULL_HANDLE;
+        submit_message(instance, VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT, &message);
+        REQUIRE(debug_messages == 1);
+        REQUIRE(create_messenger(instance, &debug_info, nullptr, &messenger) == VK_SUCCESS);
+        printf("PASS: Vulkan 1.2 surface/debug_utils instance and messenger creation\n");
+        printf("PASS: debug message delivery, severity/type filtering and callback removal\n");
     }
-    LOGI("Successfully created VkInstance: %p", instance);
-
-    // 2. Pick Physical Device
-    uint32_t gpuCount = 0;
-    vkEnumeratePhysicalDevices(instance, &gpuCount, nullptr);
-    if (gpuCount == 0) {
-        LOGE("No Vulkan physical devices found!");
-        vkDestroyInstance(instance, nullptr);
-        return 1;
-    }
-    std::vector<VkPhysicalDevice> gpus(gpuCount);
-    vkEnumeratePhysicalDevices(instance, &gpuCount, gpus.data());
-    VkPhysicalDevice gpu = gpus[0];
-
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(gpu, &props);
-    LOGI("Selected GPU: %s (Vulkan %u.%u.%u)", props.deviceName,
-         VK_VERSION_MAJOR(props.apiVersion),
-         VK_VERSION_MINOR(props.apiVersion),
-         VK_VERSION_PATCH(props.apiVersion));
-
-    // 3. Find Queue Family
-    uint32_t qfCount = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(gpu, &qfCount, nullptr);
-    std::vector<VkQueueFamilyProperties> qfProps(qfCount);
-    vkGetPhysicalDeviceQueueFamilyProperties(gpu, &qfCount, qfProps.data());
-
-    int graphicsQf = -1;
-    for (uint32_t i = 0; i < qfCount; ++i) {
-        if (qfProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-            graphicsQf = (int)i;
-            break;
-        }
-    }
-    if (graphicsQf < 0) {
-        LOGE("No graphics queue family found!");
-        vkDestroyInstance(instance, nullptr);
-        return 1;
-    }
-
-    // 4. Check device extensions
-    uint32_t devExtCount = 0;
-    vkEnumerateDeviceExtensionProperties(gpu, nullptr, &devExtCount, nullptr);
-    std::vector<VkExtensionProperties> devExts(devExtCount);
-    vkEnumerateDeviceExtensionProperties(gpu, nullptr, &devExtCount, devExts.data());
-
-    bool hasDynamicRendering = false;
-    for (const auto& ext : devExts) {
-        if (strcmp(ext.extensionName, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) == 0) {
-            hasDynamicRendering = true;
-            break;
-        }
-    }
-    LOGI("VK_KHR_dynamic_rendering available: %s", hasDynamicRendering ? "YES" : "NO");
-
-    // 5. Create Device with Dynamic Rendering feature
-    float queuePriority = 1.0f;
-    VkDeviceQueueCreateInfo queueCI = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
-    queueCI.queueFamilyIndex = (uint32_t)graphicsQf;
-    queueCI.queueCount = 1;
-    queueCI.pQueuePriorities = &queuePriority;
-
-    std::vector<const char*> enabledDevExts;
-    if (hasDynamicRendering) {
-        enabledDevExts.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-    }
-
-    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynFeatures = {
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR
-    };
-    dynFeatures.dynamicRendering = VK_TRUE;
-
-    VkDeviceCreateInfo devCI = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
-    devCI.pNext = &dynFeatures;
-    devCI.queueCreateInfoCount = 1;
-    devCI.pQueueCreateInfos = &queueCI;
-    devCI.enabledExtensionCount = (uint32_t)enabledDevExts.size();
-    devCI.ppEnabledExtensionNames = enabledDevExts.data();
-
-    VkDevice device = VK_NULL_HANDLE;
-    res = vkCreateDevice(gpu, &devCI, nullptr, &device);
-    if (res != VK_SUCCESS) {
-        LOGE("Failed to create VkDevice: %d", res);
-        vkDestroyInstance(instance, nullptr);
-        return 1;
-    }
-    LOGI("Successfully created VkDevice: %p", device);
-
-    VkQueue queue = VK_NULL_HANDLE;
-    vkGetDeviceQueue(device, (uint32_t)graphicsQf, 0, &queue);
-
-    // 6. Create Command Pool & Buffer
-    VkCommandPoolCreateInfo poolCI = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-    poolCI.queueFamilyIndex = (uint32_t)graphicsQf;
-    poolCI.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    VkCommandPool cmdPool = VK_NULL_HANDLE;
-    vkCreateCommandPool(device, &poolCI, nullptr, &cmdPool);
-
-    VkCommandBufferAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    allocInfo.commandPool = cmdPool;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    vkAllocateCommandBuffers(device, &allocInfo, &cmd);
-
-    // 7. Create 64x64 color attachment image
-    VkImageCreateInfo imgCI = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    imgCI.imageType = VK_IMAGE_TYPE_2D;
-    imgCI.format = VK_FORMAT_R8G8B8A8_UNORM;
-    imgCI.extent = { 64, 64, 1 };
-    imgCI.mipLevels = 1;
-    imgCI.arrayLayers = 1;
-    imgCI.samples = VK_SAMPLE_COUNT_1_BIT;
-    imgCI.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imgCI.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    imgCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    VkImage img = VK_NULL_HANDLE;
-    vkCreateImage(device, &imgCI, nullptr, &img);
-
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device, img, &memReqs);
-
-    VkPhysicalDeviceMemoryProperties memProps;
-    vkGetPhysicalDeviceMemoryProperties(gpu, &memProps);
-    uint32_t memTypeIndex = 0;
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-        if ((memReqs.memoryTypeBits & (1 << i)) &&
-            (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-            memTypeIndex = i;
-            break;
-        }
-    }
-
-    VkMemoryAllocateInfo memAlloc = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    memAlloc.allocationSize = memReqs.size;
-    memAlloc.memoryTypeIndex = memTypeIndex;
-    VkDeviceMemory imgMem = VK_NULL_HANDLE;
-    vkAllocateMemory(device, &memAlloc, nullptr, &imgMem);
-    vkBindImageMemory(device, img, imgMem, 0);
-
-    VkImageViewCreateInfo viewCI = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-    viewCI.image = img;
-    viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewCI.format = VK_FORMAT_R8G8B8A8_UNORM;
-    viewCI.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewCI.subresourceRange.baseMipLevel = 0;
-    viewCI.subresourceRange.levelCount = 1;
-    viewCI.subresourceRange.baseArrayLayer = 0;
-    viewCI.subresourceRange.layerCount = 1;
-
-    VkImageView imgView = VK_NULL_HANDLE;
-    vkCreateImageView(device, &viewCI, nullptr, &imgView);
-
-    // 8. RenderDoc Capture Trigger (Explicit In-App API)
-    LOGI("Triggering RenderDoc explicit frame capture...");
-    vulkan_fix_start_capture(device);
-
-    // 9. Record rendering commands
-    VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &beginInfo);
-
-    // Pre-barrier: UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL
-    VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = img;
-    barrier.subresourceRange = viewCI.subresourceRange;
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &barrier
-    );
-
-    // Dynamic Rendering Pass (will be intercepted & emulated if hardware lacks it)
-    VkRenderingAttachmentInfoKHR colorAttachment = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR
-    };
-    colorAttachment.imageView = imgView;
-    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.clearValue.color.float32[0] = 0.2f; // Red
-    colorAttachment.clearValue.color.float32[1] = 0.5f; // Green
-    colorAttachment.clearValue.color.float32[2] = 0.8f; // Blue
-    colorAttachment.clearValue.color.float32[3] = 1.0f; // Alpha
-
-    VkRenderingInfoKHR renderingInfo = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
-    renderingInfo.renderArea.offset = { 0, 0 };
-    renderingInfo.renderArea.extent = { 64, 64 };
-    renderingInfo.layerCount = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments = &colorAttachment;
-
-    LOGI("Calling vkCmdBeginRenderingKHR (Dynamic Rendering)...");
-    vkCmdBeginRenderingKHR(cmd, &renderingInfo);
-
-    LOGI("Calling vkCmdEndRenderingKHR...");
-    vkCmdEndRenderingKHR(cmd);
-
-    // TBDR Barrier Optimizer Verification:
-    // 1. Post-barrier with layout transition (MUST NOT be dropped or cause AFBC corruption)
-    VkImageMemoryBarrier postBarrier = barrier;
-    postBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    postBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    postBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    postBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &postBarrier);
-
-    // 2. Presentation barrier (MUST NOT be dropped, MUST NOT be narrowed to preserve SurfaceFlinger display sync)
-    VkImageMemoryBarrier presentBarrier = postBarrier;
-    presentBarrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    presentBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    presentBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    presentBarrier.dstAccessMask = 0;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &presentBarrier);
-
-    vkEndCommandBuffer(cmd);
-
-    // 10. Submit & Wait
-    VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &cmd;
-
-    LOGI("Submitting command buffer to queue...");
-    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
-    LOGI("Execution completed successfully!");
-
-    vulkan_fix_end_capture(device);
-
-    // 11. Performance Micro-Benchmark: 10,000 Dynamic Rendering & Barrier Passes
-    LOGI("--------------------------------------------------");
-    LOGI("  Running Performance Benchmark (10,000 passes)   ");
-    LOGI("--------------------------------------------------");
-    const int BENCH_ITERS = 10000;
-    auto tStart = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < BENCH_ITERS; ++i) {
-        vkResetCommandBuffer(cmd, 0);
-        vkBeginCommandBuffer(cmd, &beginInfo);
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-        vkCmdBeginRenderingKHR(cmd, &renderingInfo);
-        vkCmdEndRenderingKHR(cmd);
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &postBarrier);
-        vkEndCommandBuffer(cmd);
-    }
-    auto tEnd = std::chrono::high_resolution_clock::now();
-    double totalUs = std::chrono::duration<double, std::micro>(tEnd - tStart).count();
-    double avgUs = totalUs / BENCH_ITERS;
-    LOGI("Completed %d Dynamic Rendering passes in %.2f ms", BENCH_ITERS, totalUs / 1000.0);
-    LOGI("Average overhead per pass: %.3f us (%.1f passes/sec)", avgUs, 1000000.0 / avgUs);
-
-    // 11. Cleanup
-    vkDestroyImageView(device, imgView, nullptr);
-    vkDestroyImage(device, img, nullptr);
-    vkFreeMemory(device, imgMem, nullptr);
-    vkDestroyCommandPool(device, cmdPool, nullptr);
+    uint32_t count = 0;
+    REQUIRE(vkEnumeratePhysicalDevices(instance, &count, nullptr) == VK_SUCCESS && count);
+    std::vector<VkPhysicalDevice> physical(count);
+    REQUIRE(vkEnumeratePhysicalDevices(instance, &count, physical.data()) == VK_SUCCESS);
+    VkPhysicalDeviceMemoryProperties memory{};
+    vkGetPhysicalDeviceMemoryProperties(physical[0], &memory);
+    vkGetPhysicalDeviceQueueFamilyProperties(physical[0], &count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(physical[0], &count, families.data());
+    uint32_t family = 0;
+    while (family < count && !(families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+        ++family;
+    REQUIRE(family < count);
+    float priority = 1;
+    VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    qi.queueFamilyIndex = family;
+    qi.queueCount = 1;
+    qi.pQueuePriorities = &priority;
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos = &qi;
+    VkDevice device{};
+    REQUIRE(vkCreateDevice(physical[0], &dci, nullptr, &device) == VK_SUCCESS);
+    VkQueue queue{};
+    vkGetDeviceQueue(device, family, 0, &queue);
+    VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    image_info.extent = {64, 64, 1};
+    image_info.mipLevels = image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    VkImage image{};
+    REQUIRE(vkCreateImage(device, &image_info, nullptr, &image) == VK_SUCCESS);
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(device, image, &requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = memory_type(memory, requirements.memoryTypeBits, 0);
+    REQUIRE(allocation.memoryTypeIndex != UINT32_MAX);
+    VkDeviceMemory image_memory{};
+    REQUIRE(vkAllocateMemory(device, &allocation, nullptr, &image_memory) == VK_SUCCESS);
+    REQUIRE(vkBindImageMemory(device, image, image_memory, 0) == VK_SUCCESS);
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = image;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = image_info.format;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView view{};
+    REQUIRE(vkCreateImageView(device, &vi, nullptr, &view) == VK_SUCCESS);
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = 64 * 64 * 4;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VkBuffer buffer{};
+    REQUIRE(vkCreateBuffer(device, &bi, nullptr, &buffer) == VK_SUCCESS);
+    vkGetBufferMemoryRequirements(device, buffer, &requirements);
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex =
+        memory_type(memory, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    REQUIRE(allocation.memoryTypeIndex != UINT32_MAX);
+    VkDeviceMemory buffer_memory{};
+    REQUIRE(vkAllocateMemory(device, &allocation, nullptr, &buffer_memory) == VK_SUCCESS);
+    REQUIRE(vkBindBufferMemory(device, buffer, buffer_memory, 0) == VK_SUCCESS);
+    VkAttachmentDescription attachment{};
+    attachment.format = image_info.format;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &reference;
+    VkSubpassDependency dependencies[2]{};
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = dependencies[0].dstStageMask =
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rp.attachmentCount = 1;
+    rp.pAttachments = &attachment;
+    rp.subpassCount = 1;
+    rp.pSubpasses = &subpass;
+    rp.dependencyCount = 2;
+    rp.pDependencies = dependencies;
+    VkRenderPass pass{};
+    REQUIRE(vkCreateRenderPass(device, &rp, nullptr, &pass) == VK_SUCCESS);
+    VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fb.renderPass = pass;
+    fb.attachmentCount = 1;
+    fb.pAttachments = &view;
+    fb.width = fb.height = 64;
+    fb.layers = 1;
+    VkFramebuffer framebuffer{};
+    REQUIRE(vkCreateFramebuffer(device, &fb, nullptr, &framebuffer) == VK_SUCCESS);
+    VkCommandPoolCreateInfo cp{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    cp.queueFamilyIndex = family;
+    VkCommandPool pool{};
+    REQUIRE(vkCreateCommandPool(device, &cp, nullptr, &pool) == VK_SUCCESS);
+    VkCommandBufferAllocateInfo ca{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ca.commandPool = pool;
+    ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ca.commandBufferCount = 1;
+    VkCommandBuffer cmd{};
+    REQUIRE(vkAllocateCommandBuffers(device, &ca, &cmd) == VK_SUCCESS);
+    REQUIRE(vulkan_fix_start_capture_checked(device) == 1);
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    REQUIRE(vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS);
+    VkClearValue clear{};
+    clear.color.float32[0] = 0.2f;
+    clear.color.float32[1] = 0.5f;
+    clear.color.float32[2] = 0.8f;
+    clear.color.float32[3] = 1;
+    VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rb.renderPass = pass;
+    rb.framebuffer = framebuffer;
+    rb.renderArea.extent = {64, 64};
+    rb.clearValueCount = 1;
+    rb.pClearValues = &clear;
+    vkCmdBeginRenderPass(cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdEndRenderPass(cmd);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {64, 64, 1};
+    vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &copy);
+    VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    host.srcQueueFamilyIndex = host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    host.buffer = buffer;
+    host.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
+                         nullptr, 1, &host, 0, nullptr);
+    REQUIRE(vkEndCommandBuffer(cmd) == VK_SUCCESS);
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    REQUIRE(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS);
+    REQUIRE(vkQueueWaitIdle(queue) == VK_SUCCESS);
+    REQUIRE(vulkan_fix_end_capture_checked(device) == 1);
+    void *mapped{};
+    REQUIRE(vkMapMemory(device, buffer_memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS);
+    VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+    range.memory = buffer_memory;
+    range.size = VK_WHOLE_SIZE;
+    REQUIRE(vkInvalidateMappedMemoryRanges(device, 1, &range) == VK_SUCCESS);
+    auto bytes = (const unsigned char *)mapped;
+    const int expected[]{51, 128, 204, 255};
+    for (unsigned i = 0; i < 64 * 64 * 4; ++i)
+        REQUIRE(abs(int(bytes[i]) - expected[i % 4]) <= 1);
+    vkUnmapMemory(device, buffer_memory);
+    printf("PASS: captured render pass clears and copies all 4096 pixels correctly\n");
+    vkDestroyCommandPool(device, pool, nullptr);
+    vkDestroyFramebuffer(device, framebuffer, nullptr);
+    vkDestroyRenderPass(device, pass, nullptr);
+    vkDestroyImageView(device, view, nullptr);
+    vkDestroyImage(device, image, nullptr);
+    vkFreeMemory(device, image_memory, nullptr);
+    vkDestroyBuffer(device, buffer, nullptr);
+    vkFreeMemory(device, buffer_memory, nullptr);
     vkDestroyDevice(device, nullptr);
+    if (messenger)
+        destroy_messenger(instance, messenger, nullptr);
     vkDestroyInstance(instance, nullptr);
-
-    LOGI("==================================================");
-    LOGI("  Test PASSED! VulkanFix pipeline verified.       ");
-    LOGI("==================================================");
+    printf("PASS: RenderDoc returned success and produced a new non-empty RDC\n");
     return 0;
 }

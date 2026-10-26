@@ -179,6 +179,18 @@ public:
 
     virtual bool has_active_divisor_pipeline(VkCommandBuffer commandBuffer) { return false; }
 
+    virtual void before_draw(VkCommandBuffer commandBuffer, uint64_t vertices,
+                             uint32_t indirectDraws = 0) {}
+    virtual void block_tiler_split(VkCommandBuffer commandBuffer, bool begin) {}
+    virtual bool needs_tiler_tracking(VkDevice device) { return false; }
+    virtual void track_render_pass(VkDevice device, const VkRenderPassCreateInfo* info,
+                                   VkRenderPass pass) {}
+    virtual void track_render_pass2(VkDevice device, const VkRenderPassCreateInfo2* info,
+                                    VkRenderPass pass) {}
+    virtual void forget_render_pass(VkDevice device, VkRenderPass pass) {}
+    virtual void begin_legacy_rendering(VkCommandBuffer commandBuffer,
+        const VkRenderPassBeginInfo* info, VkSubpassContents contents) {}
+    virtual void end_legacy_rendering(VkCommandBuffer commandBuffer) {}
     virtual bool on_cmd_draw(
         VkCommandBuffer commandBuffer,
         uint32_t vertexCount,
