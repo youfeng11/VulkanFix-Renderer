@@ -4,6 +4,7 @@
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
 #include "shader/subgroup_broadcast_lowering.h"
+#include "shader/uniform_member_pruning.h"
 #include "imageless_framebuffer_manager.h"
 #include "layout_compat.h"
 #include "vk_pnext.h"
@@ -1278,7 +1279,10 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
     // header avoids a heap allocation + memcpy for every shader module.
     const uint32_t* code_words = pCreateInfo->pCode;
     const auto broadcast_support = LayerManager::get().get_device_subgroup_broadcast(device);
-    if (code_words[0] != 0x07230203u || (code_words[1] <= targetVersion && !broadcast_support)) {
+    const bool prune_uniforms = LayerManager::get().should_prune_uniform_members(device) &&
+        vkfix::has_large_uniform_block(code_words, pCreateInfo->codeSize / sizeof(uint32_t));
+    if (code_words[0] != 0x07230203u ||
+        (code_words[1] <= targetVersion && !broadcast_support && !prune_uniforms)) {
         return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 
@@ -1293,7 +1297,23 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
         if (result == vkfix::BroadcastLowering::Invalid)
             LOGW("Subgroup broadcast lowering rejected: %s", error.c_str());
     }
-    if (!ShaderRewriter::get().rewrite(code, targetVersion) && !broadcast_changed) {
+    const bool version_changed = ShaderRewriter::get().rewrite(code, targetVersion);
+    bool uniforms_changed = false;
+    if (prune_uniforms) {
+        std::string error;
+        const auto result = vkfix::prune_unused_uniform_members(code, targetVersion, error);
+        uniforms_changed = result == vkfix::UniformPruneResult::Changed;
+        if (result == vkfix::UniformPruneResult::Invalid)
+            LOGW("Mali uniform workaround rejected: %s", error.c_str());
+        if (uniforms_changed) {
+            static std::atomic<uint64_t> pruned_modules{0};
+            const auto count = pruned_modules.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (count == 1 || count % 16 == 0)
+                LOGI("Mali uniform workaround: pruned unused UBO members in %llu shader module(s)",
+                     static_cast<unsigned long long>(count));
+        }
+    }
+    if (!version_changed && !broadcast_changed && !uniforms_changed) {
         return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 

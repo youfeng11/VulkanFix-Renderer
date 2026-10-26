@@ -51,13 +51,13 @@ endif()
 set(SPIRV-Headers_SOURCE_DIR "${SPIRV_HEADERS_DIR}" CACHE PATH "SPIRV-Headers for SPIRV-Tools" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Build SPIRV-Tools in its own build tree and only the static library.
+# Build SPIRV-Tools' validator and optimizer in their own build tree.
 #
 # Upstream always creates a SPIRV-Tools-shared target, and AGP builds every
 # library/executable target it finds in the CMake project - which doubles the
 # compile time and exhausted memory when the four ABIs were built in parallel.
 # ExternalProject keeps SPIRV-Tools' targets out of AGP's target list and lets
-# us ask for SPIRV-Tools-static only.
+# us request only the validator and optimizer static libraries.
 # Keep the SPIRV-Tools build tree outside the AGP-hashed .cxx directory. A
 # CMake/AGP configuration change creates a new .cxx hash directory; without this
 # cache the validator would be recompiled from scratch (several minutes per ABI).
@@ -65,6 +65,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(SPIRV_TOOLS_BUILD_DIR
     "${VKFIX_ROOT}.cxx-spirv-tools/v1/${ANDROID_ABI}-${CMAKE_BUILD_TYPE}")
 set(SPIRV_TOOLS_STATIC_LIB "${SPIRV_TOOLS_BUILD_DIR}/source/libSPIRV-Tools.a")
+set(SPIRV_TOOLS_OPT_LIB "${SPIRV_TOOLS_BUILD_DIR}/source/opt/libSPIRV-Tools-opt.a")
 
 include(ExternalProject)
 
@@ -77,8 +78,8 @@ set(SPIRV_TOOLS_CMAKE_ARGS
     -DSPIRV_TOOLS_BUILD_STATIC=ON
     -DSPIRV_WERROR=OFF
     "-DSPIRV-Headers_SOURCE_DIR=${SPIRV_HEADERS_DIR}"
-    # Size-oriented release build: the validator is only used for downgrade
-    # checks, and function sections let the linker drop unreachable validators.
+    # Function sections let the linker drop unused validation rules and
+    # optimizer passes in size-oriented release builds.
     "-DCMAKE_CXX_FLAGS_RELEASE=-Os -DNDEBUG -ffunction-sections -fdata-sections"
     "-DCMAKE_C_FLAGS_RELEASE=-Os -DNDEBUG -ffunction-sections -fdata-sections"
     "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-Os -g -DNDEBUG -ffunction-sections -fdata-sections"
@@ -98,10 +99,10 @@ ExternalProject_Add(spirv_tools_external
     SOURCE_DIR "${SPIRV_TOOLS_DIR}"
     BINARY_DIR "${SPIRV_TOOLS_BUILD_DIR}"
     CMAKE_ARGS ${SPIRV_TOOLS_CMAKE_ARGS}
-    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target SPIRV-Tools-static --parallel 4
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target SPIRV-Tools-static SPIRV-Tools-opt --parallel 4
     INSTALL_COMMAND ""
     UPDATE_COMMAND ""
-    BUILD_BYPRODUCTS "${SPIRV_TOOLS_STATIC_LIB}"
+    BUILD_BYPRODUCTS "${SPIRV_TOOLS_STATIC_LIB}" "${SPIRV_TOOLS_OPT_LIB}"
 )
 
 add_library(SPIRV-Tools-static STATIC IMPORTED GLOBAL)
@@ -110,6 +111,13 @@ set_target_properties(SPIRV-Tools-static PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${SPIRV_TOOLS_DIR}/include;${SPIRV_HEADERS_DIR}/include"
 )
 add_dependencies(SPIRV-Tools-static spirv_tools_external)
+add_library(SPIRV-Tools-opt STATIC IMPORTED GLOBAL)
+set_target_properties(SPIRV-Tools-opt PROPERTIES
+    IMPORTED_LOCATION "${SPIRV_TOOLS_OPT_LIB}"
+    INTERFACE_LINK_LIBRARIES SPIRV-Tools-static
+    INTERFACE_INCLUDE_DIRECTORIES "${SPIRV_TOOLS_DIR}/include;${SPIRV_HEADERS_DIR}/include"
+)
+add_dependencies(SPIRV-Tools-opt spirv_tools_external)
 
 # Automatically discover all core and module sources
 file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS core/*.cpp)
@@ -146,6 +154,7 @@ find_library(ANDROID_LIB android)
 
 target_link_libraries(vulkan_fix PRIVATE
     Vulkan::Headers
+    SPIRV-Tools-opt
     SPIRV-Tools-static
     ${LOG_LIB}
     ${ANDROID_LIB}
@@ -170,8 +179,10 @@ target_compile_options(vulkan_fix PRIVATE
 
 target_link_options(vulkan_fix PRIVATE
     -Wl,-z,max-page-size=16384
+    -Wl,--gc-sections
+    # Keep optimizer internals private so unused passes can be discarded.
+    -Wl,--exclude-libs,libSPIRV-Tools-opt.a:libSPIRV-Tools.a
     $<$<CONFIG:Release>:
-        -Wl,--gc-sections
         -Wl,-Bsymbolic
         -flto=thin
     >
@@ -214,6 +225,15 @@ target_link_libraries(indirect_expander_test PRIVATE
 # Opt-in: AGP explicitly builds executable targets even with EXCLUDE_FROM_ALL.
 option(VULKAN_FIX_BUILD_REGRESSION_TESTS "Build mock-driver regression runner" OFF)
 if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
+    add_executable(uniform_member_pruning_test EXCLUDE_FROM_ALL
+        tests/uniform_member_pruning_test.cpp shader/uniform_member_pruning.cpp)
+    target_include_directories(uniform_member_pruning_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(uniform_member_pruning_test PRIVATE Vulkan::Headers SPIRV-Tools-opt)
+    add_executable(uniform_member_pruning_gpu_test EXCLUDE_FROM_ALL tests/uniform_member_pruning_gpu_test.cpp)
+    target_include_directories(uniform_member_pruning_gpu_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(uniform_member_pruning_gpu_test PRIVATE vulkan_fix Vulkan::Headers SPIRV-Tools-static ${LOG_LIB} vulkan dl)
     add_executable(mali_tiler_gpu_test EXCLUDE_FROM_ALL tests/mali_tiler_gpu_test.cpp)
     target_include_directories(mali_tiler_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(mali_tiler_gpu_test PRIVATE vulkan_fix Vulkan::Headers SPIRV-Tools-static ${LOG_LIB} vulkan dl)
@@ -294,7 +314,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>
     )
     target_link_libraries(compatibility_regression_test PRIVATE
-        Vulkan::Headers SPIRV-Tools-static ${LOG_LIB} ${ANDROID_LIB} dl
+        Vulkan::Headers SPIRV-Tools-opt SPIRV-Tools-static ${LOG_LIB} ${ANDROID_LIB} dl
     )
     add_executable(vertex_store_gpu_test EXCLUDE_FROM_ALL tests/vertex_store_gpu_test.cpp)
     target_include_directories(vertex_store_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)

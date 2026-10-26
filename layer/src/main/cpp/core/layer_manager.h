@@ -247,6 +247,7 @@ public:
     void set_device_max_spirv_version(VkDevice device, uint32_t version);
     uint32_t get_device_max_spirv_version(VkDevice device);
     vkfix::SubgroupBroadcastSupport get_device_subgroup_broadcast(VkDevice device);
+    bool should_prune_uniform_members(VkDevice device);
 
     VkResult dispatch_create_descriptor_set_layout(
         VkDevice device,
@@ -893,6 +894,7 @@ private:
     std::shared_mutex m_device_info_mutex;
     std::unordered_map<uint64_t, uint32_t> m_device_spirv_versions;
     std::unordered_map<uint64_t, vkfix::SubgroupBroadcastSupport> m_device_subgroup_broadcast;
+    std::unordered_set<uint64_t> m_device_uniform_member_pruning;
     std::atomic<uint32_t> m_primary_spirv_version{0};
 
     IVulkanLayerModule* m_divisor_mod = nullptr;

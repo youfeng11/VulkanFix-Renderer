@@ -12,6 +12,7 @@
 #include "tbdr_barrier_optimizer.h"
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
+#include "shader/uniform_member_pruning.h"
 #include "imageless_framebuffer_manager.h"
 #include "layout_compat.h"
 #include "vk_pnext.h"
@@ -672,6 +673,11 @@ vkfix::SubgroupBroadcastSupport LayerManager::get_device_subgroup_broadcast(VkDe
     return it != m_device_subgroup_broadcast.end() ? it->second : vkfix::SubgroupBroadcastSupport{};
 }
 
+bool LayerManager::should_prune_uniform_members(VkDevice device) {
+    std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
+    return m_device_uniform_member_pruning.count((uint64_t)(uintptr_t)device) != 0;
+}
+
 VkResult LayerManager::dispatch_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
     const char* pLayerName,
@@ -997,10 +1003,10 @@ VkResult LayerManager::dispatch_create_device(
         PFN_vkGetPhysicalDeviceProperties real_props = (PFN_vkGetPhysicalDeviceProperties)
             get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
         uint32_t api_version = VK_API_VERSION_1_0;
+        VkPhysicalDeviceProperties native_properties{};
         if (real_props) {
-            VkPhysicalDeviceProperties props{};
-            real_props(physicalDevice, &props);
-            api_version = props.apiVersion;
+            real_props(physicalDevice, &native_properties);
+            api_version = native_properties.apiVersion;
         }
         const uint32_t spirv_version = ShaderRewriter::api_version_to_spirv(api_version);
         set_device_max_spirv_version(*pDevice, spirv_version);
@@ -1008,6 +1014,11 @@ VkResult LayerManager::dispatch_create_device(
             auto broadcast = vkfix::subgroup_broadcast_support(physicalDevice);
             std::unique_lock<std::shared_mutex> lock(m_device_info_mutex);
             m_device_subgroup_broadcast[(uint64_t)(uintptr_t)*pDevice] = broadcast;
+            if (vkfix::uniform_member_pruning_enabled(native_properties.vendorID, api_version,
+                    getenv("VULKAN_FIX_PRUNE_UNUSED_UNIFORM_MEMBERS"))) {
+                m_device_uniform_member_pruning.insert((uint64_t)(uintptr_t)*pDevice);
+                LOGI("Mali uniform workaround: unused large UBO member pruning enabled");
+            }
         }
         LOGI("Created logical device %p (driver api 0x%x, max SPIR-V %s)",
              *pDevice, api_version, ShaderRewriter::spirv_version_string(spirv_version));
@@ -1070,6 +1081,7 @@ void LayerManager::dispatch_destroy_device(
         }
         m_device_spirv_versions.erase((uint64_t)(uintptr_t)device);
         m_device_subgroup_broadcast.erase((uint64_t)(uintptr_t)device);
+        m_device_uniform_member_pruning.erase((uint64_t)(uintptr_t)device);
     }
 
     PFN_vkDestroyDevice real_fn =
