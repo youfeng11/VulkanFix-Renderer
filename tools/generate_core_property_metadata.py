@@ -73,6 +73,10 @@ def generate():
                        "    raw_query(physical, &direct);"])
         for member in fields(name):
             target = RENAMES.get(member, member) if version == 11 else member
+            # Display strings identify the compatibility layer; the GPU runner
+            # checks these separately, including aggregate/KHR agreement.
+            if member in ("driverName", "driverInfo"):
+                continue
             checks.append(f'    check(!memcmp(&actual{version}.{target}, &native.{member}, sizeof(native.{member})), "native property: {target}");')
         checks.append("}")
     (ROOT / "layer/src/main/cpp/tests/core_properties_checks.inc").write_text(

@@ -73,6 +73,21 @@ int main() {
     check(query.pNext == &actual11 && actual11.pNext == &actual12 && !actual12.pNext,
           "aggregate query restores exact application links");
 #include "core_properties_checks.inc"
+    check(!strcmp(actual12.driverName, "Vulkan Fix") &&
+              strstr(actual12.driverInfo, PROJECT_VERSION_NAME " (" PROJECT_VERSION_CODE ")") &&
+              !strchr(actual12.driverInfo, '|'),
+          "driver display uses the original short Vulkan Fix build description");
+    check((strstr(actual12.driverInfo, "Emulated Vulkan") != nullptr) ==
+              (query.properties.apiVersion > native_api),
+          "driver display distinguishes promoted Vulkan from the native API version");
+    VkPhysicalDeviceDriverProperties driver{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 individual{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &driver};
+    vkGetPhysicalDeviceProperties2(physical, &individual);
+    check(!strcmp(driver.driverName, actual12.driverName) &&
+              !strcmp(driver.driverInfo, actual12.driverInfo) && driver.driverID == actual12.driverID &&
+              !memcmp(&driver.conformanceVersion, &actual12.conformanceVersion,
+                      sizeof(driver.conformanceVersion)),
+          "aggregate and individual driver queries agree on display and native identity");
     if (native_api < VK_API_VERSION_1_2 &&
         !extensions.count(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME))
         check(actual12.maxTimelineSemaphoreValueDifference > 0,

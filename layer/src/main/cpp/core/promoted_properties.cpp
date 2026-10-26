@@ -274,3 +274,4 @@ PromotedPropertyQuery::PromotedPropertyQuery(
     : state(std::make_unique<State>(physical, output)) {}
 PromotedPropertyQuery::~PromotedPropertyQuery() = default;
 void PromotedPropertyQuery::query_native() { state->query_native(); }
+uint32_t PromotedPropertyQuery::native_api_version() const { return state->api; }

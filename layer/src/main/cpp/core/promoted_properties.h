@@ -11,6 +11,7 @@ public:
                         VkPhysicalDeviceProperties2 *output);
   ~PromotedPropertyQuery();
   void query_native();
+  uint32_t native_api_version() const;
   PromotedPropertyQuery(const PromotedPropertyQuery &) = delete;
   PromotedPropertyQuery &operator=(const PromotedPropertyQuery &) = delete;
 

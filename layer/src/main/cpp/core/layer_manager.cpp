@@ -1,4 +1,5 @@
 #include "layer_manager.h"
+#include "driver_info.h"
 #include "vertex_store_emulator.h"
 #include "promoted_features.h"
 #include "promoted_properties.h"
@@ -808,17 +809,22 @@ void LayerManager::dispatch_get_physical_device_properties2(
     VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties2* pProperties
 ) {
     if (!pProperties) return;
-    PromotedPropertyQuery promotion(physicalDevice, pProperties);
-    std::vector<void*> user_data(m_modules.size(), nullptr);
-    for (size_t i = 0; i < m_modules.size(); ++i)
-        if (m_modules[i]->is_enabled())
-            m_modules[i]->on_pre_get_properties2(physicalDevice, pProperties, user_data[i]);
-    promotion.query_native();
-    for (size_t i = 0; i < m_modules.size(); ++i)
-        if (m_modules[i]->is_enabled()) {
-            m_modules[i]->on_get_properties(physicalDevice, &pProperties->properties);
-            m_modules[i]->on_post_get_properties2(physicalDevice, pProperties, user_data[i]);
-        }
+    uint32_t nativeApi;
+    {
+        PromotedPropertyQuery promotion(physicalDevice, pProperties);
+        nativeApi = promotion.native_api_version();
+        std::vector<void*> user_data(m_modules.size(), nullptr);
+        for (size_t i = 0; i < m_modules.size(); ++i)
+            if (m_modules[i]->is_enabled())
+                m_modules[i]->on_pre_get_properties2(physicalDevice, pProperties, user_data[i]);
+        promotion.query_native();
+        for (size_t i = 0; i < m_modules.size(); ++i)
+            if (m_modules[i]->is_enabled()) {
+                m_modules[i]->on_get_properties(physicalDevice, &pProperties->properties);
+                m_modules[i]->on_post_get_properties2(physicalDevice, pProperties, user_data[i]);
+            }
+    }
+    vkfix::set_vulkan_fix_driver_info(*pProperties, nativeApi);
 }
 
 void LayerManager::dispatch_get_physical_device_properties(

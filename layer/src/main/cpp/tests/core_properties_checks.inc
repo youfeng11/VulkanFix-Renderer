@@ -49,8 +49,6 @@ if (native_api >= VK_API_VERSION_1_2 || extensions.count("VK_KHR_driver_properti
     VkPhysicalDeviceProperties2 direct{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &native};
     raw_query(physical, &direct);
     check(!memcmp(&actual12.driverID, &native.driverID, sizeof(native.driverID)), "native property: driverID");
-    check(!memcmp(&actual12.driverName, &native.driverName, sizeof(native.driverName)), "native property: driverName");
-    check(!memcmp(&actual12.driverInfo, &native.driverInfo, sizeof(native.driverInfo)), "native property: driverInfo");
     check(!memcmp(&actual12.conformanceVersion, &native.conformanceVersion, sizeof(native.conformanceVersion)), "native property: conformanceVersion");
 }
 if (native_api >= VK_API_VERSION_1_2 || extensions.count("VK_KHR_shader_float_controls")) {
