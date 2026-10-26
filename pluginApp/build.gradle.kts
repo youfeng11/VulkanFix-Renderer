@@ -22,8 +22,8 @@ require(!renderdocCapture || vulkanValidation == null) { "Select RenderDoc captu
 require(vulkanValidation == null || vulkanValidation in setOf("core", "sync")) {
     "vulkanValidation must be core or sync"
 }
-val diagnosticName = if (renderdocCapture) "Vulkan Fix (RenderDoc)" else
-    if (vulkanValidation == null) "Vulkan Fix" else "Vulkan Fix ($vulkanValidation validation)"
+val diagnosticName = if (renderdocCapture) "VulkanFix (RenderDoc)" else
+    if (vulkanValidation == null) "VulkanFix" else "VulkanFix ($vulkanValidation validation)"
 
 android {
     namespace = "com.launchers_plugin.renderer"
@@ -102,7 +102,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         configureEach {
-            // 新架构渲染器配置 (Vulkan Fix)
+            // 新架构渲染器配置 (VulkanFix)
             resValue("string", "config", buildJsonValue {
                 renderer(
                     displayName = diagnosticName,

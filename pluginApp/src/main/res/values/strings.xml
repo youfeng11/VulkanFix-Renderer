@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Vulkan Fix</string>
+    <string name="app_name">VulkanFix</string>
     <string name="title_enable_debug">启用调试日志 (Enable Debug Logging)</string>
     <string name="title_emulate_dynamic_rendering_ext">动态渲染扩展模拟 (Dynamic Rendering Ext)</string>
     <string name="title_emulate_dynamic_rendering_feat">动态渲染特性模拟 (Dynamic Rendering Feature)</string>

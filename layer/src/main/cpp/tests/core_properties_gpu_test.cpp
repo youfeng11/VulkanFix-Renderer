@@ -73,10 +73,10 @@ int main() {
     check(query.pNext == &actual11 && actual11.pNext == &actual12 && !actual12.pNext,
           "aggregate query restores exact application links");
 #include "core_properties_checks.inc"
-    check(!strcmp(actual12.driverName, "Vulkan Fix") &&
+    check(!strcmp(actual12.driverName, "VulkanFix") &&
               strstr(actual12.driverInfo, PROJECT_VERSION_NAME " (" PROJECT_VERSION_CODE ")") &&
               !strchr(actual12.driverInfo, '|'),
-          "driver display uses the original short Vulkan Fix build description");
+          "driver display uses the original short VulkanFix build description");
     check((strstr(actual12.driverInfo, "Emulated Vulkan") != nullptr) ==
               (query.properties.apiVersion > native_api),
           "driver display distinguishes promoted Vulkan from the native API version");

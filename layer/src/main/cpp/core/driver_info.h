@@ -14,7 +14,7 @@ inline void format_vulkan_version(char *output, size_t size, uint32_t version) {
 
 template <size_t N, size_t M>
 inline void set_driver_display(char (&name)[N], char (&info)[M], const char *description) {
-    snprintf(name, N, "Vulkan Fix");
+    snprintf(name, N, "VulkanFix");
     snprintf(info, M, "%s", description);
 }
 

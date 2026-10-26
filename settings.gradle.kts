@@ -21,7 +21,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Vulkan Fix"
+rootProject.name = "VulkanFix"
 include(":pluginApp")
 include(":layer")
 includeBuild("dsl")

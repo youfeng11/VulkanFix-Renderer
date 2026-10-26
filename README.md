@@ -1,4 +1,4 @@
-# Vulkan Fix
+# VulkanFix
 
 Android 端 Minecraft 的 Vulkan 兼容插件，适用于 FCL、ZalithLauncher 2 等支持渲染器插件的启动器，面向 Iris Vulkan 等 Vulkan 渲染模组。
 
@@ -7,7 +7,7 @@ Android 端 Minecraft 的 Vulkan 兼容插件，适用于 FCL、ZalithLauncher 2
 ## 使用
 
 1. 安装插件 APK。
-2. 在启动器的渲染器设置中选择 **Vulkan Fix**。
+2. 在启动器的渲染器设置中选择 **VulkanFix**。
 3. 将游戏或渲染模组的图形 API 设为 **Vulkan**，再启动游戏。
 
 ## 功能与限制
