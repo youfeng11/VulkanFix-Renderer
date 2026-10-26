@@ -18,6 +18,7 @@ plugins {
 // or package the validation provider.
 val vulkanValidation = providers.gradleProperty("vulkanValidation").orNull
 val renderdocCapture = providers.gradleProperty("renderdocCapture").orNull == "true"
+val splitApks = providers.gradleProperty("splitApks").orNull == "true"
 require(!renderdocCapture || vulkanValidation == null) { "Select RenderDoc capture or validation, not both" }
 require(vulkanValidation == null || vulkanValidation in setOf("core", "sync")) {
     "vulkanValidation must be core or sync"
@@ -41,6 +42,15 @@ android {
 
     buildFeatures {
         resValues = true
+    }
+    splits {
+        abi {
+            isEnable = splitApks
+            reset()
+            if (renderdocCapture) include("arm64-v8a", "armeabi-v7a")
+            else include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            isUniversalApk = true
+        }
     }
     if (vulkanValidation != null) {
         val staged = layout.buildDirectory.dir("validation-jniLibs").get().asFile

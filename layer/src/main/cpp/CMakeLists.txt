@@ -167,8 +167,10 @@ set_target_properties(vulkan_fix PROPERTIES
     VISIBILITY_INLINES_HIDDEN ON
 )
 
+# AGP uses RelWithDebInfo for assembleRelease by default.
+set(VKFIX_RELEASE_CONFIG "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>")
 target_compile_options(vulkan_fix PRIVATE
-    $<$<CONFIG:Release>:
+    $<${VKFIX_RELEASE_CONFIG}:
         -O3
         -fomit-frame-pointer
         -ffunction-sections
@@ -182,11 +184,15 @@ target_link_options(vulkan_fix PRIVATE
     -Wl,--gc-sections
     # Keep optimizer internals private so unused passes can be discarded.
     -Wl,--exclude-libs,libSPIRV-Tools-opt.a:libSPIRV-Tools.a
-    $<$<CONFIG:Release>:
-        -Wl,-Bsymbolic
+    $<${VKFIX_RELEASE_CONFIG}:
         -flto=thin
+        -Wl,--icf=safe
+        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/vulkan_fix.map"
     >
+    $<$<CONFIG:Release>:-Wl,-Bsymbolic>
 )
+set_property(TARGET vulkan_fix APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_fix.map")
 
 # Standalone Test Runner for Verification and RenderDoc Capture
 add_executable(vulkan_fix_test

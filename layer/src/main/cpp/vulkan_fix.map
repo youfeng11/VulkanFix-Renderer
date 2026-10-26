@@ -1,0 +1,10 @@
+{
+    global:
+        vk*;
+        egl*;
+        gl*;
+        vulkan_fix_*;
+        vulkanfix*;
+    local:
+        *;
+};

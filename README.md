@@ -36,6 +36,9 @@ Windows 使用 `gradlew.bat :pluginApp:assembleDebug`。已有仓库可运行 `g
 
 APK 输出到 `pluginApp/build/outputs/apk/debug/`，包含 `arm64-v8a`、`armeabi-v7a`、`x86` 和 `x86_64` 四种架构。
 
+Release 使用 `./gradlew :pluginApp:assembleRelease`，输出到 `pluginApp/build/outputs/apk/release/`。
+添加 `-PsplitApks=true` 可同时生成各架构的独立 APK 和通用 APK，独立 APK 的下载体积更小。
+
 ## 许可证
 
 ```
