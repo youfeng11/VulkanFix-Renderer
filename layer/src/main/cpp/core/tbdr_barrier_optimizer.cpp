@@ -28,6 +28,21 @@ template <class B> bool ordinary_image(const B &b) {
 bool option(const char *v, bool fallback) {
     return v && *v ? !strcmp(v, "1") || !strcasecmp(v, "true") || !strcasecmp(v, "on") : fallback;
 }
+bool state_only_command(const char* name) {
+    // Exact names only: vkCmdSetEvent, for example, is synchronization rather
+    // than state. These commands affect later draws, whose action hooks close
+    // the dedup window; they cannot access resources between two barriers.
+    static constexpr const char* commands[] = {
+        "vkCmdSetViewport", "vkCmdSetScissor", "vkCmdSetLineWidth", "vkCmdSetDepthBias",
+        "vkCmdSetBlendConstants", "vkCmdSetDepthBounds", "vkCmdSetStencilCompareMask",
+        "vkCmdSetStencilWriteMask", "vkCmdSetStencilReference", "vkCmdSetViewportWithCount",
+        "vkCmdSetViewportWithCountEXT", "vkCmdSetScissorWithCount", "vkCmdSetScissorWithCountEXT"
+    };
+    if (name)
+        for (const auto* command : commands)
+            if (!strcmp(name, command)) return true;
+    return false;
+}
 } // namespace
 TBDRBarrierOptimizer &TBDRBarrierOptimizer::get() {
     static TBDRBarrierOptimizer value;
@@ -54,10 +69,11 @@ void TBDRBarrierOptimizer::set_enabled(bool enabled) {
     m_enabled.store(enabled, std::memory_order_relaxed);
 }
 void TBDRBarrierOptimizer::on_untracked_command(const char *name) {
+    if (state_only_command(name)) return;
     if (m_tracking_complete.exchange(false, std::memory_order_relaxed))
         LOGI("TBDRBarrierOptimizer: bypassed after native command lookup %s; action tracking is "
              "incomplete",
-             name);
+             name ? name : "<unknown>");
 }
 void TBDRBarrierOptimizer::maybe_log_stats() {
     auto total = m_stat_total.load(std::memory_order_relaxed);

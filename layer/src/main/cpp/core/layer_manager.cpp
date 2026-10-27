@@ -602,7 +602,7 @@ VkDevice LayerManager::get_device_for_cmd_slow(VkCommandBuffer cmd) {
     std::shared_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
     auto it = m_cmd_devices.find((uint64_t)(uintptr_t)cmd);
     if (it != m_cmd_devices.end()) {
-        return it->second;
+        return it->second.device;
     }
     return m_last_device.load(std::memory_order_relaxed);
 }
@@ -1021,14 +1021,20 @@ void LayerManager::dispatch_destroy_device(
         m_device_phys.erase((uint64_t)(uintptr_t)device);
     }
 
+    std::vector<VkCommandBuffer> retired_commands;
     {
         std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
         for (auto it = m_cmd_devices.begin(); it != m_cmd_devices.end(); ) {
-            if (it->second == device) {
+            if (it->second.device == device) {
+                retired_commands.push_back((VkCommandBuffer)(uintptr_t)it->first);
                 it = m_cmd_devices.erase(it);
             } else {
                 ++it;
             }
+        }
+        for (auto it = m_pool_commands.begin(); it != m_pool_commands.end(); ) {
+            if (it->first.device == device) it = m_pool_commands.erase(it);
+            else ++it;
         }
         for (auto it = m_queue_devices.begin(); it != m_queue_devices.end(); ) {
             if (it->second == device) {
@@ -1042,6 +1048,7 @@ void LayerManager::dispatch_destroy_device(
             m_last_device = VK_NULL_HANDLE;
         }
     }
+    for (auto cmd : retired_commands) TBDRBarrierOptimizer::get().on_cmd_free(cmd);
 
     {
         for (auto& mod : m_modules) {
@@ -1156,11 +1163,12 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
 
     VkResult res = real_fn(device, effectiveCache, createInfoCount, modInfos, pAllocator, pPipelines);
 
+    // Vulkan can return live handles for a subset of a failed batch. Complete
+    // every pending divisor record, including failures and early-return slots.
+    if (m_divisor_mod && m_divisor_mod->is_enabled())
+        m_divisor_mod->on_post_create_graphics_pipelines(device, createInfoCount, modInfos, pPipelines);
     if (res == VK_SUCCESS && pPipelines) {
         PipelineCacheManager::get().on_pipelines_created(device, effectiveCache, createInfoCount);
-        if (m_divisor_mod && m_divisor_mod->is_enabled()) {
-            m_divisor_mod->on_post_create_graphics_pipelines(device, createInfoCount, modInfos, pPipelines);
-        }
     } else if (res != VK_SUCCESS) {
         LOGE("vkCreateGraphicsPipelines failed with VkResult: %d", res);
     }
@@ -1385,19 +1393,17 @@ VkResult LayerManager::dispatch_allocate_command_buffers(
     if (res == VK_SUCCESS && pAllocateInfo && pCommandBuffers) {
         {
             std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
+            auto& pool_commands = m_pool_commands[
+                vkfix::DeviceObjectKey::make(device, pAllocateInfo->commandPool)];
             for (uint32_t i = 0; i < pAllocateInfo->commandBufferCount; i++) {
-                m_cmd_devices[(uint64_t)(uintptr_t)pCommandBuffers[i]] = device;
+                const auto key = (uint64_t)(uintptr_t)pCommandBuffers[i];
+                m_cmd_devices[key] = {device, pAllocateInfo->commandPool};
+                pool_commands.insert(key);
             }
         }
-        if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
-            m_push_desc_mod->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
-        }
-        if (m_divisor_mod && m_divisor_mod->is_enabled()) {
-            m_divisor_mod->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
-        }
-        if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
-            m_dyn_rendering_mod->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
-        }
+        for (auto& module : m_modules)
+            if (module->is_enabled())
+                module->on_post_allocate_command_buffers(device, pAllocateInfo, res, pCommandBuffers);
     }
 
     return res;
@@ -1414,20 +1420,19 @@ void LayerManager::dispatch_free_command_buffers(
     if (pCommandBuffers) {
         std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
         for (uint32_t i = 0; i < commandBufferCount; i++) {
-            m_cmd_devices.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
-            TBDRBarrierOptimizer::get().on_cmd_free(pCommandBuffers[i]);
+            const auto key = (uint64_t)(uintptr_t)pCommandBuffers[i];
+            auto owner = m_cmd_devices.find(key);
+            if (owner == m_cmd_devices.end()) continue;
+            auto pool = m_pool_commands.find(
+                vkfix::DeviceObjectKey::make(owner->second.device, owner->second.pool));
+            if (pool != m_pool_commands.end()) {
+                pool->second.erase(key);
+                if (pool->second.empty()) m_pool_commands.erase(pool);
+            }
+            m_cmd_devices.erase(owner);
         }
     }
-
-    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
-        m_push_desc_mod->on_free_command_buffers(device, commandBufferCount, pCommandBuffers);
-    }
-    if (m_divisor_mod && m_divisor_mod->is_enabled()) {
-        m_divisor_mod->on_free_command_buffers(device, commandBufferCount, pCommandBuffers);
-    }
-    if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
-        m_dyn_rendering_mod->on_free_command_buffers(device, commandBufferCount, pCommandBuffers);
-    }
+    notify_command_buffers_freed(device, commandBufferCount, pCommandBuffers);
 
     const auto& dt = get_dispatch_table(device);
     if (dt.FreeCommandBuffers) {
@@ -1439,6 +1444,14 @@ void LayerManager::dispatch_free_command_buffers(
             real_fn(device, commandPool, commandBufferCount, pCommandBuffers);
         }
     }
+}
+
+void LayerManager::notify_command_buffers_freed(VkDevice device, uint32_t count,
+                                                const VkCommandBuffer* commands) {
+    if (!commands || count == 0) return;
+    for (uint32_t i = 0; i < count; ++i) TBDRBarrierOptimizer::get().on_cmd_free(commands[i]);
+    for (auto& module : m_modules)
+        if (module->is_enabled()) module->on_free_command_buffers(device, count, commands);
 }
 
 VkResult LayerManager::dispatch_begin_command_buffer(
@@ -1461,11 +1474,9 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     VkCommandBufferInheritanceInfo modInheritanceInfo{};
     bool has_mod_inheritance = false;
 
-    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
-        m_push_desc_mod->on_begin_command_buffer(commandBuffer, pBeginInfo);
-    }
+    for (auto& module : m_modules)
+        if (module->is_enabled()) module->on_begin_command_buffer(commandBuffer, pBeginInfo);
     if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
-        m_dyn_rendering_mod->on_begin_command_buffer(commandBuffer, pBeginInfo);
         m_dyn_rendering_mod->on_pre_begin_command_buffer(commandBuffer, pBeginInfo, modBeginInfo, modInheritanceInfo, has_mod_inheritance);
     }
 
@@ -1480,15 +1491,8 @@ VkResult LayerManager::dispatch_reset_command_buffer(
 
     TBDRBarrierOptimizer::get().on_cmd_reset(commandBuffer);
 
-    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
-        m_push_desc_mod->on_reset_command_buffer(commandBuffer, flags);
-    }
-    if (m_divisor_mod && m_divisor_mod->is_enabled()) {
-        m_divisor_mod->on_reset_command_buffer(commandBuffer, flags);
-    }
-    if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
-        m_dyn_rendering_mod->on_reset_command_buffer(commandBuffer, flags);
-    }
+    for (auto& module : m_modules)
+        if (module->is_enabled()) module->on_reset_command_buffer(commandBuffer, flags);
 
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
@@ -1574,9 +1578,28 @@ void LayerManager::track_descriptor_binding(VkCommandBuffer cmd, VkPipelineBindP
 }
 
 void LayerManager::track_command_pool_reset(VkDevice device, VkCommandPool pool, bool destroyed) {
-    if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
-        if (destroyed) m_push_desc_mod->on_destroy_command_pool(device, pool);
-        else m_push_desc_mod->on_reset_command_pool(device, pool);
+    std::vector<VkCommandBuffer> commands;
+    {
+        std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
+        auto tracked = m_pool_commands.find(vkfix::DeviceObjectKey::make(device, pool));
+        if (tracked == m_pool_commands.end()) return;
+        commands.reserve(tracked->second.size());
+        for (auto key : tracked->second) {
+            commands.push_back((VkCommandBuffer)(uintptr_t)key);
+            if (destroyed) m_cmd_devices.erase(key);
+        }
+        if (destroyed) m_pool_commands.erase(tracked);
+    }
+    // Never hold the ownership lock while entering module/native resource
+    // cleanup. The caller externally synchronizes access to this pool.
+    if (destroyed) {
+        notify_command_buffers_freed(device, uint32_t(commands.size()), commands.data());
+    } else {
+        for (auto cmd : commands) {
+            TBDRBarrierOptimizer::get().on_cmd_reset(cmd);
+            for (auto& module : m_modules)
+                if (module->is_enabled()) module->on_reset_command_buffer(cmd, 0);
+        }
     }
 }
 

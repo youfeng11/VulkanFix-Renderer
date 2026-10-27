@@ -18,6 +18,12 @@ void run_dynamic_rendering_lifetime_regressions(void (*check)(bool, const char*)
 void run_push_descriptor_regressions(void (*check)(bool, const char*));
 void* device_routing_mock_proc(const char* name);
 void run_device_routing_regressions(void (*check)(bool, const char*));
+void* command_pool_mock_proc(const char* name);
+void run_command_pool_regressions(void (*check)(bool, const char*));
+void* divisor_pipeline_mock_proc(const char* name);
+void run_divisor_pipeline_regressions(void (*check)(bool, const char*));
+void* vertex_pipeline_cache_mock_proc(const char* name);
+void run_vertex_pipeline_cache_regressions(void (*check)(bool, const char*));
 
 // Replace only the driver boundary; exercise the actual modules and manager.
 static bool native_atomics = false;
@@ -92,6 +98,9 @@ PFN_vkGetDeviceProcAddr get_real_device_proc_addr() {
 }
 void *get_real_proc(VkInstance, VkDevice, const char *name) {
     if (auto mock = device_routing_mock_proc(name)) return mock;
+    if (auto mock = command_pool_mock_proc(name)) return mock;
+    if (auto mock = divisor_pipeline_mock_proc(name)) return mock;
+    if (auto mock = vertex_pipeline_cache_mock_proc(name)) return mock;
     if (auto mock = mali_tiler_mock_proc(name)) return mock;
     if (auto mock = push_descriptor_mock_proc(name))
         return mock;
@@ -450,6 +459,9 @@ OpFunctionEnd
 int main() {
     setenv("VULKAN_FIX_LOG_PATH", "/dev/null", 1);
     run_device_routing_regressions(check);
+    run_command_pool_regressions(check);
+    run_divisor_pipeline_regressions(check);
+    run_vertex_pipeline_cache_regressions(check);
     const auto phys = (VkPhysicalDevice)(uintptr_t)0x100;
     const auto device = (VkDevice)(uintptr_t)0x1000;
     test_atomics(phys);

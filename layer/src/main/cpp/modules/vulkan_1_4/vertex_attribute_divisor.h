@@ -2,6 +2,8 @@
 #define VERTEX_ATTRIBUTE_DIVISOR_H
 
 #include "layer_module.h"
+#include "core/device_object_key.h"
+#include "core/device_native_cache.h"
 #include <unordered_map>
 #include <vector>
 #include <mutex>
@@ -12,7 +14,7 @@
 class VertexAttributeDivisorModule : public IVulkanLayerModule {
 public:
     VertexAttributeDivisorModule();
-    virtual ~VertexAttributeDivisorModule() = default;
+    ~VertexAttributeDivisorModule() override;
 
     const char* get_name() const override { return "VK_EXT_vertex_attribute_divisor"; }
 
@@ -146,6 +148,8 @@ public:
     bool is_device_native(VkDevice device) override;
 
 private:
+    friend struct DivisorCommandTestAccess;
+    friend struct DivisorPipelineTestAccess;
     struct BindingDivisorInfo {
         uint32_t binding = 0;
         uint32_t divisor = 1;
@@ -153,11 +157,14 @@ private:
     };
 
     struct PipelineDivisorInfo {
+        VkDevice device = VK_NULL_HANDLE;
         std::vector<BindingDivisorInfo> divisors;
         bool has_divisor_greater_than_one = false;
     };
 
     struct CmdBufferState {
+        std::atomic<bool> valid{true};
+        VkDevice device = VK_NULL_HANDLE;
         VkPipeline current_pipeline = VK_NULL_HANDLE;
         std::shared_ptr<PipelineDivisorInfo> active_divisor_info;
 
@@ -165,11 +172,6 @@ private:
         VkBuffer bound_buffers[MAX_VERTEX_BINDINGS]{};
         VkDeviceSize bound_offsets[MAX_VERTEX_BINDINGS]{};
     };
-
-    // Hot path: avoid the state-map mutex for consecutive commands recorded on
-    // the same command buffer.
-    static thread_local VkCommandBuffer t_cached_cmd;
-    static thread_local CmdBufferState* t_cached_state;
 
     struct PhysDeviceInfo {
         bool native_has_ext = false;
@@ -190,15 +192,16 @@ private:
     std::unordered_map<uint64_t, bool> m_device_needs_emulation;
     std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
     std::atomic<VkDevice> m_last_device{VK_NULL_HANDLE};
-    std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
-    std::atomic<bool> m_primary_native{false};
+    DeviceNativeCache m_native_cache;
 
     std::atomic<bool> m_has_divisor_pipelines{false};
-    std::unordered_map<uint64_t, std::shared_ptr<PipelineDivisorInfo>> m_pipeline_divisors;
+    std::atomic<uint64_t> m_pipeline_generation{0};
+    std::unordered_map<vkfix::DeviceObjectKey, std::shared_ptr<PipelineDivisorInfo>,
+                       vkfix::DeviceObjectKeyHash> m_pipeline_divisors;
 
-    std::unordered_map<const void*, std::unordered_map<uint32_t, PipelineDivisorInfo>> m_pending_divisors;
+    std::unordered_map<const VkGraphicsPipelineCreateInfo*, PipelineDivisorInfo> m_pending_divisors;
 
-    std::unordered_map<uint64_t, std::unique_ptr<CmdBufferState>> m_cmd_states;
+    std::unordered_map<uint64_t, std::shared_ptr<CmdBufferState>> m_cmd_states;
 };
 
 #endif // VERTEX_ATTRIBUTE_DIVISOR_H

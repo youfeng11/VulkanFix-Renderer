@@ -9,11 +9,19 @@
 
 REGISTER_LAYER_MODULE(VertexAttributeDivisorModule);
 
-thread_local VkCommandBuffer VertexAttributeDivisorModule::t_cached_cmd = VK_NULL_HANDLE;
-thread_local VertexAttributeDivisorModule::CmdBufferState* VertexAttributeDivisorModule::t_cached_state = nullptr;
+namespace {
+// Unique across module instances as well as mutations, so a TLS entry cannot
+// match a newly constructed module that happens to reuse an old address.
+std::atomic<uint64_t> next_divisor_generation{1};
+}
 
 VertexAttributeDivisorModule::VertexAttributeDivisorModule() {
+    m_pipeline_generation.store(next_divisor_generation.fetch_add(1));
     LOGI("Initialized Vulkan Vertex Attribute Divisor emulation module (with full instance rate divisor support)");
+}
+
+VertexAttributeDivisorModule::~VertexAttributeDivisorModule() {
+    for (auto& entry : m_cmd_states) entry.second->valid.store(false, std::memory_order_release);
 }
 
 VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe_phys_device(VkPhysicalDevice physDev) {
@@ -99,15 +107,13 @@ VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe
 
 bool VertexAttributeDivisorModule::is_device_native(VkDevice device) {
     if (device == VK_NULL_HANDLE) return false;
-    if (__builtin_expect(device == m_primary_dev.load(std::memory_order_relaxed), 1)) {
-        return m_primary_native.load(std::memory_order_relaxed);
-    }
+    bool cached_native;
+    if (m_native_cache.lookup(device, cached_native)) return cached_native;
     std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
     auto it = m_device_needs_emulation.find((uint64_t)(uintptr_t)device);
     if (it != m_device_needs_emulation.end()) {
         bool native = !it->second;
-        m_primary_dev.store(device, std::memory_order_relaxed);
-        m_primary_native.store(native, std::memory_order_relaxed);
+        m_native_cache.remember(device, native);
         return native;
     }
     return false;
@@ -125,25 +131,25 @@ VkDevice VertexAttributeDivisorModule::get_device_for_cmd(VkCommandBuffer cmd) {
 }
 
 VertexAttributeDivisorModule::CmdBufferState* VertexAttributeDivisorModule::get_or_create_cmd_state(VkCommandBuffer cmd) {
+    thread_local const VertexAttributeDivisorModule* s_cached_owner = nullptr;
     thread_local VkCommandBuffer s_cached_cmd = VK_NULL_HANDLE;
-    thread_local CmdBufferState* s_cached_state = nullptr;
-    if (__builtin_expect(cmd == s_cached_cmd && s_cached_state != nullptr, 1)) {
-        return s_cached_state;
+    thread_local std::shared_ptr<CmdBufferState> s_cached_state;
+    if (__builtin_expect(s_cached_owner == this && cmd == s_cached_cmd && s_cached_state &&
+                         s_cached_state->valid.load(std::memory_order_acquire), 1)) {
+        return s_cached_state.get();
     }
 
     std::lock_guard<std::mutex> lock(m_cmd_mutex);
-    auto it = m_cmd_states.find((uint64_t)(uintptr_t)cmd);
-    if (it != m_cmd_states.end()) {
-        s_cached_cmd = cmd;
-        s_cached_state = it->second.get();
-        return s_cached_state;
+    auto& state = m_cmd_states[(uint64_t)(uintptr_t)cmd];
+    if (!state) {
+        state = std::make_shared<CmdBufferState>();
+        auto owner = m_cmd_devices.find((uint64_t)(uintptr_t)cmd);
+        if (owner != m_cmd_devices.end()) state->device = owner->second;
     }
-    auto state = std::make_unique<CmdBufferState>();
-    CmdBufferState* ptr = state.get();
-    m_cmd_states[(uint64_t)(uintptr_t)cmd] = std::move(state);
+    s_cached_owner = this;
     s_cached_cmd = cmd;
-    s_cached_state = ptr;
-    return ptr;
+    s_cached_state = state;
+    return state.get();
 }
 
 void VertexAttributeDivisorModule::on_enumerate_device_extensions(
@@ -384,8 +390,7 @@ void VertexAttributeDivisorModule::on_post_create_device(
             std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
             m_device_needs_emulation[(uint64_t)(uintptr_t)device] = needs_emu;
             m_last_device = device;
-            m_primary_dev.store(device, std::memory_order_release);
-            m_primary_native.store(!needs_emu, std::memory_order_release);
+            m_native_cache.remember(device, !needs_emu);
         }
 
         LOGI("Device %p created: divisor emulation %s", device,
@@ -397,14 +402,26 @@ void VertexAttributeDivisorModule::on_destroy_device(VkDevice device) {
     {
         std::unique_lock<std::shared_mutex> rw_lock(m_rw_mutex);
         m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
-        if (m_primary_dev.load(std::memory_order_relaxed) == device) {
-            m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_release);
+        for (auto it = m_pipeline_divisors.begin(); it != m_pipeline_divisors.end(); ) {
+            if (it->first.device == device) it = m_pipeline_divisors.erase(it);
+            else ++it;
         }
+        for (auto it = m_pending_divisors.begin(); it != m_pending_divisors.end(); ) {
+            if (it->second.device == device) it = m_pending_divisors.erase(it);
+            else ++it;
+        }
+        m_pipeline_generation.store(next_divisor_generation.fetch_add(1), std::memory_order_release);
+        m_native_cache.invalidate();
     }
     {
         std::lock_guard<std::mutex> cmd_lock(m_cmd_mutex);
         for (auto it = m_cmd_devices.begin(); it != m_cmd_devices.end(); ) {
             if (it->second == device) {
+                auto state = m_cmd_states.find(it->first);
+                if (state != m_cmd_states.end()) {
+                    state->second->valid.store(false, std::memory_order_release);
+                    state->second->active_divisor_info.reset();
+                }
                 m_cmd_states.erase(it->first);
                 it = m_cmd_devices.erase(it);
             } else {
@@ -456,6 +473,7 @@ void VertexAttributeDivisorModule::on_modify_pipeline_create_info(
     if (!divState || divState->vertexBindingDivisorCount == 0 || !divState->pVertexBindingDivisors) return;
 
     PipelineDivisorInfo info;
+    info.device = device;
 
     // Collect divisor descriptions
     for (uint32_t d = 0; d < divState->vertexBindingDivisorCount; d++) {
@@ -516,7 +534,7 @@ void VertexAttributeDivisorModule::on_modify_pipeline_create_info(
 
     // Save pending info
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
-    m_pending_divisors[&createInfo][index] = info;
+    m_pending_divisors[&createInfo] = std::move(info);
 }
 
 void VertexAttributeDivisorModule::on_post_create_graphics_pipelines(
@@ -525,25 +543,26 @@ void VertexAttributeDivisorModule::on_post_create_graphics_pipelines(
     const VkGraphicsPipelineCreateInfo* pCreateInfos,
     const VkPipeline* pPipelines
 ) {
-    if (is_device_native(device) || !pCreateInfos || !pPipelines || count == 0) return;
+    if (!pCreateInfos || count == 0) return;
 
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
-    auto it = m_pending_divisors.find(pCreateInfos);
-    if (it == m_pending_divisors.end()) return;
-
+    bool changed = false;
     for (uint32_t i = 0; i < count; i++) {
-        auto pIt = it->second.find(i);
-        if (pIt != it->second.end() && pPipelines[i] != VK_NULL_HANDLE) {
-            m_pipeline_divisors[(uint64_t)(uintptr_t)pPipelines[i]] =
-                std::make_shared<PipelineDivisorInfo>(pIt->second);
-            if (pIt->second.has_divisor_greater_than_one) {
+        auto pending = m_pending_divisors.find(&pCreateInfos[i]);
+        if (pending == m_pending_divisors.end()) continue;
+        if (pPipelines && pPipelines[i] != VK_NULL_HANDLE) {
+            auto info = std::make_shared<PipelineDivisorInfo>(std::move(pending->second));
+            m_pipeline_divisors[vkfix::DeviceObjectKey::make(device, pPipelines[i])] = info;
+            changed = true;
+            if (info->has_divisor_greater_than_one) {
                 m_has_divisor_pipelines.store(true, std::memory_order_release);
                 LOGI("Pipeline %p registered with vertexAttributeInstanceRateDivisor emulation", (void*)pPipelines[i]);
             }
         }
+        m_pending_divisors.erase(pending);
     }
-
-    m_pending_divisors.erase(it);
+    if (changed)
+        m_pipeline_generation.store(next_divisor_generation.fetch_add(1), std::memory_order_release);
 }
 
 void VertexAttributeDivisorModule::on_destroy_pipeline(
@@ -553,7 +572,8 @@ void VertexAttributeDivisorModule::on_destroy_pipeline(
     if (pipeline == VK_NULL_HANDLE) return;
 
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
-    m_pipeline_divisors.erase((uint64_t)(uintptr_t)pipeline);
+    if (m_pipeline_divisors.erase(vkfix::DeviceObjectKey::make(device, pipeline)))
+        m_pipeline_generation.store(next_divisor_generation.fetch_add(1), std::memory_order_release);
 }
 
 void VertexAttributeDivisorModule::on_post_allocate_command_buffers(
@@ -579,9 +599,10 @@ void VertexAttributeDivisorModule::on_free_command_buffers(
 
     std::lock_guard<std::mutex> lock(m_cmd_mutex);
     for (uint32_t i = 0; i < count; i++) {
-        if (t_cached_cmd == pCommandBuffers[i]) {
-            t_cached_cmd = VK_NULL_HANDLE;
-            t_cached_state = nullptr;
+        auto state = m_cmd_states.find((uint64_t)(uintptr_t)pCommandBuffers[i]);
+        if (state != m_cmd_states.end()) {
+            state->second->valid.store(false, std::memory_order_release);
+            state->second->active_divisor_info.reset();
         }
         m_cmd_devices.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
         m_cmd_states.erase((uint64_t)(uintptr_t)pCommandBuffers[i]);
@@ -608,29 +629,33 @@ void VertexAttributeDivisorModule::on_cmd_bind_pipeline(
     if (!m_has_divisor_pipelines.load(std::memory_order_relaxed)) return;
     if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
 
-    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
     if (!state) return;
 
     state->current_pipeline = pipeline;
 
     thread_local VkPipeline s_last_pipeline = VK_NULL_HANDLE;
+    thread_local VkDevice s_last_device = VK_NULL_HANDLE;
+    thread_local uint64_t s_last_generation = 0;
     thread_local std::shared_ptr<PipelineDivisorInfo> s_last_divisor_info = nullptr;
-    if (__builtin_expect(pipeline == s_last_pipeline, 1)) {
+    const auto generation = m_pipeline_generation.load(std::memory_order_acquire);
+    if (__builtin_expect(pipeline == s_last_pipeline && state->device == s_last_device &&
+                         generation == s_last_generation, 1)) {
         state->active_divisor_info = s_last_divisor_info;
         return;
     }
 
     std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
-    auto it = m_pipeline_divisors.find((uint64_t)(uintptr_t)pipeline);
+    auto it = m_pipeline_divisors.find(vkfix::DeviceObjectKey::make(state->device, pipeline));
     if (it != m_pipeline_divisors.end()) {
         state->active_divisor_info = it->second;
     } else {
         state->active_divisor_info = nullptr;
     }
     s_last_pipeline = pipeline;
+    s_last_device = state->device;
+    s_last_generation = m_pipeline_generation.load(std::memory_order_relaxed);
     s_last_divisor_info = state->active_divisor_info;
-    t_cached_cmd = commandBuffer;
-    t_cached_state = state;
 }
 
 void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers(
@@ -643,7 +668,7 @@ void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers(
     if (!m_has_divisor_pipelines.load(std::memory_order_relaxed)) return;
     if (!pBuffers || !pOffsets || bindingCount == 0) return;
 
-    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
     if (!state) return;
 
     for (uint32_t i = 0; i < bindingCount; i++) {
@@ -666,7 +691,7 @@ void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers2(
     on_cmd_bind_vertex_buffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
     if (!pStrides || bindingCount == 0) return;
 
-    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
     if (!state || !state->active_divisor_info ||
         !state->active_divisor_info->has_divisor_greater_than_one) {
         return;
@@ -681,7 +706,7 @@ void VertexAttributeDivisorModule::on_cmd_bind_vertex_buffers2(
 
 bool VertexAttributeDivisorModule::has_active_divisor_pipeline(VkCommandBuffer commandBuffer) {
     if (!m_has_divisor_pipelines.load(std::memory_order_relaxed)) return false;
-    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
     return state && state->active_divisor_info && state->active_divisor_info->has_divisor_greater_than_one;
 }
 bool VertexAttributeDivisorModule::on_cmd_draw(
@@ -693,7 +718,7 @@ bool VertexAttributeDivisorModule::on_cmd_draw(
 ) {
     if (!m_has_divisor_pipelines.load(std::memory_order_relaxed) || instanceCount == 0) return false;
 
-    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
     if (!state || !state->active_divisor_info || !state->active_divisor_info->has_divisor_greater_than_one) {
         return false;
     }
@@ -764,7 +789,7 @@ bool VertexAttributeDivisorModule::on_cmd_draw_indexed(
 ) {
     if (!m_has_divisor_pipelines.load(std::memory_order_relaxed) || instanceCount == 0) return false;
 
-    CmdBufferState* state = (t_cached_cmd == commandBuffer) ? t_cached_state : get_or_create_cmd_state(commandBuffer);
+    CmdBufferState* state = get_or_create_cmd_state(commandBuffer);
     if (!state || !state->active_divisor_info || !state->active_divisor_info->has_divisor_greater_than_one) {
         return false;
     }

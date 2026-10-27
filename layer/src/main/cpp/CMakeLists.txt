@@ -374,6 +374,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_include_directories(barrier_optimizer_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(barrier_optimizer_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(barrier_optimizer_test)
     add_executable(timeline_scheduler_test EXCLUDE_FROM_ALL
         tests/timeline_scheduler_test.cpp core/timeline_scheduler.cpp core/input_pnext_copy.cpp)
     target_include_directories(timeline_scheduler_test BEFORE PRIVATE
@@ -418,6 +419,9 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     add_executable(compatibility_regression_test EXCLUDE_FROM_ALL
         tests/compatibility_regression_test.cpp
         tests/device_routing_regression_cases.cpp
+        tests/command_pool_regression_cases.cpp
+        tests/divisor_pipeline_regression_cases.cpp
+        tests/vertex_pipeline_cache_regression_cases.cpp
         tests/timeline_regression_cases.cpp
         tests/push_descriptor_regression_cases.cpp
         tests/mali_tiler_regression_cases.cpp

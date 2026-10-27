@@ -595,7 +595,7 @@ bool VertexStoreEmulator::create_pipelines(VkDevice device, VkPipelineCache cach
         cp.stage.module = modules[0];
         cp.stage.pName = "main";
         cp.stage.pNext = nullptr;
-        if (REAL(CreateComputePipelines)(device, VK_NULL_HANDLE, 1, &cp, nullptr, &p.compute) !=
+        if (LayerManager::get().dispatch_create_compute_pipelines(device, cache, 1, &cp, nullptr, &p.compute) !=
             VK_SUCCESS) {
             fail("compute pipeline compilation failed");
             break;

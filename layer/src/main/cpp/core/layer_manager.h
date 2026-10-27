@@ -3,6 +3,7 @@
 
 #include "layer_module.h"
 #include "subgroup_broadcast.h"
+#include "device_object_key.h"
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -858,6 +859,7 @@ public:
 private:
     friend struct DynamicRenderingTestAccess;
     friend struct DeviceRoutingTestAccess;
+    friend struct CommandPoolTestAccess;
     LayerManager() = default;
     ~LayerManager() = default;
     LayerManager(const LayerManager&) = delete;
@@ -876,7 +878,15 @@ private:
     std::atomic<VkDevice> m_primary_emulated_device{VK_NULL_HANDLE};
 
     std::shared_mutex m_cmd_device_rw_mutex;
-    std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
+    struct CommandOwner {
+        VkDevice device;
+        VkCommandPool pool;
+    };
+    std::unordered_map<uint64_t, CommandOwner> m_cmd_devices;
+    std::unordered_map<vkfix::DeviceObjectKey, std::unordered_set<uint64_t>,
+                       vkfix::DeviceObjectKeyHash> m_pool_commands;
+    void notify_command_buffers_freed(VkDevice device, uint32_t count,
+                                     const VkCommandBuffer* commands);
     std::unordered_map<uint64_t, VkDevice> m_queue_devices;
     std::unordered_map<uint64_t, std::pair<VkQueue, uint32_t>> m_device_queues;
     std::atomic<VkDevice> m_last_device{VK_NULL_HANDLE};

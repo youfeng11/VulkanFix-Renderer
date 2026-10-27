@@ -25,6 +25,15 @@ uint64_t next_handle = 0x100000000ULL;
 unsigned copies = 0, invalid_copies = 0, pool_destroys = 0;
 bool allocation_layout_alive = true, template_layout_valid = true;
 
+VKAPI_ATTR VkResult VKAPI_CALL allocate_commands(VkDevice, const VkCommandBufferAllocateInfo* info,
+                                                 VkCommandBuffer* out) {
+    for (uint32_t i = 0; i < info->commandBufferCount; ++i)
+        out[i] = (VkCommandBuffer)(uintptr_t)(0xd123 + i);
+    return VK_SUCCESS;
+}
+VKAPI_ATTR void VKAPI_CALL free_commands(VkDevice, VkCommandPool, uint32_t,
+                                         const VkCommandBuffer*) {}
+
 VKAPI_ATTR VkResult VKAPI_CALL create_layout(VkDevice d, const VkDescriptorSetLayoutCreateInfo *,
                                              const VkAllocationCallbacks *,
                                              VkDescriptorSetLayout *out) {
@@ -162,6 +171,8 @@ void *push_descriptor_mock_proc(const char *name) {
     PROC(CreateDescriptorUpdateTemplate, create_template);
     PROC(DestroyDescriptorUpdateTemplate, destroy_template);
     PROC(UpdateDescriptorSetWithTemplate, update_template);
+    PROC(AllocateCommandBuffers, allocate_commands);
+    PROC(FreeCommandBuffers, free_commands);
 #undef PROC
     return nullptr;
 }
@@ -181,7 +192,8 @@ void run_push_descriptor_regressions(void (*check)(bool, const char *)) {
     VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     ai.commandPool = pool;
     ai.commandBufferCount = 1;
-    module.on_post_allocate_command_buffers(device, &ai, VK_SUCCESS, &cmd);
+    check(manager.dispatch_allocate_command_buffers(device, &ai, &cmd) == VK_SUCCESS,
+          "push-descriptor commands register pool ownership through public allocation dispatch");
     auto ordinary = (VkDescriptorSetLayout)0x100001234ULL;
     auto push = (VkDescriptorSetLayout)0x200001234ULL;
     VkDescriptorSetLayoutBinding ordinary_binding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
@@ -355,7 +367,8 @@ void run_push_descriptor_regressions(void (*check)(bool, const char *)) {
     manager.track_command_pool_reset(device, pool, true);
     check(pool_destroys > pool_count && sets.empty(),
           "command-pool destruction retires every internal descriptor pool");
-    module.on_post_allocate_command_buffers(device, &ai, VK_SUCCESS, &cmd);
+    check(manager.dispatch_allocate_command_buffers(device, &ai, &cmd) == VK_SUCCESS,
+          "reused push-descriptor command registers its new pool lifetime");
     push_writes(VK_PIPELINE_BIND_POINT_GRAPHICS, compatible_layout, 1, writes + 1);
     check(value(current(), 3) == 0, "reused command handles cannot access freed TLS state");
     // Reuse all application handles on a second logical device with a different definition.
@@ -380,6 +393,7 @@ void run_push_descriptor_regressions(void (*check)(bool, const char *)) {
     module.on_reset_command_buffer(cmd, 0);
     check(manager.command_recording_error(cmd) == VK_SUCCESS,
           "command reset clears an internal allocation failure for rerecording");
+    manager.dispatch_free_command_buffers(device, pool, 1, &cmd);
     module.on_destroy_device(device);
     check(sets.empty() && live_layouts.empty(),
           "device destruction releases descriptor pools and all private layout references");

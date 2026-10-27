@@ -177,7 +177,7 @@ struct Test {
     void run(bool image_atomics = false, bool async_timeline = false, bool automatic = false,
              uint32_t frames = 1, bool optimized = false, bool bounded_inputs = false,
              bool aliased_inputs = false, bool bind_sizes = false,
-             uint32_t input_bytes = 0, uint32_t expected_copies = 2) {
+             uint32_t input_bytes = 0, uint32_t expected_copies = 2, bool pipeline_cache = false) {
         require(!input_bytes || (aliased_inputs && !bounded_inputs),
                 "large input benchmark requires aliased, full-range bindings");
         if (automatic) {
@@ -191,7 +191,7 @@ struct Test {
         setenv("VULKAN_FIX_EMULATE_DYNAMIC_RENDERING", "force", 1);
         setenv("VULKAN_FIX_EMULATE_DYNAMIC_RENDERING_FEATURE", "force", 1);
         setenv("VULKAN_FIX_OPTIMIZE_BARRIER", optimized ? "1" : "0", 1);
-        setenv("VULKAN_FIX_DISABLE_PIPELINE_CACHE", "1", 1);
+        setenv("VULKAN_FIX_DISABLE_PIPELINE_CACHE", pipeline_cache ? "0" : "1", 1);
         if (async_timeline)
             setenv("VULKAN_FIX_EMULATE_TIMELINE_SEMAPHORE", "force", 1);
         setenv("VULKAN_FIX_LOG_PATH", "/data/local/tmp/vulkanfix-vertex-gpu.log", 1);
@@ -305,6 +305,11 @@ struct Test {
         require(vkGetDeviceProcAddr(device, "vkCmdDrawIndexed") ==
                     reinterpret_cast<PFN_vkVoidFunction>(vkCmdDrawIndexed),
                 "draw tracking via device proc lookup");
+        auto set_viewport = reinterpret_cast<PFN_vkCmdSetViewport>(
+            vkGetDeviceProcAddr(device, "vkCmdSetViewport"));
+        auto set_scissor = reinterpret_cast<PFN_vkCmdSetScissor>(
+            vkGetDeviceProcAddr(device, "vkCmdSetScissor"));
+        require(set_viewport && set_scissor, "native fixed-function state lookup");
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pci.queueFamilyIndex = family;
@@ -459,8 +464,12 @@ struct Test {
         ci.pMultisampleState = &ms;
         ci.pColorBlendState = &bs;
         ci.layout = layout;
+        const auto compilation_start = std::chrono::steady_clock::now();
         success(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &ci, nullptr, &pipeline),
                 "create compute/replay pipeline");
+        std::printf("Compute/replay pipeline creation: elapsed_ms=%.3f persistent_cache=%s\n",
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compilation_start).count(),
+            pipeline_cache ? "enabled" : "disabled");
         const auto baseline = vertex_stats(device);
         if (frames > 1) {
             for (unsigned i = 0; i < 1000; ++i) {
@@ -525,6 +534,17 @@ struct Test {
             transition(cmd, storage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                        VK_ACCESS_TRANSFER_WRITE_BIT,
                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+            VkMemoryBarrier adjacent{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            adjacent.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            adjacent.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+            auto duplicate_barrier = [&] {
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &adjacent, 0, nullptr, 0, nullptr);
+            };
+            duplicate_barrier();
+            set_viewport(cmd, 0, 1, &viewport);
+            set_scissor(cmd, 0, 1, &scissor);
+            duplicate_barrier();
             vkCmdBeginRendering(cmd, &ri);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             VkPipelineLayout recording_layout = layout;
@@ -703,6 +723,7 @@ int main(int argc, char **argv) {
         Test test;
         bool image_atomics = false, async_timeline = false, automatic = false, optimized = false;
         bool bounded_inputs = false, aliased_inputs = false, bind_sizes = false;
+        bool pipeline_cache = false;
         uint32_t frames = 1;
         uint32_t input_bytes = 0, expected_copies = 2;
         for (int i = 1; i < argc; ++i) {
@@ -713,6 +734,7 @@ int main(int argc, char **argv) {
             bounded_inputs |= !strcmp(argv[i], "--bounds");
             aliased_inputs |= !strcmp(argv[i], "--aliased");
             bind_sizes |= !strcmp(argv[i], "--bind-sizes");
+            pipeline_cache |= !strcmp(argv[i], "--pipeline-cache");
             for (auto option : {std::make_pair("--input-bytes=", &input_bytes),
                                 std::make_pair("--expected-copies=", &expected_copies)}) {
                 const size_t length = strlen(option.first);
@@ -733,7 +755,7 @@ int main(int argc, char **argv) {
             }
         }
         test.run(image_atomics, async_timeline, automatic, frames, optimized,
-                 bounded_inputs, aliased_inputs, bind_sizes, input_bytes, expected_copies);
+                 bounded_inputs, aliased_inputs, bind_sizes, input_bytes, expected_copies, pipeline_cache);
         return 0;
     } catch (const std::exception &error) {
         std::printf("FAIL: %s\n", error.what());

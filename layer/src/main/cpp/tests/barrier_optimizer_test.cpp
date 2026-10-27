@@ -175,7 +175,21 @@ int main() {
               stats.stripped_buffer_barriers == 0,
           "optimizer reports no scope narrowing or resource barrier stripping");
     opt.on_cmd_free(cmd);
-    opt.on_untracked_command("vkCmdUntrackedTestEXT");
+    opt.on_cmd_reset(cmd);
+    send();
+    for (const char* name : {"vkCmdSetViewport", "vkCmdSetScissor", "vkCmdSetLineWidth",
+                            "vkCmdSetDepthBias", "vkCmdSetBlendConstants", "vkCmdSetDepthBounds",
+                            "vkCmdSetStencilCompareMask", "vkCmdSetStencilWriteMask",
+                            "vkCmdSetStencilReference", "vkCmdSetViewportWithCount",
+                            "vkCmdSetViewportWithCountEXT", "vkCmdSetScissorWithCount",
+                            "vkCmdSetScissorWithCountEXT"})
+        opt.on_untracked_command(name);
+    check(opt.is_enabled() && !send(),
+          "native fixed-function state lookups preserve exact adjacent barrier dedup");
+    opt.on_cmd_action(cmd);
+    check(send(), "draws after native state changes still require the following barrier");
+    opt.on_cmd_free(cmd);
+    opt.on_untracked_command("vkCmdSetEvent");
     opt.set_enabled(true);
     check(!opt.is_enabled() && send() && send(),
           "native commands outside action tracking permanently bypass barrier dedup");
