@@ -303,26 +303,35 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
 
     std::unique_lock<std::shared_mutex> lock(m_table_rw_mutex);
     m_device_tables[(uint64_t)(uintptr_t)device] = std::make_shared<const DeviceDispatchTable>(dt);
-    if (!m_has_primary_table.load(std::memory_order_relaxed) || m_primary_device.load(std::memory_order_relaxed) == device) {
-        m_primary_device.store(device, std::memory_order_release);
-        m_has_primary_table.store(true, std::memory_order_release);
-    }
+    refresh_single_device_state_locked();
     m_table_generation.fetch_add(1, std::memory_order_release);
 }
 
 void LayerManager::remove_device_dispatch_table(VkDevice device) {
     std::unique_lock<std::shared_mutex> lock(m_table_rw_mutex);
     m_device_tables.erase((uint64_t)(uintptr_t)device);
-    if (m_primary_device.load(std::memory_order_relaxed) == device) {
-        if (!m_device_tables.empty()) {
-            auto it = m_device_tables.begin();
-            m_primary_device.store((VkDevice)(uintptr_t)it->first, std::memory_order_release);
-        } else {
-            m_has_primary_table.store(false, std::memory_order_release);
-            m_primary_device.store(VK_NULL_HANDLE, std::memory_order_release);
+    refresh_single_device_state_locked();
+    m_table_generation.fetch_add(1, std::memory_order_release);
+}
+
+void LayerManager::refresh_single_device_state_locked() {
+    VkDevice single = VK_NULL_HANDLE;
+    uint32_t bypass = 0;
+    if (m_device_tables.size() == 1) {
+        const auto key = m_device_tables.begin()->first;
+        single = (VkDevice)(uintptr_t)key;
+        auto flags = m_device_bypass_flags.find(key);
+        if (flags != m_device_bypass_flags.end()) {
+            if (flags->second.bypass_draw) bypass |= kBypassDraw;
+            if (flags->second.bypass_multi_draw) bypass |= kBypassMultiDraw;
         }
     }
-    m_table_generation.fetch_add(1, std::memory_order_release);
+    // Both values are derived under the table lock. Fast paths are disabled
+    // before a second device can return from creation, and restored only for
+    // the surviving device. Valid calls on that survivor may use its old fast
+    // path throughout another device's creation/destruction.
+    m_single_device_bypass.store(bypass, std::memory_order_release);
+    m_single_device.store(single, std::memory_order_release);
 }
 
 void LayerManager::update_device_bypass_flags(VkDevice device) {
@@ -345,18 +354,12 @@ void LayerManager::update_device_bypass_flags(VkDevice device) {
     {
         std::unique_lock<std::shared_mutex> lock(m_table_rw_mutex);
         m_device_bypass_flags[(uint64_t)(uintptr_t)device] = flags;
-        if (!m_has_primary_bypass.load(std::memory_order_relaxed) || m_primary_device.load(std::memory_order_relaxed) == device) {
-            m_primary_bypass_flags = flags;
-            m_primary_multi_draw_bypass.store(flags.bypass_multi_draw, std::memory_order_release);
-            m_has_primary_bypass.store(true, std::memory_order_release);
-        }
+        refresh_single_device_state_locked();
     }
 
     if (flags.bypass_draw) {
-        m_divisor_bypass_active.store(true, std::memory_order_release);
         LOGI("Device %p: Divisor bypass active (Trampoline enabled, 0-overhead draw/bind)", device);
     } else {
-        m_divisor_bypass_active.store(false, std::memory_order_release);
         LOGI("Device %p: Divisor emulation active (sub-draw batching)", device);
     }
 
@@ -368,19 +371,7 @@ void LayerManager::update_device_bypass_flags(VkDevice device) {
 void LayerManager::remove_device_bypass_flags(VkDevice device) {
     std::unique_lock<std::shared_mutex> lock(m_table_rw_mutex);
     m_device_bypass_flags.erase((uint64_t)(uintptr_t)device);
-    if (m_primary_device.load(std::memory_order_relaxed) == device) {
-        if (!m_device_bypass_flags.empty()) {
-            auto it = m_device_bypass_flags.begin();
-            m_primary_bypass_flags = it->second;
-            m_primary_multi_draw_bypass.store(m_primary_bypass_flags.bypass_multi_draw, std::memory_order_release);
-            m_has_primary_bypass.store(true, std::memory_order_release);
-            m_divisor_bypass_active.store(m_primary_bypass_flags.bypass_draw, std::memory_order_release);
-        } else {
-            m_has_primary_bypass.store(false, std::memory_order_release);
-            m_primary_multi_draw_bypass.store(false, std::memory_order_release);
-            m_divisor_bypass_active.store(false, std::memory_order_release);
-        }
-    }
+    refresh_single_device_state_locked();
 }
 
 bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pName) {
@@ -427,11 +418,7 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
     // Retrieve bypass flags for this device
     DeviceBypassFlags flags;
     bool found = false;
-    if (__builtin_expect(device == m_primary_device.load(std::memory_order_relaxed), 1) &&
-        m_has_primary_bypass.load(std::memory_order_relaxed)) {
-        flags = m_primary_bypass_flags;
-        found = true;
-    } else {
+    {
         std::shared_lock<std::shared_mutex> lock(m_table_rw_mutex);
         auto it = m_device_bypass_flags.find((uint64_t)(uintptr_t)device);
         if (it != m_device_bypass_flags.end()) {
@@ -651,17 +638,10 @@ void LayerManager::set_device_max_spirv_version(VkDevice device, uint32_t versio
     if (device == VK_NULL_HANDLE) return;
     std::unique_lock<std::shared_mutex> lock(m_device_info_mutex);
     m_device_spirv_versions[(uint64_t)(uintptr_t)device] = version;
-    if (device == m_primary_device.load(std::memory_order_relaxed) ||
-        m_primary_device.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
-        m_primary_spirv_version.store(version, std::memory_order_release);
-    }
 }
 
 uint32_t LayerManager::get_device_max_spirv_version(VkDevice device) {
     if (device == VK_NULL_HANDLE) return 0;
-    if (__builtin_expect(device == m_primary_device.load(std::memory_order_relaxed), 1)) {
-        return m_primary_spirv_version.load(std::memory_order_acquire);
-    }
     std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
     auto it = m_device_spirv_versions.find((uint64_t)(uintptr_t)device);
     return it != m_device_spirv_versions.end() ? it->second : 0;
@@ -989,7 +969,6 @@ VkResult LayerManager::dispatch_create_device(
         add_emulated_device(*pDevice);
         m_last_device = *pDevice;
         m_device_count.fetch_add(1, std::memory_order_relaxed);
-        m_primary_device.store(*pDevice, std::memory_order_relaxed);
         {
             std::unique_lock<std::shared_mutex> lock(m_state_rw_mutex);
             m_device_phys[(uint64_t)(uintptr_t)*pDevice] = physicalDevice;
@@ -1076,9 +1055,6 @@ void LayerManager::dispatch_destroy_device(
 
     {
         std::unique_lock<std::shared_mutex> info_lock(m_device_info_mutex);
-        if (m_primary_device.load(std::memory_order_relaxed) == device) {
-            m_primary_spirv_version.store(0, std::memory_order_release);
-        }
         m_device_spirv_versions.erase((uint64_t)(uintptr_t)device);
         m_device_subgroup_broadcast.erase((uint64_t)(uintptr_t)device);
         m_device_uniform_member_pruning.erase((uint64_t)(uintptr_t)device);
@@ -1858,13 +1834,10 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     // Binding state does not access memory. Do not mark it as a barrier action:
     // identical barriers separated only by binds can still be deduplicated.
 
-    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
-                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
-        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
-            const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
-            primary_dt.CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
-            return;
-        }
+    if (__builtin_expect(m_single_device_bypass.load(std::memory_order_acquire) & kBypassDraw, 1)) {
+        const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
+        primary_dt.CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
+        return;
     }
 
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
@@ -1889,13 +1862,10 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers(
 
     // Vertex buffer binding is not a memory access; keep the TBDR dedup window open.
 
-    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
-                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
-        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
-            const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
-            primary_dt.CmdBindVertexBuffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
-            return;
-        }
+    if (__builtin_expect(m_single_device_bypass.load(std::memory_order_acquire) & kBypassDraw, 1)) {
+        const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
+        primary_dt.CmdBindVertexBuffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
+        return;
     }
 
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
@@ -1922,17 +1892,14 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
 
     // Vertex buffer binding is not a memory access; keep the TBDR dedup window open.
 
-    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
-                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
-        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
-            const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
-            if (primary_dt.CmdBindVertexBuffers2) {
-                primary_dt.CmdBindVertexBuffers2(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
-            } else if (primary_dt.CmdBindVertexBuffers) {
-                primary_dt.CmdBindVertexBuffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
-            }
-            return;
+    if (__builtin_expect(m_single_device_bypass.load(std::memory_order_acquire) & kBypassDraw, 1)) {
+        const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
+        if (primary_dt.CmdBindVertexBuffers2) {
+            primary_dt.CmdBindVertexBuffers2(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pSizes, pStrides);
+        } else if (primary_dt.CmdBindVertexBuffers) {
+            primary_dt.CmdBindVertexBuffers(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
         }
+        return;
     }
 
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
@@ -1995,13 +1962,10 @@ void LayerManager::dispatch_cmd_draw(
 
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
-    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
-                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
-        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
-            const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
-            primary_dt.CmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
-            return;
-        }
+    if (__builtin_expect(m_single_device_bypass.load(std::memory_order_acquire) & kBypassDraw, 1)) {
+        const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
+        primary_dt.CmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+        return;
     }
 
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
@@ -2031,13 +1995,10 @@ void LayerManager::dispatch_cmd_draw_indexed(
 
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
-    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
-                         m_divisor_bypass_active.load(std::memory_order_relaxed), 1)) {
-        if (__builtin_expect(m_has_primary_table.load(std::memory_order_relaxed), 1)) {
-            const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
-            primary_dt.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
-            return;
-        }
+    if (__builtin_expect(m_single_device_bypass.load(std::memory_order_acquire) & kBypassDraw, 1)) {
+        const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
+        primary_dt.CmdDrawIndexed(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+        return;
     }
 
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
@@ -2074,9 +2035,7 @@ void LayerManager::dispatch_cmd_draw_indirect(
         }
     }
 
-    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
-                         m_has_primary_table.load(std::memory_order_relaxed) &&
-                         m_primary_multi_draw_bypass.load(std::memory_order_relaxed), 1)) {
+    if (__builtin_expect((m_single_device_bypass.load(std::memory_order_acquire) & kBypassMultiDraw) != 0, 1)) {
         const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
         if (primary_dt.CmdDrawIndirect) {
             primary_dt.CmdDrawIndirect(commandBuffer, buffer, offset, drawCount, stride);
@@ -2118,9 +2077,7 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect(
         }
     }
 
-    if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) == 1 &&
-                         m_has_primary_table.load(std::memory_order_relaxed) &&
-                         m_primary_multi_draw_bypass.load(std::memory_order_relaxed), 1)) {
+    if (__builtin_expect((m_single_device_bypass.load(std::memory_order_acquire) & kBypassMultiDraw) != 0, 1)) {
         const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
         if (primary_dt.CmdDrawIndexedIndirect) {
             primary_dt.CmdDrawIndexedIndirect(commandBuffer, buffer, offset, drawCount, stride);

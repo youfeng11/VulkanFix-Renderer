@@ -294,6 +294,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_link_libraries(vertex_input_snapshot_test PRIVATE Vulkan::Headers ${LOG_LIB})
     vkfix_sanitize_test(vertex_input_snapshot_test)
     set(VKFIX_BOUNDS_SPIRV_TARGET SPIRV-Tools-static)
+    set(VKFIX_TEST_SPIRV_OPT_TARGET SPIRV-Tools-opt)
     if(VULKAN_FIX_SANITIZE_TESTS)
         # Keep STL instantiations and RTTI consistent across the test and its
         # validator dependency. Production SPIRV-Tools remains unchanged.
@@ -315,6 +316,22 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
             INTERFACE_INCLUDE_DIRECTORIES "${SPIRV_TOOLS_DIR}/include;${SPIRV_HEADERS_DIR}/include")
         add_dependencies(vkfix_test_spirv spirv_tools_sanitized_test_external)
         set(VKFIX_BOUNDS_SPIRV_TARGET vkfix_test_spirv)
+        # The full manager regression also runs the optimizer. Build it only
+        # when requested, against the same instrumented STL/RTTI as the parser.
+        ExternalProject_Add(spirv_tools_sanitized_opt_test_external
+            EXCLUDE_FROM_ALL TRUE
+            SOURCE_DIR "${SPIRV_TOOLS_DIR}"
+            BINARY_DIR "${VKFIX_TEST_SPIRV_DIR}"
+            DEPENDS spirv_tools_sanitized_test_external
+            CONFIGURE_COMMAND ""
+            BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target SPIRV-Tools-opt --parallel 2
+            INSTALL_COMMAND "" UPDATE_COMMAND ""
+            BUILD_BYPRODUCTS "${VKFIX_TEST_SPIRV_DIR}/source/opt/libSPIRV-Tools-opt.a")
+        add_library(vkfix_test_spirv_opt STATIC IMPORTED)
+        set_target_properties(vkfix_test_spirv_opt PROPERTIES
+            IMPORTED_LOCATION "${VKFIX_TEST_SPIRV_DIR}/source/opt/libSPIRV-Tools-opt.a")
+        add_dependencies(vkfix_test_spirv_opt spirv_tools_sanitized_opt_test_external)
+        set(VKFIX_TEST_SPIRV_OPT_TARGET vkfix_test_spirv_opt)
     endif()
     add_executable(vertex_input_bounds_test EXCLUDE_FROM_ALL
         tests/vertex_input_bounds_test.cpp shader/vertex_store_lowering.cpp)
@@ -400,6 +417,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     list(FILTER REGRESSION_CORE_SOURCES EXCLUDE REGEX "driver_loader\\.cpp$")
     add_executable(compatibility_regression_test EXCLUDE_FROM_ALL
         tests/compatibility_regression_test.cpp
+        tests/device_routing_regression_cases.cpp
         tests/timeline_regression_cases.cpp
         tests/push_descriptor_regression_cases.cpp
         tests/mali_tiler_regression_cases.cpp
@@ -411,7 +429,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>
     )
     target_link_libraries(compatibility_regression_test PRIVATE
-        Vulkan::Headers SPIRV-Tools-opt SPIRV-Tools-static ${LOG_LIB} ${ANDROID_LIB} dl
+        Vulkan::Headers ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB} ${ANDROID_LIB} dl
     )
     vkfix_sanitize_test(compatibility_regression_test)
     add_executable(vertex_store_gpu_test EXCLUDE_FROM_ALL tests/vertex_store_gpu_test.cpp)

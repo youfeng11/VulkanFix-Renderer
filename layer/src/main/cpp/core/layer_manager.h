@@ -144,7 +144,7 @@ public:
     void remove_device_bypass_flags(VkDevice device);
     bool should_intercept_device_proc(VkDevice device, const char* pName);
     inline bool is_divisor_bypass_active() const {
-        return m_divisor_bypass_active.load(std::memory_order_relaxed);
+        return (m_single_device_bypass.load(std::memory_order_acquire) & kBypassDraw) != 0;
     }
 
     void register_module(std::unique_ptr<IVulkanLayerModule> module);
@@ -497,16 +497,14 @@ public:
         const VkCommandBuffer* pCommandBuffers);
 
     inline VkDevice get_device_for_cmd(VkCommandBuffer cmd) {
-        if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
-            return m_primary_device.load(std::memory_order_relaxed);
-        }
+        const VkDevice device = m_single_device.load(std::memory_order_acquire);
+        if (__builtin_expect(device != VK_NULL_HANDLE, 1)) return device;
         return get_device_for_cmd_slow(cmd);
     }
 
     inline VkDevice get_device_for_queue(VkQueue queue) {
-        if (__builtin_expect(m_device_count.load(std::memory_order_relaxed) <= 1, 1)) {
-            return m_primary_device.load(std::memory_order_relaxed);
-        }
+        const VkDevice device = m_single_device.load(std::memory_order_acquire);
+        if (__builtin_expect(device != VK_NULL_HANDLE, 1)) return device;
         return get_device_for_queue_slow(queue);
     }
 
@@ -859,6 +857,7 @@ public:
 
 private:
     friend struct DynamicRenderingTestAccess;
+    friend struct DeviceRoutingTestAccess;
     LayerManager() = default;
     ~LayerManager() = default;
     LayerManager(const LayerManager&) = delete;
@@ -882,9 +881,14 @@ private:
     std::unordered_map<uint64_t, std::pair<VkQueue, uint32_t>> m_device_queues;
     std::atomic<VkDevice> m_last_device{VK_NULL_HANDLE};
 
+    // Lifecycle diagnostics only; this counter does not select command owners.
     std::atomic<uint32_t> m_device_count{0};
-    std::atomic<VkDevice> m_primary_device{VK_NULL_HANDLE};
-    std::atomic<bool> m_has_primary_table{false};
+    // A non-null owner is published only for a one-entry dispatch map. A
+    // separate device-count read must never select an unrelated cached owner.
+    std::atomic<VkDevice> m_single_device{VK_NULL_HANDLE};
+    enum : uint32_t { kBypassDraw = 1, kBypassMultiDraw = 2 };
+    std::atomic<uint32_t> m_single_device_bypass{0};
+    void refresh_single_device_state_locked();
 
     std::atomic<uint64_t> m_table_generation{1};
     std::shared_mutex m_table_rw_mutex;
@@ -895,7 +899,6 @@ private:
     std::unordered_map<uint64_t, uint32_t> m_device_spirv_versions;
     std::unordered_map<uint64_t, vkfix::SubgroupBroadcastSupport> m_device_subgroup_broadcast;
     std::unordered_set<uint64_t> m_device_uniform_member_pruning;
-    std::atomic<uint32_t> m_primary_spirv_version{0};
 
     IVulkanLayerModule* m_divisor_mod = nullptr;
     IVulkanLayerModule* m_dyn_rendering_mod = nullptr;
@@ -917,10 +920,6 @@ private:
     IVulkanLayerModule* m_desc_template_mod = nullptr;
     IVulkanLayerModule* m_bind_mem2_mod = nullptr;
 
-    std::atomic<bool> m_divisor_bypass_active{false};
-    std::atomic<bool> m_primary_multi_draw_bypass{false};
-    DeviceBypassFlags m_primary_bypass_flags{};
-    std::atomic<bool> m_has_primary_bypass{false};
     std::unordered_map<uint64_t, DeviceBypassFlags> m_device_bypass_flags;
 
     struct SwapchainMetadata {
