@@ -93,6 +93,7 @@ struct Builder {
     std::map<uint32_t, uint32_t> constants;
     uint32_t u32, i32, f32, boolean, void_type, fn_type, v3uint;
     uint32_t scratch, inputs, storage;
+    uint32_t product_type = 0;
     explicit Builder(uint32_t bound, uint32_t storage_class) : next(bound), storage(storage_class) {
         void_type = type(spv::OpTypeVoid, {});
         boolean = type(spv::OpTypeBool, {});
@@ -169,6 +170,26 @@ struct Builder {
         if (bits < 32)
             value = binary(spv::OpBitwiseAnd, u32, value, constant((1u << bits) - 1));
         return value;
+    }
+    uint32_t bounded_raw(uint32_t base, uint32_t length, uint32_t element, uint32_t stride,
+                         uint32_t offset, uint32_t bits, uint32_t width = 0, uint32_t extra_valid = 0) {
+        if (!product_type) product_type = type(spv::OpTypeStruct, {u32, u32});
+        const auto product = op(spv::OpUMulExtended, product_type, {element, stride});
+        const auto low = op(spv::OpCompositeExtract, u32, {product, 0});
+        const auto high = op(spv::OpCompositeExtract, u32, {product, 1});
+        const auto relative = add(low, constant(offset));
+        auto valid = binary(spv::OpIEqual, boolean, high, constant(0));
+        auto require = [&](uint32_t condition) { valid = binary(spv::OpLogicalAnd, boolean, valid, condition); };
+        require(binary(spv::OpUGreaterThanEqual, boolean, relative, low));
+        if (!width) width = constant(bits / 8);
+        require(binary(spv::OpULessThanEqual, boolean, width, length));
+        require(binary(spv::OpULessThanEqual, boolean, relative,
+                       binary(spv::OpISub, u32, length, width)));
+        if (extra_valid) require(extra_valid);
+        // Invalid accesses read a safe header word, then select zero. Selecting
+        // only the result after an unchecked load would still access bad memory.
+        const auto address = op(spv::OpSelect, u32, {valid, add(base, relative), constant(0)});
+        return op(spv::OpSelect, u32, {valid, raw(address, bits), constant(0)});
     }
     uint32_t float_zero() {
         const auto n = id();
@@ -595,25 +616,33 @@ bool lower_vertex_stores(const Words &source, const char *entry, uint32_t set,
                 put(b.body, spv::OpSelectionMerge, {join, spv::SelectionControlMaskNone});
                 put(b.body, spv::OpBranchConditional, {is_indexed, idx, direct});
                 put(b.body, spv::OpLabel, {idx});
-                const auto index_addr =
-                    b.add(b.param(6),
-                          b.mul(b.add(x, b.param(5)),
-                                b.binary(spv::OpShiftRightLogical, b.u32, indexed, b.constant(3))));
-                auto index = b.raw(index_addr, 32);
+                const auto index_element = b.add(x, b.param(5));
+                const auto index_width = b.binary(spv::OpShiftRightLogical, b.u32, indexed, b.constant(3));
+                auto index = b.bounded_raw(b.param(6), b.param(7), index_element, index_width, 0, 32,
+                                          index_width, b.binary(spv::OpUGreaterThanEqual, b.boolean, index_element, x));
                 const auto short_index =
                     b.binary(spv::OpIEqual, b.boolean, indexed, b.constant(16));
                 index = b.op(spv::OpSelect, b.u32,
                              {short_index,
                               b.binary(spv::OpBitwiseAnd, b.u32, index, b.constant(65535)), index});
                 const auto indexed_vertex = b.add(index, first);
+                const auto negative_base = b.binary(spv::OpSLessThan, b.boolean,
+                                                    b.unary(spv::OpBitcast, b.i32, first),
+                                                    b.unary(spv::OpBitcast, b.i32, b.constant(0)));
+                const auto indexed_valid = b.op(spv::OpSelect, b.boolean,
+                    {negative_base, b.binary(spv::OpULessThanEqual, b.boolean, indexed_vertex, index),
+                     b.binary(spv::OpUGreaterThanEqual, b.boolean, indexed_vertex, index)});
                 put(b.body, spv::OpBranch, {join});
                 put(b.body, spv::OpLabel, {direct});
                 const auto direct_vertex = b.add(x, first);
+                const auto direct_valid = b.binary(spv::OpUGreaterThanEqual, b.boolean, direct_vertex, x);
                 put(b.body, spv::OpBranch, {join});
                 put(b.body, spv::OpLabel, {join});
                 const auto vertex =
                     b.op(spv::OpPhi, b.u32, {indexed_vertex, idx, direct_vertex, direct});
+                const auto vertex_valid = b.op(spv::OpPhi, b.boolean, {indexed_valid, idx, direct_valid, direct});
                 const auto instance = b.add(y, b.param(3));
+                const auto instance_valid = b.binary(spv::OpUGreaterThanEqual, b.boolean, instance, y);
                 for (auto var : l.interfaces) {
                     const auto &d = l.defs.at(var);
                     if (d.w[3] != spv::StorageClassInput)
@@ -647,14 +676,16 @@ bool lower_vertex_stores(const Words &source, const char *entry, uint32_t set,
                     const auto fmt = format_info(it->format);
                     if (it->offset % (fmt.bits / 8))
                         throw std::runtime_error("unaligned vertex attribute");
-                    const auto base = b.add(
-                        b.param(8 + 2 * it->binding),
-                        b.add(b.mul(it->rate == VK_VERTEX_INPUT_RATE_INSTANCE ? instance : vertex,
-                                    b.param(9 + 2 * it->binding)),
-                              b.constant(it->offset)));
+                    const bool per_instance = it->rate == VK_VERTEX_INPUT_RATE_INSTANCE;
+                    const auto base = b.param(8 + 2 * it->binding);
+                    const auto stride = b.param(9 + 2 * it->binding);
+                    const auto length = b.param(kVertexStoreBindingLengths + it->binding);
                     const auto &td = l.defs.at(t);
                     const bool vector = td.op() == spv::OpTypeVector;
                     const uint32_t components = vector ? td.w[3] : 1, scalar = vector ? td.w[2] : t;
+                    if (uint64_t(it->offset) + (std::min(components, fmt.components) - 1) *
+                            uint64_t(fmt.bits / 8) > UINT32_MAX)
+                        throw std::runtime_error("vertex attribute component offset overflows");
                     Words values;
                     for (uint32_t c = 0; c < components; ++c) {
                         if (c >= fmt.components) {
@@ -664,9 +695,10 @@ bool lower_vertex_stores(const Words &source, const char *entry, uint32_t set,
                                        : 0u;
                             values.push_back(b.unary(spv::OpBitcast, scalar, b.constant(bits)));
                         } else
-                            values.push_back(component(
-                                b, b.raw(b.add(base, b.constant(c * fmt.bits / 8)), fmt.bits), fmt,
-                                scalar, l));
+                            values.push_back(component(b,
+                                b.bounded_raw(base, length, per_instance ? instance : vertex, stride,
+                                    it->offset + c * fmt.bits / 8, fmt.bits, 0,
+                                    per_instance ? instance_valid : vertex_valid), fmt, scalar, l));
                     }
                     b.store(var, vector ? b.op(spv::OpCompositeConstruct, t, values) : values[0]);
                 }

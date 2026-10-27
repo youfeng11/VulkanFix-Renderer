@@ -34,6 +34,7 @@ public:
 
 private:
     struct EmulatedTemplate {
+        VkDevice device;
         VkDescriptorUpdateTemplateType templateType;
         std::vector<VkDescriptorUpdateTemplateEntry> entries;
         VkPipelineLayout pipelineLayout;

@@ -1,6 +1,7 @@
 #ifndef MULTI_DRAW_INDIRECT_H
 #define MULTI_DRAW_INDIRECT_H
 
+#include "device_native_cache.h"
 #include "layer_module.h"
 #include <unordered_map>
 #include <mutex>
@@ -70,8 +71,7 @@ private:
     bool is_phys_device_native(VkPhysicalDevice physDev);
 
     std::mutex m_mutex;
-    std::atomic<VkDevice> m_cached_device{VK_NULL_HANDLE};
-    std::atomic<bool> m_cached_device_native{false};
+    DeviceNativeCache m_native_cache;
     std::unordered_map<uint64_t, bool> m_phys_native_support;
     std::unordered_map<uint64_t, bool> m_device_native_support;
 };

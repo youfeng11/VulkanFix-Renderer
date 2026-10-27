@@ -41,7 +41,7 @@ class VertexStoreEmulator {
     void pool(VkDevice, VkCommandPool, uint32_t family);
     void bind_pipeline(VkCommandBuffer, VkPipelineBindPoint, VkPipeline);
     void bind_vertices(VkCommandBuffer, uint32_t, uint32_t, const VkBuffer *, const VkDeviceSize *,
-                       const VkDeviceSize *strides = nullptr);
+                       const VkDeviceSize *strides = nullptr, const VkDeviceSize *sizes = nullptr);
     void bind_index(VkCommandBuffer, VkBuffer, VkDeviceSize, VkIndexType);
     void bind_sets(VkCommandBuffer, VkPipelineBindPoint, VkPipelineLayout, uint32_t, uint32_t,
                    const VkDescriptorSet *, uint32_t, const uint32_t *);

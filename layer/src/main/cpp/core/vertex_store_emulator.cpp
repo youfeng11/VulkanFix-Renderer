@@ -2,10 +2,10 @@
 #include "driver_loader.h"
 #include "layer_manager.h"
 #include "shader/vertex_store_lowering.h"
+#include "vertex_input_snapshot.h"
 #include <algorithm>
 #include <array>
 #include <map>
-#include <set>
 
 namespace {
 thread_local bool internal_call = false;
@@ -22,9 +22,6 @@ template <class T> T fn(VkDevice d, const char *name) {
     return reinterpret_cast<T>(get_real_proc(get_last_instance(), d, name));
 }
 #define REAL(name) fn<PFN_vk##name>(device, "vk" #name)
-uint64_t align4(uint64_t n) {
-    return (n + 3) & ~uint64_t(3);
-}
 struct SetInfo {
     VkDevice device{};
     std::shared_ptr<VertexStoreEmulator::MemoryStats> stats;
@@ -102,6 +99,11 @@ struct Command {
     VkPipeline graphics{}, compute{};
     std::array<VkBuffer, vkfix::kVertexStoreBindings> vertices{};
     std::array<VkDeviceSize, vkfix::kVertexStoreBindings> offsets{};
+    std::array<VkDeviceSize, vkfix::kVertexStoreBindings> sizes = [] {
+        std::array<VkDeviceSize, vkfix::kVertexStoreBindings> values;
+        values.fill(VK_WHOLE_SIZE);
+        return values;
+    }();
     std::map<uint32_t, uint32_t> dynamic_strides;
     VkBuffer index{};
     VkDeviceSize index_offset = 0;
@@ -744,7 +746,7 @@ void VertexStoreEmulator::bind_pipeline(VkCommandBuffer cmd, VkPipelineBindPoint
 }
 void VertexStoreEmulator::bind_vertices(VkCommandBuffer cmd, uint32_t first, uint32_t count,
                                         const VkBuffer *buffers, const VkDeviceSize *offsets,
-                                        const VkDeviceSize *strides) {
+                                        const VkDeviceSize *strides, const VkDeviceSize *sizes) {
     if (!impl->active.load(std::memory_order_acquire))
         return;
     std::lock_guard<std::recursive_mutex> lock(impl->mutex);
@@ -755,6 +757,7 @@ void VertexStoreEmulator::bind_vertices(VkCommandBuffer cmd, uint32_t first, uin
          ++i) {
         c->vertices[first + i] = buffers[i];
         c->offsets[first + i] = offsets[i];
+        c->sizes[first + i] = sizes ? sizes[i] : VK_WHOLE_SIZE;
         if (strides)
             c->dynamic_strides[first + i] = uint32_t(strides[i]);
     }
@@ -956,33 +959,34 @@ bool VertexStoreEmulator::draw(VkCommandBuffer cmd, uint32_t count, uint32_t ins
     header[3] = first_instance;
     header[4] = indexed ? (c->index_type == VK_INDEX_TYPE_UINT16 ? 16 : 32) : 0;
     header[5] = indexed ? first : 0;
-    struct Copy {
-        VkBuffer source;
-        VkDeviceSize size, destination;
-    };
-    std::vector<Copy> copies;
-    uint64_t input_size = sizeof(header);
-    auto append = [&](VkBuffer buffer, VkDeviceSize offset, uint32_t &destination) {
+    vkfix::VertexInputSnapshot snapshot(d.properties.limits.maxStorageBufferRange);
+    auto append = [&](VkBuffer buffer, VkDeviceSize offset, uint32_t &destination, uint32_t& length) {
+        if (buffer == VK_NULL_HANDLE) {
+            destination = length = 0;
+            return true;
+        }
         auto b = d.buffers.find(buffer);
-        if (b == d.buffers.end() || offset >= b->second || offset > UINT32_MAX ||
-            input_size > UINT32_MAX || b->second > UINT32_MAX - input_size)
+        if (b == d.buffers.end() || !snapshot.append(buffer, b->second, offset, destination))
             return false;
-        destination = uint32_t(input_size + offset);
-        copies.push_back({buffer, b->second, input_size});
-        input_size += align4(b->second);
+        length = uint32_t(b->second - offset);
         return true;
     };
-    std::set<uint32_t> bindings;
+    std::array<bool, vkfix::kVertexStoreBindings> bindings{};
     for (auto &attr : p.attributes)
-        bindings.insert(attr.binding);
-    for (auto binding : bindings) {
-        if (!append(c->vertices[binding], c->offsets[binding], header[8 + 2 * binding]))
+        bindings[attr.binding] = true;
+    for (uint32_t binding = 0; binding < bindings.size(); ++binding) {
+        if (!bindings[binding]) continue;
+        if (!append(c->vertices[binding], c->offsets[binding], header[8 + 2 * binding],
+                    header[vkfix::kVertexStoreBindingLengths + binding]))
             return fail("vertex buffer is unavailable or too large");
+        auto& length = header[vkfix::kVertexStoreBindingLengths + binding];
+        length = uint32_t(std::min<VkDeviceSize>(length, c->sizes[binding]));
         header[9 + 2 * binding] = c->dynamic_strides.count(binding) ? c->dynamic_strides.at(binding)
                                                                     : p.strides.at(binding);
     }
-    if (indexed && !append(c->index, c->index_offset, header[6]))
+    if (indexed && !append(c->index, c->index_offset, header[6], header[7]))
         return fail("index buffer is unavailable or too large");
+    const auto input_size = snapshot.size;
     if (input_size > d.properties.limits.maxStorageBufferRange)
         return fail("input buffers exceed storage buffer range");
     DrawResources resources;
@@ -1026,7 +1030,8 @@ bool VertexStoreEmulator::draw(VkCommandBuffer cmd, uint32_t count, uint32_t ins
     barrier(device, cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
     REAL(CmdUpdateBuffer)(cmd, resources.input.handle, 0, sizeof(header), header.data());
-    for (auto copy : copies) {
+    for (uint32_t i = 0; i < snapshot.copy_count; ++i) {
+        const auto& copy = snapshot.copies[i];
         VkBufferCopy region{0, copy.destination, copy.size};
         REAL(CmdCopyBuffer)(cmd, copy.source, resources.input.handle, 1, &region);
     }

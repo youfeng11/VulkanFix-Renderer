@@ -62,14 +62,12 @@ bool VertexPipelineStoresAndAtomicsModule::should_emulate(VkPhysicalDevice physi
 bool VertexPipelineStoresAndAtomicsModule::is_device_native(VkDevice device) {
     if (device == VK_NULL_HANDLE)
         return false;
-    if (__builtin_expect(device == m_cached_device.load(std::memory_order_relaxed), 1)) {
-        return m_cached_device_native.load(std::memory_order_relaxed);
-    }
+    bool cached_native;
+    if (m_native_cache.lookup(device, cached_native)) return cached_native;
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_device_native_support.find((uint64_t)(uintptr_t)device);
     if (it != m_device_native_support.end()) {
-        m_cached_device.store(device, std::memory_order_relaxed);
-        m_cached_device_native.store(it->second, std::memory_order_relaxed);
+        m_native_cache.remember(device, it->second);
         return it->second;
     }
     if (!m_phys_native_support.empty()) {
@@ -168,8 +166,7 @@ void VertexPipelineStoresAndAtomicsModule::on_post_create_device(VkPhysicalDevic
             VertexStoreEmulator::get().enable(device, physicalDevice);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
-        m_cached_device.store(device, std::memory_order_release);
-        m_cached_device_native.store(native, std::memory_order_release);
+        m_native_cache.invalidate();
         LOGI("Device %p created: vertexPipelineStoresAndAtomics %s", device,
              native ? "NATIVE" : (emulate ? "EMULATED" : "DISABLED"));
     }
@@ -179,7 +176,5 @@ void VertexPipelineStoresAndAtomicsModule::on_destroy_device(VkDevice device) {
     VertexStoreEmulator::get().destroy_device(device);
     std::lock_guard<std::mutex> lock(m_mutex);
     m_device_native_support.erase((uint64_t)(uintptr_t)device);
-    if (m_cached_device.load(std::memory_order_relaxed) == device) {
-        m_cached_device.store(VK_NULL_HANDLE, std::memory_order_release);
-    }
+    m_native_cache.invalidate();
 }

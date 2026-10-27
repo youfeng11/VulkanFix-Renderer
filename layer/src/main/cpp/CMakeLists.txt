@@ -231,6 +231,82 @@ target_link_libraries(indirect_expander_test PRIVATE
 # Opt-in: AGP explicitly builds executable targets even with EXCLUDE_FROM_ALL.
 option(VULKAN_FIX_BUILD_REGRESSION_TESTS "Build mock-driver regression runner" OFF)
 if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
+    add_executable(pipeline_cache_manager_test EXCLUDE_FROM_ALL
+        tests/pipeline_cache_manager_test.cpp core/pipeline_cache_manager.cpp)
+    target_include_directories(pipeline_cache_manager_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(pipeline_cache_manager_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    option(VULKAN_FIX_SANITIZE_TESTS "Instrument CPU regression tests with a sanitizer" OFF)
+    set(VULKAN_FIX_TEST_SANITIZER "address" CACHE STRING "CPU test sanitizer: address or undefined")
+    set_property(CACHE VULKAN_FIX_TEST_SANITIZER PROPERTY STRINGS address undefined)
+    function(vkfix_sanitize_test target)
+      if(VULKAN_FIX_SANITIZE_TESTS)
+        if(NOT VULKAN_FIX_TEST_SANITIZER MATCHES "^(address|undefined)$")
+            message(FATAL_ERROR "VULKAN_FIX_TEST_SANITIZER must be address or undefined")
+        endif()
+        # Test ASan separately. Link UBSan statically below to avoid Android's
+        # shared-runtime RTTI/vptr mismatch (android/ndk#2065).
+        target_compile_options(${target} PRIVATE
+            "-fsanitize=${VULKAN_FIX_TEST_SANITIZER}" -fno-sanitize-recover=all -fno-omit-frame-pointer -O1)
+        target_link_options(${target} PRIVATE "-fsanitize=${VULKAN_FIX_TEST_SANITIZER}")
+        if(VULKAN_FIX_TEST_SANITIZER STREQUAL "undefined")
+            # Keep the vptr check enabled, with one C++ ABI implementation.
+            target_link_options(${target} PRIVATE -static-libsan)
+        endif()
+      endif()
+    endfunction()
+    vkfix_sanitize_test(pipeline_cache_manager_test)
+    add_executable(logger_regression_test EXCLUDE_FROM_ALL
+        tests/logger_regression_test.cpp tests/logger_regression_peer.cpp)
+    target_include_directories(logger_regression_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(logger_regression_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    target_link_options(logger_regression_test PRIVATE -Wl,--wrap=fopen)
+    vkfix_sanitize_test(logger_regression_test)
+    add_executable(descriptor_update_template_test EXCLUDE_FROM_ALL
+        tests/descriptor_update_template_test.cpp modules/vulkan_1_1/descriptor_update_template.cpp)
+    target_include_directories(descriptor_update_template_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(descriptor_update_template_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(descriptor_update_template_test)
+    add_executable(device_native_cache_test EXCLUDE_FROM_ALL tests/device_native_cache_test.cpp)
+    target_include_directories(device_native_cache_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(device_native_cache_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(device_native_cache_test)
+    add_executable(vertex_input_snapshot_test EXCLUDE_FROM_ALL tests/vertex_input_snapshot_test.cpp)
+    target_include_directories(vertex_input_snapshot_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(vertex_input_snapshot_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(vertex_input_snapshot_test)
+    set(VKFIX_BOUNDS_SPIRV_TARGET SPIRV-Tools-static)
+    if(VULKAN_FIX_SANITIZE_TESTS)
+        # Keep STL instantiations and RTTI consistent across the test and its
+        # validator dependency. Production SPIRV-Tools remains unchanged.
+        set(VKFIX_TEST_SPIRV_DIR "${VKFIX_ROOT}.cxx-spirv-tools/tests/${ANDROID_ABI}-${VULKAN_FIX_TEST_SANITIZER}")
+        ExternalProject_Add(spirv_tools_sanitized_test_external
+            EXCLUDE_FROM_ALL TRUE
+            SOURCE_DIR "${SPIRV_TOOLS_DIR}"
+            BINARY_DIR "${VKFIX_TEST_SPIRV_DIR}"
+            CMAKE_ARGS ${SPIRV_TOOLS_CMAKE_ARGS} -DENABLE_RTTI=ON
+                "-DCMAKE_CXX_FLAGS=-O1 -g -fsanitize=${VULKAN_FIX_TEST_SANITIZER} -fno-omit-frame-pointer"
+                "-DCMAKE_C_FLAGS=-O1 -g -fsanitize=${VULKAN_FIX_TEST_SANITIZER} -fno-omit-frame-pointer"
+            BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target SPIRV-Tools-static --parallel 4
+            INSTALL_COMMAND "" UPDATE_COMMAND ""
+            BUILD_BYPRODUCTS "${VKFIX_TEST_SPIRV_DIR}/source/libSPIRV-Tools.a")
+        add_library(vkfix_test_spirv STATIC IMPORTED)
+        set_target_properties(vkfix_test_spirv PROPERTIES
+            IMPORTED_LOCATION "${VKFIX_TEST_SPIRV_DIR}/source/libSPIRV-Tools.a"
+            INTERFACE_INCLUDE_DIRECTORIES "${SPIRV_TOOLS_DIR}/include;${SPIRV_HEADERS_DIR}/include")
+        add_dependencies(vkfix_test_spirv spirv_tools_sanitized_test_external)
+        set(VKFIX_BOUNDS_SPIRV_TARGET vkfix_test_spirv)
+    endif()
+    add_executable(vertex_input_bounds_test EXCLUDE_FROM_ALL
+        tests/vertex_input_bounds_test.cpp shader/vertex_store_lowering.cpp)
+    target_include_directories(vertex_input_bounds_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(vertex_input_bounds_test PRIVATE Vulkan::Headers ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
+    vkfix_sanitize_test(vertex_input_bounds_test)
     add_executable(uniform_member_pruning_test EXCLUDE_FROM_ALL
         tests/uniform_member_pruning_test.cpp shader/uniform_member_pruning.cpp)
     target_include_directories(uniform_member_pruning_test BEFORE PRIVATE
@@ -322,6 +398,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_link_libraries(compatibility_regression_test PRIVATE
         Vulkan::Headers SPIRV-Tools-opt SPIRV-Tools-static ${LOG_LIB} ${ANDROID_LIB} dl
     )
+    vkfix_sanitize_test(compatibility_regression_test)
     add_executable(vertex_store_gpu_test EXCLUDE_FROM_ALL tests/vertex_store_gpu_test.cpp)
     target_include_directories(vertex_store_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(vertex_store_gpu_test PRIVATE vulkan_fix SPIRV-Tools-static ${LOG_LIB} vulkan dl)

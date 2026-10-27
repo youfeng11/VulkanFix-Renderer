@@ -1,6 +1,7 @@
 #ifndef VERTEX_PIPELINE_STORES_AND_ATOMICS_H
 #define VERTEX_PIPELINE_STORES_AND_ATOMICS_H
 
+#include "device_native_cache.h"
 #include "layer_module.h"
 #include <atomic>
 #include <mutex>
@@ -49,8 +50,7 @@ class VertexPipelineStoresAndAtomicsModule : public IVulkanLayerModule {
     bool should_emulate(VkPhysicalDevice physicalDevice);
 
     std::mutex m_mutex;
-    std::atomic<VkDevice> m_cached_device{VK_NULL_HANDLE};
-    std::atomic<bool> m_cached_device_native{false};
+    DeviceNativeCache m_native_cache;
     std::unordered_map<uint64_t, bool> m_phys_native_support;
     std::unordered_map<uint64_t, bool> m_device_native_support;
 };

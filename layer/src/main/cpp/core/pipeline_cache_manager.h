@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <unordered_map>
 #include <memory>
+#include <functional>
 
 struct DevicePipelineCacheState {
     VkDevice device = VK_NULL_HANDLE;
@@ -19,6 +20,10 @@ struct DevicePipelineCacheState {
     bool is_valid = false;
     std::atomic<uint32_t> pending_pipelines_count{0};
     std::atomic<bool> is_dirty{false};
+    std::atomic<uint64_t> revision{0};
+    // Serialize snapshots and their file writes without blocking compilation
+    // on disk I/O through cache_use_mutex.
+    std::mutex persistence_mutex;
     uint8_t driver_uuid[VK_UUID_SIZE]{};
     uint32_t vendor_id = 0;
     uint32_t device_id = 0;
@@ -90,6 +95,7 @@ public:
     bool is_enabled() const { return m_enabled.load(std::memory_order_relaxed); }
 
 private:
+    friend class PipelineCacheManagerTest;
     PipelineCacheManager();
     ~PipelineCacheManager();
     PipelineCacheManager(const PipelineCacheManager&) = delete;
@@ -102,12 +108,9 @@ private:
     void start_flusher_thread();
     void stop_flusher_thread();
     void flusher_thread_loop();
+    void mark_dirty(const std::shared_ptr<DevicePipelineCacheState>& state, uint32_t pipelines = 0);
 
     std::atomic<bool> m_enabled{true};
-
-    // Fast-path primary device cache
-    std::atomic<VkDevice> m_primary_device{VK_NULL_HANDLE};
-    std::atomic<VkPipelineCache> m_primary_cache{VK_NULL_HANDLE};
 
     mutable std::shared_mutex m_mutex;
     std::unordered_map<uint64_t, std::shared_ptr<DevicePipelineCacheState>> m_devices;
@@ -119,6 +122,10 @@ private:
     std::atomic<bool> m_flusher_running{false};
     std::atomic<bool> m_has_pending_flush{false};
     std::atomic<int64_t> m_last_pipeline_created_time_ms{0};
+    std::function<bool(const std::string&, const void*, size_t)> m_cache_writer =
+        [this](const std::string& path, const void* data, size_t size) {
+            return write_cache_data_to_file(path, data, size);
+        };
 };
 
 #endif // PIPELINE_CACHE_MANAGER_H

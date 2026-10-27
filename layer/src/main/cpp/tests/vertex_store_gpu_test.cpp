@@ -7,6 +7,7 @@
 #include <spirv-tools/libspirv.hpp>
 #include <stdexcept>
 #include <vector>
+#include <chrono>
 #include <vulkan/vulkan.h>
 
 static void require(bool value, const char *message) {
@@ -174,7 +175,11 @@ struct Test {
             vkDestroyInstance(instance, nullptr);
     }
     void run(bool image_atomics = false, bool async_timeline = false, bool automatic = false,
-             uint32_t frames = 1, bool optimized = false) {
+             uint32_t frames = 1, bool optimized = false, bool bounded_inputs = false,
+             bool aliased_inputs = false, bool bind_sizes = false,
+             uint32_t input_bytes = 0, uint32_t expected_copies = 2) {
+        require(!input_bytes || (aliased_inputs && !bounded_inputs),
+                "large input benchmark requires aliased, full-range bindings");
         if (automatic) {
             unsetenv("VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS_FEATURE");
             unsetenv("VULKAN_FIX_EMULATE_VERTEX_PIPELINE_STORES_AND_ATOMICS");
@@ -250,6 +255,12 @@ struct Test {
         qi.pQueuePriorities = &priority;
         VkPhysicalDeviceFeatures features{};
         features.vertexPipelineStoresAndAtomics = VK_TRUE;
+        if (bounded_inputs || bind_sizes) {
+            VkPhysicalDeviceFeatures available{};
+            vkGetPhysicalDeviceFeatures(physical, &available);
+            require(available.robustBufferAccess, "bounded-input test requires robust buffer access");
+            features.robustBufferAccess = VK_TRUE;
+        }
         VkPhysicalDeviceDynamicRenderingFeatures dynamic{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES};
         dynamic.dynamicRendering = VK_TRUE;
@@ -258,15 +269,28 @@ struct Test {
         timeline_feature.timelineSemaphore = VK_TRUE;
         if (async_timeline)
             dynamic.pNext = &timeline_feature;
-        const char *extensions[] = {VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-                                    VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME};
+        std::vector<const char*> extensions{VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME};
+        if (async_timeline) extensions.push_back(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+        VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extended{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+        if (bind_sizes) {
+            VkPhysicalDeviceFeatures2 available{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &extended};
+            vkGetPhysicalDeviceFeatures2(physical, &available);
+            if (!extended.extendedDynamicState) {
+                std::printf("SKIP: explicit binding-size GPU case requires extended dynamic state\n");
+                return;
+            }
+            extended.pNext = dynamic.pNext;
+            dynamic.pNext = &extended;
+            extensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+        }
         VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         dci.pNext = &dynamic;
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qi;
         dci.pEnabledFeatures = &features;
-        dci.enabledExtensionCount = async_timeline ? 2 : 1;
-        dci.ppEnabledExtensionNames = extensions;
+        dci.enabledExtensionCount = uint32_t(extensions.size());
+        dci.ppEnabledExtensionNames = extensions.data();
         success(vkCreateDevice(physical, &dci, nullptr, &device), "create emulated device");
         if (async_timeline) {
             VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
@@ -293,6 +317,22 @@ struct Test {
         auto color = buffer(sizeof(colors), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, colors);
         const uint16_t indices[] = {99, 2, 0, 1};
         auto index = buffer(sizeof(indices), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices);
+        Buffer limited_color{}, combined{}, limited_combined{};
+        constexpr VkDeviceSize combined_color_offset = sizeof(positions) + sizeof(indices);
+        constexpr VkDeviceSize combined_size = combined_color_offset + sizeof(colors);
+        const VkDeviceSize shared_bytes = input_bytes ? input_bytes : combined_size;
+        require(shared_bytes >= combined_size, "shared input buffer is too small");
+        if (bounded_inputs)
+            limited_color = buffer(sizeof(colors) - 4, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, colors);
+        if (aliased_inputs) {
+            std::vector<uint8_t> bytes(shared_bytes);
+            memcpy(bytes.data(), positions, sizeof(positions));
+            memcpy(bytes.data() + sizeof(positions), indices, sizeof(indices));
+            memcpy(bytes.data() + combined_color_offset, colors, sizeof(colors));
+            const auto usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+            combined = buffer(bytes.size(), usage, bytes.data());
+            if (bounded_inputs) limited_combined = buffer(bytes.size() - 4, usage, bytes.data());
+        }
         auto target = image(VK_FORMAT_R8G8B8A8_UNORM, 1, 1,
                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
         auto storage = image(VK_FORMAT_R32_UINT, 3, 2,
@@ -463,7 +503,12 @@ struct Test {
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &attachment;
         uint64_t scratch_peak = 0;
+        uint64_t expected_copied_bytes = baseline.copied_input_bytes;
+        const uint32_t warmup_frames = frames > 16 ? 8 : 0;
+        std::chrono::steady_clock::time_point timed_start;
         for (uint32_t frame = 0; frame < frames; ++frame) {
+            if (frame == warmup_frames) timed_start = std::chrono::steady_clock::now();
+            const bool limited = (bounded_inputs || bind_sizes) && (frame & 1);
             memcpy(counters.mapped, initial, sizeof(initial));
             success(vkBeginCommandBuffer(cmd, &begin), "begin command buffer");
             transition(cmd, target,
@@ -492,10 +537,26 @@ struct Test {
                 vkDestroyPipelineLayout(device, recording_layout, nullptr);
             VkBuffer vertex_buffers[] = {vertices.handle, color.handle};
             VkDeviceSize offsets[] = {4, 0};
-            vkCmdBindVertexBuffers(cmd, 0, 2, vertex_buffers, offsets);
+            VkBuffer index_buffer = index.handle;
+            VkDeviceSize index_offset = 0;
+            if (bounded_inputs && limited) vertex_buffers[1] = limited_color.handle;
+            if (aliased_inputs) {
+                const auto shared = bounded_inputs && limited ? limited_combined.handle : combined.handle;
+                vertex_buffers[0] = vertex_buffers[1] = index_buffer = shared;
+                offsets[1] = combined_color_offset;
+                index_offset = sizeof(positions);
+                expected_copied_bytes += uint64_t(expected_copies) *
+                                         (shared_bytes - (bounded_inputs && limited ? 4 : 0));
+            }
+            if (bind_sizes && limited) {
+                VkDeviceSize sizes[]{sizeof(positions) - offsets[0], sizeof(colors) - 4};
+                vkCmdBindVertexBuffers2EXT(cmd, 0, 2, vertex_buffers, offsets, sizes, nullptr);
+            } else {
+                vkCmdBindVertexBuffers(cmd, 0, 2, vertex_buffers, offsets);
+            }
             vkCmdDraw(cmd, 0, 2, 1, 2);
             vkCmdDraw(cmd, 3, 2, 1, 2);
-            vkCmdBindIndexBuffer(cmd, index.handle, 0, VK_INDEX_TYPE_UINT16);
+            vkCmdBindIndexBuffer(cmd, index_buffer, index_offset, VK_INDEX_TYPE_UINT16);
             vkCmdDrawIndexed(cmd, 3, 2, 1, 1, 2);
             vkCmdEndRendering(cmd);
             transition(cmd, target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -545,10 +606,11 @@ struct Test {
                 std::printf("SSBO counters: %u, %u\n", counter[0], counter[1]);
             require(counter[0] == 12 && counter[1] == 123, "SSBO atomic side effects");
             const auto pixel = static_cast<uint8_t *>(pixels.mapped);
-            if (frame + 1 == frames)
+            const bool pixel_matches = pixel[0] == 0 && pixel[1] == (limited ? 0 : 255) &&
+                                       pixel[2] == 0 && pixel[3] == (limited ? 0 : 255);
+            if (frame + 1 == frames || !pixel_matches)
                 std::printf("Replay pixel: %u,%u,%u,%u\n", pixel[0], pixel[1], pixel[2], pixel[3]);
-            require(
-                pixel[0] == 0 && pixel[1] == 255 && pixel[2] == 0 && pixel[3] == 255,
+            require(pixel_matches,
                 "vertex input fetch, normalized instance color and atomic-return output replay");
             const auto image_values = static_cast<uint32_t *>(values.mapped);
             for (uint32_t y = 0; y < 2; ++y)
@@ -560,6 +622,14 @@ struct Test {
                             "storage image writes, base vertex/index offset and instance index");
                 }
             auto recorded = vertex_stats(device);
+            if (aliased_inputs) {
+                if (frame == 0 || frame + 1 == frames || recorded.copied_input_bytes != expected_copied_bytes)
+                    std::printf("Copied input bytes: actual=%llu expected=%llu\n",
+                                (unsigned long long)recorded.copied_input_bytes,
+                                (unsigned long long)expected_copied_bytes);
+                require(recorded.copied_input_bytes == expected_copied_bytes,
+                        "aliased vertex and index bindings copy their shared buffer once per draw");
+            }
             if (!frame)
                 scratch_peak = recorded.peak_scratch_bytes;
             require(recorded.live_draws == 2 && recorded.scratch_bytes != 0 &&
@@ -579,6 +649,16 @@ struct Test {
                     (unsigned long long)reset.cloned_set_layouts,
                     (unsigned long long)reset.cloned_pipeline_layouts);
         }
+        const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - timed_start).count();
+        std::printf("GPU loop: measured_frames=%u warmup_frames=%u elapsed_ms=%.3f ms_per_frame=%.6f\n",
+                    frames - warmup_frames, warmup_frames, elapsed_ms, elapsed_ms / (frames - warmup_frames));
+        if (bounded_inputs || bind_sizes)
+            std::printf("PASS: GPU bounds fetches return zero and full-range rebindings restore vertex data\n");
+        if (aliased_inputs)
+            std::printf(expected_copies == 2 ?
+                "PASS: GPU replay preserves aliased bindings with one input copy per draw\n" :
+                "PASS: GPU replay preserves aliased data with the specified historical copy count\n");
         std::printf(
             "PASS: %u GPU frames retain correct data and release scratch/layout resources\n",
             frames);
@@ -622,12 +702,29 @@ int main(int argc, char **argv) {
     try {
         Test test;
         bool image_atomics = false, async_timeline = false, automatic = false, optimized = false;
+        bool bounded_inputs = false, aliased_inputs = false, bind_sizes = false;
         uint32_t frames = 1;
+        uint32_t input_bytes = 0, expected_copies = 2;
         for (int i = 1; i < argc; ++i) {
             image_atomics |= !strcmp(argv[i], "--image-atomics");
             async_timeline |= !strcmp(argv[i], "--timeline");
             automatic |= !strcmp(argv[i], "--auto");
             optimized |= !strcmp(argv[i], "--optimized");
+            bounded_inputs |= !strcmp(argv[i], "--bounds");
+            aliased_inputs |= !strcmp(argv[i], "--aliased");
+            bind_sizes |= !strcmp(argv[i], "--bind-sizes");
+            for (auto option : {std::make_pair("--input-bytes=", &input_bytes),
+                                std::make_pair("--expected-copies=", &expected_copies)}) {
+                const size_t length = strlen(option.first);
+                if (!strncmp(argv[i], option.first, length)) {
+                    char* end = nullptr;
+                    auto value = strtoul(argv[i] + length, &end, 10);
+                    const auto limit = option.second == &expected_copies ? 5ul : 16ul * 1024 * 1024;
+                    require(end && !*end && value > 0 && value <= limit,
+                            "invalid benchmark argument");
+                    *option.second = uint32_t(value);
+                }
+            }
             if (!strncmp(argv[i], "--frames=", 9)) {
                 char *end = nullptr;
                 auto count = strtoul(argv[i] + 9, &end, 10);
@@ -635,7 +732,8 @@ int main(int argc, char **argv) {
                 frames = uint32_t(count);
             }
         }
-        test.run(image_atomics, async_timeline, automatic, frames, optimized);
+        test.run(image_atomics, async_timeline, automatic, frames, optimized,
+                 bounded_inputs, aliased_inputs, bind_sizes, input_bytes, expected_copies);
         return 0;
     } catch (const std::exception &error) {
         std::printf("FAIL: %s\n", error.what());

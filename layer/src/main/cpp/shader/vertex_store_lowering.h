@@ -5,9 +5,11 @@
 
 namespace vkfix {
 // The private input buffer begins with eight draw parameters followed by
-// {byteOffset, stride} pairs for each vertex binding. Raw input data follows.
+// {byteOffset, stride} pairs, then each binding's remaining byte length.
+// Parameter 7 holds the index binding's remaining byte length. Raw data follows.
 constexpr uint32_t kVertexStoreBindings = 16;
-constexpr uint32_t kVertexStoreHeaderWords = 8 + 2 * kVertexStoreBindings;
+constexpr uint32_t kVertexStoreBindingLengths = 8 + 2 * kVertexStoreBindings;
+constexpr uint32_t kVertexStoreHeaderWords = kVertexStoreBindingLengths + kVertexStoreBindings;
 struct VertexStoreAttribute {
     uint32_t location, binding, offset;
     VkFormat format;

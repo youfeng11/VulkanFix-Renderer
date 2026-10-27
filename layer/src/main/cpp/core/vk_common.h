@@ -15,42 +15,42 @@
 #include <strings.h>
 
 // NOTE: external linkage ("inline", not "static inline") on purpose. With
-// "static inline" every translation unit gets its own FILE* + s_initialized, so
+// "static inline" every translation unit gets its own FILE*, so
 // each of the ~30 TUs that logs opened the same path with "w", truncating the
 // file and then writing at independent offsets (interleaved garbage / NUL holes).
 inline FILE* get_writable_log_file() {
-    static FILE* s_fp = nullptr;
-    static bool s_initialized = false;
-    if (!s_initialized) {
-        s_initialized = true;
+    // Local-static initialization makes concurrent first callers wait until
+    // fopen completes. Keep the stream open for late process-shutdown logging.
+    static FILE* const s_fp = []() -> FILE* {
+        FILE* fp = nullptr;
 
         // 1. Custom environment variable
         const char* custom_log = getenv("VULKAN_FIX_LOG_PATH");
         if (custom_log && custom_log[0] != '\0') {
-            s_fp = fopen(custom_log, "w");
+            fp = fopen(custom_log, "w");
         }
 
         // 2. App internal sandboxed directory (HOME env, 100% guaranteed writable by process)
-        if (!s_fp) {
+        if (!fp) {
             const char* home = getenv("HOME");
             if (home && home[0] != '\0') {
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/vulkanfix.log", home);
-                s_fp = fopen(path, "w");
-                if (!s_fp) {
+                fp = fopen(path, "w");
+                if (!fp) {
                     snprintf(path, sizeof(path), "%s/.minecraft/vulkanfix.log", home);
-                    s_fp = fopen(path, "w");
+                    fp = fopen(path, "w");
                 }
             }
         }
 
         // 3. Current working directory
-        if (!s_fp) {
-            s_fp = fopen("./vulkanfix.log", "w");
+        if (!fp) {
+            fp = fopen("./vulkanfix.log", "w");
         }
 
         // 4. External storage app-private directories
-        if (!s_fp) {
+        if (!fp) {
             const char* ext = getenv("EXTERNAL_STORAGE");
             if (ext && ext[0] != '\0') {
                 const char* subpaths[] = {
@@ -61,20 +61,21 @@ inline FILE* get_writable_log_file() {
                 for (const char* sub : subpaths) {
                     char path[1024];
                     snprintf(path, sizeof(path), "%s%s", ext, sub);
-                    s_fp = fopen(path, "w");
-                    if (s_fp) break;
+                    fp = fopen(path, "w");
+                    if (fp) break;
                 }
             }
         }
 
         // 5. Fallback paths
-        if (!s_fp) {
-            s_fp = fopen("/data/local/tmp/vulkanfix.log", "w");
+        if (!fp) {
+            fp = fopen("/data/local/tmp/vulkanfix.log", "w");
         }
-        if (!s_fp) {
-            s_fp = fopen("/sdcard/vulkanfix.log", "w");
+        if (!fp) {
+            fp = fopen("/sdcard/vulkanfix.log", "w");
         }
-    }
+        return fp;
+    }();
     return s_fp;
 }
 
@@ -108,12 +109,11 @@ inline void file_log(const char* level, const char* fmt, ...) {
 #define LOGD(...) do { file_log("DEBUG", __VA_ARGS__); } while(0)
 
 static inline bool is_debug_logging() {
-    static int s_debug = -1;
-    if (__builtin_expect(s_debug == -1, 0)) {
+    static const bool s_debug = []() {
         const char* env = getenv("VULKAN_FIX_DEBUG");
-        s_debug = (env && (strcmp(env, "1") == 0 || strcasecmp(env, "true") == 0)) ? 1 : 0;
-    }
-    return s_debug == 1;
+        return env && (strcmp(env, "1") == 0 || strcasecmp(env, "true") == 0);
+    }();
+    return s_debug;
 }
 
 #define LOG_OPT_DEBUG(...) do { if (__builtin_expect(is_debug_logging(), 0)) LOGI(__VA_ARGS__); } while(0)

@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <fcntl.h>
+#include <cstdlib>
 
 static bool ensure_directory_exists(const std::string& dir_path) {
     if (dir_path.empty()) return false;
@@ -75,7 +77,7 @@ void PipelineCacheManager::stop_flusher_thread() {
 void PipelineCacheManager::flusher_thread_loop() {
     while (m_flusher_running.load()) {
         std::unique_lock<std::mutex> lock(m_flusher_mutex);
-        m_flusher_cv.wait_for(lock, std::chrono::seconds(4), [this]() {
+        m_flusher_cv.wait(lock, [this]() {
             return !m_flusher_running.load() || m_has_pending_flush.load();
         });
 
@@ -86,8 +88,17 @@ void PipelineCacheManager::flusher_thread_loop() {
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             int64_t last_time = m_last_pipeline_created_time_ms.load(std::memory_order_relaxed);
 
-            // Debounce: wait until at least 2.5 seconds have elapsed since the last pipeline creation burst
-            if (now_ms - last_time >= 2500) {
+            // The pending flag remains true during debounce, so it must not be
+            // the predicate for this timed wait: that would busy-spin.
+            const int64_t remaining_ms = 2500 - (now_ms - last_time);
+            if (remaining_ms > 0) {
+                m_flusher_cv.wait_for(lock, std::chrono::milliseconds(remaining_ms), [this, last_time]() {
+                    return !m_flusher_running.load() ||
+                        m_last_pipeline_created_time_ms.load() != last_time;
+                });
+                continue;
+            }
+            {
                 m_has_pending_flush.store(false, std::memory_order_release);
                 lock.unlock();
 
@@ -213,6 +224,7 @@ bool PipelineCacheManager::load_initial_cache_data(
 
     // Validate header compatibility according to Vulkan Specification
     if (header.headerSize < sizeof(VkPipelineCacheHeaderVersionOne) ||
+        header.headerSize > static_cast<unsigned long>(sz) ||
         header.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
         header.vendorID != vendorId ||
         header.deviceID != deviceId ||
@@ -247,25 +259,33 @@ bool PipelineCacheManager::write_cache_data_to_file(const std::string& path, con
         ensure_directory_exists(path.substr(0, pos));
     }
 
-    std::string tmp_path = path + ".tmp";
-    FILE* f = fopen(tmp_path.c_str(), "wb");
+    std::string tmp_path = path + ".tmp.XXXXXX";
+    const int fd = mkostemp(tmp_path.data(), O_CLOEXEC);
+    if (fd < 0) {
+        LOGE("PipelineCacheManager: Failed to create cache temp file for '%s'", path.c_str());
+        return false;
+    }
+    FILE* f = fdopen(fd, "wb");
     if (!f) {
+        close(fd);
+        unlink(tmp_path.c_str());
         LOGE("PipelineCacheManager: Failed to open temp file '%s' for writing", tmp_path.c_str());
         return false;
     }
 
     size_t written = fwrite(data, 1, size, f);
-    fflush(f);
-    fclose(f);
+    const int flushed = fflush(f);
+    const int closed = fclose(f);
 
-    if (written != size) {
-        LOGE("PipelineCacheManager: Incomplete write to '%s' (%zu / %zu bytes)", tmp_path.c_str(), written, size);
+    if (written != size || flushed != 0 || closed != 0) {
+        LOGE("PipelineCacheManager: Failed cache write/flush to '%s' (%zu / %zu bytes)", tmp_path.c_str(), written, size);
         unlink(tmp_path.c_str());
         return false;
     }
 
     if (rename(tmp_path.c_str(), path.c_str()) != 0) {
         LOGE("PipelineCacheManager: Atomic rename from '%s' to '%s' failed", tmp_path.c_str(), path.c_str());
+        unlink(tmp_path.c_str());
         return false;
     }
 
@@ -327,11 +347,6 @@ void PipelineCacheManager::init_for_device(VkPhysicalDevice physicalDevice, VkDe
         {
             std::unique_lock<std::shared_mutex> lock(m_mutex);
             m_devices[(uint64_t)(uintptr_t)device] = std::move(state);
-            if (m_primary_device.load(std::memory_order_relaxed) == VK_NULL_HANDLE ||
-                m_primary_device.load(std::memory_order_relaxed) == device) {
-                m_primary_device.store(device, std::memory_order_release);
-                m_primary_cache.store(diskCache, std::memory_order_release);
-            }
         }
 
         LOGI("PipelineCacheManager: Successfully initialized persistent pipeline cache (handle=%p) for device %p at '%s'",
@@ -358,16 +373,6 @@ void PipelineCacheManager::on_destroy_device(VkDevice device) {
         if (it != m_devices.end() && it->second == state) {
             m_devices.erase(it);
         }
-        if (m_primary_device.load(std::memory_order_relaxed) == device) {
-            if (!m_devices.empty()) {
-                auto first = m_devices.begin();
-                m_primary_device.store((VkDevice)(uintptr_t)first->first, std::memory_order_release);
-                m_primary_cache.store(first->second->disk_cache, std::memory_order_release);
-            } else {
-                m_primary_device.store(VK_NULL_HANDLE, std::memory_order_release);
-                m_primary_cache.store(VK_NULL_HANDLE, std::memory_order_release);
-            }
-        }
     }
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
@@ -391,10 +396,8 @@ void PipelineCacheManager::on_destroy_device(VkDevice device) {
 VkPipelineCache PipelineCacheManager::get_disk_cache(VkDevice device) {
     if (!m_enabled.load(std::memory_order_relaxed) || device == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 
-    if (m_primary_device.load(std::memory_order_relaxed) == device) {
-        return m_primary_cache.load(std::memory_order_relaxed);
-    }
-
+    // Read device ownership and its handle under the same lock. Separate
+    // primary-device/cache atomics could publish another device's old cache.
     std::shared_lock<std::shared_mutex> lock(m_mutex);
     auto it = m_devices.find((uint64_t)(uintptr_t)device);
     if (it != m_devices.end() && it->second) {
@@ -458,11 +461,19 @@ void PipelineCacheManager::on_pipelines_created(VkDevice device, VkPipelineCache
 
     DevicePipelineCacheState* state = it->second.get();
     VkPipelineCache diskCache = state->disk_cache;
-    if (diskCache == VK_NULL_HANDLE) return;
+    if (diskCache == VK_NULL_HANDLE || diskCache != usedCache) return;
 
-    state->pending_pipelines_count.fetch_add(count, std::memory_order_relaxed);
+    mark_dirty(it->second, count);
+}
+
+void PipelineCacheManager::mark_dirty(const std::shared_ptr<DevicePipelineCacheState>& state, uint32_t pipelines) {
+    // Serialize revision publication with the completion of an older snapshot.
+    // Never hold this mutex while accessing a native cache or doing file I/O.
+    std::lock_guard<std::mutex> lock(m_flusher_mutex);
+    if (!state->alive.load(std::memory_order_acquire)) return;
+    state->pending_pipelines_count.fetch_add(pipelines, std::memory_order_relaxed);
+    state->revision.fetch_add(1, std::memory_order_release);
     state->is_dirty.store(true, std::memory_order_release);
-
     int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     m_last_pipeline_created_time_ms.store(now_ms, std::memory_order_release);
@@ -476,13 +487,16 @@ bool PipelineCacheManager::sync_device_cache_to_disk(VkDevice device, bool force
     auto state = get_state(device);
     if (!state) return false;
 
+    std::lock_guard<std::mutex> persist_lock(state->persistence_mutex);
     std::vector<uint8_t> buffer;
     std::string cache_path;
+    uint64_t revision = 0;
     {
         // Exclusive: no pipeline creation and no concurrent flush on this cache.
         std::unique_lock<std::shared_mutex> useLock(state->cache_use_mutex);
         if (!state->alive.load(std::memory_order_acquire)) return false;
         if (!force_sync && !state->is_dirty.load(std::memory_order_acquire)) return true;
+        revision = state->revision.load(std::memory_order_acquire);
 
         VkPipelineCache disk_cache = state->disk_cache;
         if (disk_cache == VK_NULL_HANDLE) return false;
@@ -500,19 +514,24 @@ bool PipelineCacheManager::sync_device_cache_to_disk(VkDevice device, bool force
 
         buffer.resize(dataSize);
         res = real_get_data(device, disk_cache, &dataSize, buffer.data());
-        if (res != VK_SUCCESS) {
+        if (res != VK_SUCCESS || dataSize > buffer.size() ||
+            dataSize < sizeof(VkPipelineCacheHeaderVersionOne)) {
             LOGE("PipelineCacheManager: vkGetPipelineCacheData failed with code %d", res);
             return false;
         }
+        buffer.resize(dataSize);
         cache_path = state->cache_file_path;
     }
 
     // File I/O happens without holding the cache lock: pipeline creation must
     // not stall behind a disk write.
-    bool success = write_cache_data_to_file(cache_path, buffer.data(), buffer.size());
+    bool success = m_cache_writer(cache_path, buffer.data(), buffer.size());
     if (success) {
-        state->is_dirty.store(false, std::memory_order_release);
-        state->pending_pipelines_count.store(0, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(m_flusher_mutex);
+        if (state->revision.load(std::memory_order_acquire) == revision) {
+            state->is_dirty.store(false, std::memory_order_release);
+            state->pending_pipelines_count.store(0, std::memory_order_relaxed);
+        }
     }
 
     return success;
@@ -565,8 +584,6 @@ void PipelineCacheManager::on_pre_destroy_app_pipeline_cache(VkDevice device, Vk
     }
 
     if (merged) {
-        state->is_dirty.store(true, std::memory_order_release);
-        m_has_pending_flush.store(true, std::memory_order_release);
-        m_flusher_cv.notify_one();
+        mark_dirty(state);
     }
 }

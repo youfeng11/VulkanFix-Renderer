@@ -2,6 +2,19 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include <atomic>
+#include <cstring>
+
+namespace {
+template <typename T>
+const T* descriptor_infos(const char* data, uint32_t count, size_t stride, std::vector<T>& scratch) {
+    if ((count == 1 || stride == sizeof(T)) && uintptr_t(data) % alignof(T) == 0)
+        return reinterpret_cast<const T*>(data);
+    scratch.resize(count);
+    for (uint32_t i = 0; i < count; ++i)
+        std::memcpy(&scratch[i], data + size_t(i) * stride, sizeof(T));
+    return scratch.data();
+}
+}
 
 REGISTER_LAYER_MODULE(DescriptorUpdateTemplateModule);
 
@@ -13,7 +26,10 @@ DescriptorUpdateTemplateModule::DescriptorUpdateTemplateModule()
 void DescriptorUpdateTemplateModule::on_destroy_device(VkDevice device) {
     ExtensionModuleBase::on_destroy_device(device);
     std::lock_guard<std::mutex> lock(m_template_mutex);
-    m_templates.clear();
+    for (auto it = m_templates.begin(); it != m_templates.end();) {
+        if (it->second->device == device) it = m_templates.erase(it);
+        else ++it;
+    }
 }
 
 bool DescriptorUpdateTemplateModule::on_create_descriptor_update_template(
@@ -41,6 +57,7 @@ bool DescriptorUpdateTemplateModule::on_create_descriptor_update_template(
     }
 
     auto tmpl = std::make_shared<EmulatedTemplate>();
+    tmpl->device = device;
     tmpl->templateType = pCreateInfo->templateType;
     tmpl->pipelineLayout = pCreateInfo->pipelineLayout;
     tmpl->set = pCreateInfo->set;
@@ -81,7 +98,8 @@ bool DescriptorUpdateTemplateModule::on_destroy_descriptor_update_template(
     }
 
     std::lock_guard<std::mutex> lock(m_template_mutex);
-    m_templates.erase((uint64_t)(uintptr_t)descriptorUpdateTemplate);
+    auto it = m_templates.find((uint64_t)descriptorUpdateTemplate);
+    if (it != m_templates.end() && it->second->device == device) m_templates.erase(it);
     return true;
 }
 
@@ -106,8 +124,8 @@ bool DescriptorUpdateTemplateModule::on_update_descriptor_set_with_template(
     std::shared_ptr<EmulatedTemplate> tmpl;
     {
         std::lock_guard<std::mutex> lock(m_template_mutex);
-        auto it = m_templates.find((uint64_t)(uintptr_t)descriptorUpdateTemplate);
-        if (it != m_templates.end()) {
+        auto it = m_templates.find((uint64_t)descriptorUpdateTemplate);
+        if (it != m_templates.end() && it->second->device == device) {
             tmpl = it->second;
         }
     }
@@ -118,41 +136,44 @@ bool DescriptorUpdateTemplateModule::on_update_descriptor_set_with_template(
         (PFN_vkUpdateDescriptorSets) get_real_proc(get_last_instance(), device, "vkUpdateDescriptorSets");
     if (!real_update) return true;
 
+    std::vector<VkDescriptorImageInfo> images;
+    std::vector<VkDescriptorBufferInfo> buffers;
+    std::vector<VkBufferView> views;
     for (const auto& entry : tmpl->entries) {
-        for (uint32_t i = 0; i < entry.descriptorCount; ++i) {
-            VkWriteDescriptorSet write{};
-            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = descriptorSet;
-            write.dstBinding = entry.dstBinding;
-            write.dstArrayElement = entry.dstArrayElement + i;
-            write.descriptorCount = 1;
-            write.descriptorType = entry.descriptorType;
+        if (entry.descriptorCount == 0) continue;
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = descriptorSet;
+        write.dstBinding = entry.dstBinding;
+        write.dstArrayElement = entry.dstArrayElement;
+        write.descriptorCount = entry.descriptorCount;
+        write.descriptorType = entry.descriptorType;
 
-            const char* entryPtr = ((const char*) pData) + entry.offset + i * entry.stride;
-
-            switch (entry.descriptorType) {
-                case VK_DESCRIPTOR_TYPE_SAMPLER:
-                case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-                case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-                case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-                case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
-                    write.pImageInfo = reinterpret_cast<const VkDescriptorImageInfo*>(entryPtr);
-                    break;
-                case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
-                case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-                case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-                case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
-                    write.pBufferInfo = reinterpret_cast<const VkDescriptorBufferInfo*>(entryPtr);
-                    break;
-                case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
-                case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-                    write.pTexelBufferView = reinterpret_cast<const VkBufferView*>(entryPtr);
-                    break;
-                default:
-                    break;
-            }
-            real_update(device, 1, &write, 0, nullptr);
+        // A single write preserves Vulkan's consecutive-binding semantics.
+        // Gather strided data into typed storage valid for the driver call.
+        const char* entryPtr = static_cast<const char*>(pData) + entry.offset;
+        switch (entry.descriptorType) {
+            case VK_DESCRIPTOR_TYPE_SAMPLER:
+            case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+            case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+            case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+                write.pImageInfo = descriptor_infos(entryPtr, entry.descriptorCount, entry.stride, images);
+                break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                write.pBufferInfo = descriptor_infos(entryPtr, entry.descriptorCount, entry.stride, buffers);
+                break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+            case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+                write.pTexelBufferView = descriptor_infos(entryPtr, entry.descriptorCount, entry.stride, views);
+                break;
+            default:
+                break;
         }
+        real_update(device, 1, &write, 0, nullptr);
     }
     return true;
 }

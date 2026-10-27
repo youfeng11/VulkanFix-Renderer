@@ -1,6 +1,7 @@
 #ifndef EXTENSION_MODULE_BASE_H
 #define EXTENSION_MODULE_BASE_H
 
+#include "device_native_cache.h"
 #include "layer_module.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
@@ -53,14 +54,12 @@ public:
 
     bool is_device_native(VkDevice device) override {
         if (device == VK_NULL_HANDLE) return false;
-        if (device == m_cached_device.load(std::memory_order_relaxed)) {
-            return m_cached_device_native.load(std::memory_order_relaxed);
-        }
+        bool cached_native;
+        if (m_native_cache.lookup(device, cached_native)) return cached_native;
         std::shared_lock<std::shared_mutex> lock(m_ext_mutex);
         auto it = m_device_native.find((uint64_t)(uintptr_t)device);
         if (it != m_device_native.end()) {
-            m_cached_device.store(device, std::memory_order_relaxed);
-            m_cached_device_native.store(it->second, std::memory_order_relaxed);
+            m_native_cache.remember(device, it->second);
             return it->second;
         }
         return false;
@@ -111,17 +110,14 @@ public:
             bool native = is_phys_device_native(physicalDevice);
             std::unique_lock<std::shared_mutex> lock(m_ext_mutex);
             m_device_native[(uint64_t)(uintptr_t)device] = native;
-            m_cached_device.store(device, std::memory_order_relaxed);
-            m_cached_device_native.store(native, std::memory_order_relaxed);
+            m_native_cache.invalidate();
         }
     }
 
     void on_destroy_device(VkDevice device) override {
         std::unique_lock<std::shared_mutex> lock(m_ext_mutex);
         m_device_native.erase((uint64_t)(uintptr_t)device);
-        if (m_cached_device.load(std::memory_order_relaxed) == device) {
-            m_cached_device.store(VK_NULL_HANDLE, std::memory_order_relaxed);
-        }
+        m_native_cache.invalidate();
     }
 
 protected:
@@ -171,8 +167,7 @@ protected:
     std::unordered_map<uint64_t, bool> m_phys_native;
     std::unordered_map<uint64_t, bool> m_device_native;
 
-    std::atomic<VkDevice> m_cached_device{VK_NULL_HANDLE};
-    std::atomic<bool> m_cached_device_native{false};
+    DeviceNativeCache m_native_cache;
 };
 
 #endif // EXTENSION_MODULE_BASE_H

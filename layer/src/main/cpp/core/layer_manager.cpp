@@ -1918,7 +1918,7 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
     const VkDeviceSize* pSizes,
     const VkDeviceSize* pStrides
 ) {
-    VertexStoreEmulator::get().bind_vertices(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pStrides);
+    VertexStoreEmulator::get().bind_vertices(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pStrides, pSizes);
 
     // Vertex buffer binding is not a memory access; keep the TBDR dedup window open.
 
