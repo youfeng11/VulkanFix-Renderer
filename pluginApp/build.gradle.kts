@@ -19,6 +19,18 @@ plugins {
 val vulkanValidation = providers.gradleProperty("vulkanValidation").orNull
 val renderdocCapture = providers.gradleProperty("renderdocCapture").orNull == "true"
 val splitApks = providers.gradleProperty("splitApks").orNull == "true"
+// Compile ABIs independently in CI, then package their stripped outputs.
+val prebuiltNative = providers.gradleProperty("vulkanFixPrebuiltDir").orNull?.let { rootProject.file(it) }
+if (prebuiltNative != null) {
+    require(!renderdocCapture && vulkanValidation == null) { "Prebuilt packaging requires an ordinary build" }
+    val requiredAbis = providers.gradleProperty("android.injected.build.abi").orNull
+        ?.split(',') ?: listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+    for (variant in listOf("debug", "release"))
+        for (abi in requiredAbis)
+            require(prebuiltNative.resolve("$variant/$abi/libvulkan_fix.so").isFile) {
+                "Missing prebuilt renderer: $variant/$abi/libvulkan_fix.so"
+            }
+}
 require(!renderdocCapture || vulkanValidation == null) { "Select RenderDoc capture or validation, not both" }
 require(vulkanValidation == null || vulkanValidation in setOf("core", "sync")) {
     "vulkanValidation must be core or sync"
@@ -86,6 +98,11 @@ android {
         require(recordedSource == currentSource) { "RenderDoc payload is stale; stage it again" }
         sourceSets.getByName("main").jniLibs.srcDir(staged)
         sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("renderdoc-assets").get().asFile)
+    }
+
+    if (prebuiltNative != null) {
+        sourceSets.getByName("debug").jniLibs.srcDir(prebuiltNative.resolve("debug"))
+        sourceSets.getByName("release").jniLibs.srcDir(prebuiltNative.resolve("release"))
     }
 
     packaging {
@@ -256,5 +273,5 @@ kotlin {
 
 dependencies {
     implementation(libs.androidx.annotation)
-    implementation(project(":layer"))
+    if (prebuiltNative == null) implementation(project(":layer"))
 }

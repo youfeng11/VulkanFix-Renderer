@@ -20,6 +20,7 @@ local.properties
 
 # Cached SPIRV-Tools build tree (layer native build)
 /.cxx-spirv-tools/
+/.ccache/
 
 # Python build-tool bytecode
 __pycache__/
