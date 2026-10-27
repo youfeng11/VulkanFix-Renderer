@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import zipfile
+from android_build_config import configured_ndk_version
 
 
 def digest(path):
@@ -17,7 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--renderdoc-dir', required=True, type=Path)
     parser.add_argument('--sdk-root', required=True, type=Path)
-    parser.add_argument('--ndk-version', default='25.2.9519653')
+    parser.add_argument('--ndk-version', default=configured_ndk_version())
     args = parser.parse_args()
     version = subprocess.check_output([str(args.renderdoc_dir / 'renderdoccmd.exe'), 'version'], text=True).strip()
     if 'v1.46 ' not in version:
@@ -45,6 +46,7 @@ def main():
         subprocess.run([str(compiler), f'--target={target}', f'--sysroot={toolchain / "sysroot"}',
                         '-I', str(root / 'Vulkan-Headers/include'), '-shared', '-fPIC', '-std=c++17',
                         '-O2', '-g', '-fvisibility=hidden', '-Wl,-Bsymbolic-functions',
+                        '-Wl,-z,max-page-size=16384', '-Wl,-z,common-page-size=16384',
                         '-Wl,-soname,libvulkan_fix_renderdoc_driver.so', '-static-libstdc++',
                         str(snapshot), '-ldl', '-llog', '-o', str(bridge)], check=True)
         records.append({'abi': abi, 'sdk_apk_sha256': digest(apk), 'layer_sha256': digest(layer),

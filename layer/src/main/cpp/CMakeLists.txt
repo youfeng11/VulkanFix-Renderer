@@ -61,9 +61,18 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Keep the SPIRV-Tools build tree outside the AGP-hashed .cxx directory. A
 # CMake/AGP configuration change creates a new .cxx hash directory; without this
 # cache the validator would be recompiled from scratch (several minutes per ABI).
-# Bump the v1 suffix when SPIRV_TOOLS_CMAKE_ARGS change.
+# Separate compiler/NDK and API levels so a toolchain upgrade cannot reuse
+# objects compiled against another libc++ or Android platform.
+if(ANDROID_NDK_REVISION)
+    set(VKFIX_SPIRV_TOOLCHAIN "ndk-${ANDROID_NDK_REVISION}")
+else()
+    set(VKFIX_SPIRV_TOOLCHAIN "${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")
+endif()
+# Bump v2 when the common dependency build flags change.
+set(VKFIX_SPIRV_CACHE_ROOT
+    "${VKFIX_ROOT}.cxx-spirv-tools/v2/${VKFIX_SPIRV_TOOLCHAIN}/${ANDROID_PLATFORM}")
 set(SPIRV_TOOLS_BUILD_DIR
-    "${VKFIX_ROOT}.cxx-spirv-tools/v1/${ANDROID_ABI}-${CMAKE_BUILD_TYPE}")
+    "${VKFIX_SPIRV_CACHE_ROOT}/${ANDROID_ABI}-${CMAKE_BUILD_TYPE}")
 set(SPIRV_TOOLS_STATIC_LIB "${SPIRV_TOOLS_BUILD_DIR}/source/libSPIRV-Tools.a")
 set(SPIRV_TOOLS_OPT_LIB "${SPIRV_TOOLS_BUILD_DIR}/source/opt/libSPIRV-Tools-opt.a")
 
@@ -90,6 +99,10 @@ if(CMAKE_TOOLCHAIN_FILE)
 endif()
 if(ANDROID_PLATFORM)
     list(APPEND SPIRV_TOOLS_CMAKE_ARGS "-DANDROID_PLATFORM=${ANDROID_PLATFORM}")
+endif()
+if(DEFINED ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES)
+    list(APPEND SPIRV_TOOLS_CMAKE_ARGS
+        "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=${ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES}")
 endif()
 if(CMAKE_MAKE_PROGRAM)
     list(APPEND SPIRV_TOOLS_CMAKE_ARGS "-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}")
@@ -181,6 +194,7 @@ target_compile_options(vulkan_fix PRIVATE
 
 target_link_options(vulkan_fix PRIVATE
     -Wl,-z,max-page-size=16384
+    -Wl,-z,common-page-size=16384
     -Wl,--gc-sections
     # Keep optimizer internals private so unused passes can be discarded.
     -Wl,--exclude-libs,libSPIRV-Tools-opt.a:libSPIRV-Tools.a
@@ -283,7 +297,8 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     if(VULKAN_FIX_SANITIZE_TESTS)
         # Keep STL instantiations and RTTI consistent across the test and its
         # validator dependency. Production SPIRV-Tools remains unchanged.
-        set(VKFIX_TEST_SPIRV_DIR "${VKFIX_ROOT}.cxx-spirv-tools/tests/${ANDROID_ABI}-${VULKAN_FIX_TEST_SANITIZER}")
+        set(VKFIX_TEST_SPIRV_DIR
+            "${VKFIX_SPIRV_CACHE_ROOT}/tests/${ANDROID_ABI}-${CMAKE_BUILD_TYPE}-${VULKAN_FIX_TEST_SANITIZER}")
         ExternalProject_Add(spirv_tools_sanitized_test_external
             EXCLUDE_FROM_ALL TRUE
             SOURCE_DIR "${SPIRV_TOOLS_DIR}"

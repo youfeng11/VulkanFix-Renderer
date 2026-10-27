@@ -24,7 +24,7 @@ Android 端 Minecraft 的 Vulkan 兼容插件，适用于 FCL、ZalithLauncher 2
 
 ## 编译
 
-需要 JDK 17、Android SDK 34、NDK `25.2.9519653` 和 CMake 3.20 或更新版本。
+需要 JDK 17、Android SDK 34、NDK r27d（`27.3.13750724`）和 CMake 3.20 或更新版本。
 
 ```sh
 git clone --recurse-submodules https://github.com/youfeng11/VulkanFix-Renderer.git

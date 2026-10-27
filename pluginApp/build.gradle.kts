@@ -29,6 +29,7 @@ val diagnosticName = if (renderdocCapture) "VulkanFix (RenderDoc)" else
 android {
     namespace = "com.launchers_plugin.renderer"
     compileSdk = 34
+    ndkVersion = providers.gradleProperty("vulkanFixNdkVersion").get()
 
     defaultConfig {
         applicationId = "com.youfeng.plugin.vulkanfix"

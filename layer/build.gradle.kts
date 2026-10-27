@@ -12,7 +12,7 @@ plugins {
 android {
     namespace = "com.launchers_plugin.renderer.layer"
     compileSdk = 34
-    ndkVersion = "25.2.9519653"
+    ndkVersion = providers.gradleProperty("vulkanFixNdkVersion").get()
 
     defaultConfig {
         minSdk = 26
@@ -26,6 +26,7 @@ android {
                 cppFlags("-std=c++17")
                 arguments(
                     "-DANDROID_STL=c++_static",
+                    "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
                     "-DPROJECT_VERSION_NAME=${rootProject.extra["pluginVersionName"]}",
                     "-DPROJECT_VERSION_CODE=${rootProject.extra["pluginVersionCode"]}"
                 )

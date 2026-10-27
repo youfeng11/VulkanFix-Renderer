@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import urllib.request
 import zipfile
+from android_build_config import configured_ndk_version
 
 VERSION = "1.4.363.0"
 SHA256 = "9a3b8e32cb3330406dd4f3651594201635baee4528da8e2a5300e4f55e1a9cc7"
@@ -27,7 +28,7 @@ def digest(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sdk-root", type=Path, required=True)
-    parser.add_argument("--ndk-version", default="25.2.9519653")
+    parser.add_argument("--ndk-version", default=configured_ndk_version())
     parser.add_argument("--archive", type=Path, help="Existing official archive; SHA256 is always checked")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -65,6 +66,7 @@ def main():
                 str(clang), f"--target={target}", f"--sysroot={toolchain / 'sysroot'}",
                 "-I", str(root / "Vulkan-Headers/include"), "-shared", "-fPIC", "-std=c++17",
                 "-O2", "-g", "-fvisibility=hidden", "-Wl,-Bsymbolic-functions",
+                "-Wl,-z,max-page-size=16384", "-Wl,-z,common-page-size=16384",
                 "-Wl,-soname,libvulkan_fix_validation_driver.so", "-static-libstdc++",
                 str(frozen_source), "-ldl", "-llog", "-o", str(bridge),
             ], check=True)

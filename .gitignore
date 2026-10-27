@@ -21,5 +21,8 @@ local.properties
 # Cached SPIRV-Tools build tree (layer native build)
 /.cxx-spirv-tools/
 
+# Python build-tool bytecode
+__pycache__/
+
 # Local PowerShell module analysis cache
 /Microsoft/Windows/PowerShell/ModuleAnalysisCache

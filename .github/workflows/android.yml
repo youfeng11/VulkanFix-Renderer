@@ -30,17 +30,39 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
+      - name: Install pinned NDK
+        id: ndk
+        run: |
+          vulkanfix_ndk_version="$(sed -n 's/^vulkanFixNdkVersion=//p' gradle.properties | tr -d '\r')"
+          test -n "$vulkanfix_ndk_version"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$vulkanfix_ndk_version"
+          vulkanfix_ndk_bin="$ANDROID_HOME/ndk/$vulkanfix_ndk_version/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$vulkanfix_ndk_bin/llvm-strip"
+          test -x "$vulkanfix_ndk_bin/llvm-readelf"
+          echo "bin=$vulkanfix_ndk_bin" >> "$GITHUB_OUTPUT"
+
       - name: Build with Gradle
         run: ./gradlew assembleDebug assembleRelease --build-cache --warning-mode all
+
+      - name: Check packaged native libraries
+        run: |
+          python3 tools/check_apk_native_libs.py \
+            --readelf "${{ steps.ndk.outputs.bin }}/llvm-readelf" \
+            --check-16k \
+            --require-abis arm64-v8a,armeabi-v7a,x86,x86_64 \
+            pluginApp/build/outputs/apk/debug/*.apk \
+            pluginApp/build/outputs/apk/release/*.apk
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v7
         with:
           name: pluginApp-debug
           path: pluginApp/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v7
         with:
           name: pluginApp-release
           path: pluginApp/build/outputs/apk/release/*.apk
+          if-no-files-found: error
