@@ -19,8 +19,10 @@ def check_apk(path, readelf, required_abis, check_16k=False):
             if len(parts) != 3 or parts[0] != 'lib' or not parts[2].endswith('.so'):
                 continue
             libraries += 1
-            if parts[2] == 'libvulkan_fix.so':
+            if parts[2] == 'libvulkanfix.so':
                 renderer_abis.add(parts[1])
+            if parts[2] == 'libvulkan_fix.so':
+                failures.append(f'{entry.filename}: obsolete renderer library name')
             # Use a fixed temporary filename rather than extracting archive paths.
             library = Path(temporary) / 'library.so'
             library.write_bytes(apk.read(entry))
@@ -53,7 +55,7 @@ def check_apk(path, readelf, required_abis, check_16k=False):
                 if not loads:
                     failures.append(f'{entry.filename}: no ELF LOAD segments found')
     if not libraries or not renderer_abis:
-        failures.append('APK is missing libvulkan_fix.so')
+        failures.append('APK is missing libvulkanfix.so')
     missing = required_abis - renderer_abis
     if missing:
         failures.append(f'missing renderer ABIs: {", ".join(sorted(missing))}')

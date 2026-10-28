@@ -27,8 +27,8 @@ if (prebuiltNative != null) {
         ?.split(',') ?: listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
     for (variant in listOf("debug", "release"))
         for (abi in requiredAbis)
-            require(prebuiltNative.resolve("$variant/$abi/libvulkan_fix.so").isFile) {
-                "Missing prebuilt renderer: $variant/$abi/libvulkan_fix.so"
+            require(prebuiltNative.resolve("$variant/$abi/libvulkanfix.so").isFile) {
+                "Missing prebuilt renderer: $variant/$abi/libvulkanfix.so"
             }
 }
 require(!renderdocCapture || vulkanValidation == null) { "Select RenderDoc capture or validation, not both" }
@@ -135,8 +135,8 @@ android {
                 renderer(
                     displayName = diagnosticName,
                     rendererId = "opengles3",
-                    rendererGLPath = nativePath("libvulkan_fix.so"),
-                    rendererEGLPath = nativePath("libvulkan_fix.so"),
+                    rendererGLPath = nativePath("libvulkanfix.so"),
+                    rendererEGLPath = nativePath("libvulkanfix.so"),
                     dlopenLibPaths = emptyList(),
                     env = buildEnvs {
                         normal("POJAV_VULKAN_WRAPPER", "1")
@@ -230,8 +230,8 @@ android {
             manifestPlaceholders.putAll(legacyManifest {
                 displayName     = diagnosticName
                 rendererName    = diagnosticName
-                rendererLib     = "libvulkan_fix.so"
-                eglLib          = "libvulkan_fix.so"
+                rendererLib     = "libvulkanfix.so"
+                eglLib          = "libvulkanfix.so"
                 minMCVer        = ""
                 maxMCVer        = ""
 

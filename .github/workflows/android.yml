@@ -79,7 +79,7 @@ jobs:
         run: |
           for variant in debug release; do
             if [ "$variant" = debug ]; then task=stripDebugDebugSymbols; else task=stripReleaseDebugSymbols; fi
-            library="layer/build/intermediates/stripped_native_libs/$variant/$task/out/lib/$ABI/libvulkan_fix.so"
+            library="layer/build/intermediates/stripped_native_libs/$variant/$task/out/lib/$ABI/libvulkanfix.so"
             test -s "$library"
             mkdir -p "layer/build/ci-native/$variant/$ABI"
             cp "$library" "layer/build/ci-native/$variant/$ABI/"

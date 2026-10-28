@@ -190,7 +190,7 @@ switch ($Action.ToLowerInvariant()) {
         Require-RenderDoc
         $script:TargetDevice = Get-Device
         $nativeDirectory = Join-Path $Workspace 'layer/build/intermediates/cxx'
-        $main = Get-ChildItem $nativeDirectory -Recurse -Filter libvulkan_fix.so | Where-Object { $_.FullName -match 'arm64-v8a' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $main = Get-ChildItem $nativeDirectory -Recurse -Filter libvulkanfix.so | Where-Object { $_.FullName -match 'arm64-v8a' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         $test = Get-ChildItem $nativeDirectory -Recurse -Filter vulkan_fix_test | Where-Object { $_.FullName -match 'arm64-v8a' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         $payload = Join-Path $Workspace 'pluginApp/build/renderdoc-jniLibs/arm64-v8a'
         if (!$main -or !$test -or !(Test-Path "$payload/libvulkan_fix_renderdoc_driver.so")) { throw "Build vulkan_fix_test and run tools/prepare_renderdoc_capture.py first." }

@@ -175,6 +175,7 @@ target_link_libraries(vulkan_fix PRIVATE
 )
 
 set_target_properties(vulkan_fix PROPERTIES
+    OUTPUT_NAME vulkanfix
     C_VISIBILITY_PRESET hidden
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON

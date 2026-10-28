@@ -120,7 +120,7 @@ void register_vulkan_ptr() {
         g_self_handle = dlopen(info.dli_fname, RTLD_NOW | RTLD_GLOBAL);
     }
     if (!g_self_handle) {
-        g_self_handle = dlopen("libvulkan_fix.so", RTLD_NOW | RTLD_GLOBAL);
+        g_self_handle = dlopen("libvulkanfix.so", RTLD_NOW | RTLD_GLOBAL);
     }
 
     if (g_self_handle) {

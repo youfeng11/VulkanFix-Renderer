@@ -25,7 +25,7 @@ int main() {
   auto missing_storage =
       (void (*)(uint32_t))dlsym(driver, "mock_missing_storage");
   REQUIRE(target && calls && mismatches && missing_storage);
-  auto layer = dlopen("./libvulkan_fix.so", RTLD_NOW | RTLD_LOCAL);
+  auto layer = dlopen("./libvulkanfix.so", RTLD_NOW | RTLD_LOCAL);
   REQUIRE(layer);
   auto gipa = (PFN_vkGetInstanceProcAddr)dlsym(layer, "vkGetInstanceProcAddr");
   auto create_instance = (PFN_vkCreateInstance)dlsym(layer, "vkCreateInstance");
