@@ -249,6 +249,7 @@ public:
     uint32_t get_device_max_spirv_version(VkDevice device);
     vkfix::SubgroupBroadcastSupport get_device_subgroup_broadcast(VkDevice device);
     bool should_prune_uniform_members(VkDevice device);
+    bool should_dedup_sampler_aliases(VkDevice device);
 
     VkResult dispatch_create_descriptor_set_layout(
         VkDevice device,
@@ -909,6 +910,7 @@ private:
     std::unordered_map<uint64_t, uint32_t> m_device_spirv_versions;
     std::unordered_map<uint64_t, vkfix::SubgroupBroadcastSupport> m_device_subgroup_broadcast;
     std::unordered_set<uint64_t> m_device_uniform_member_pruning;
+    std::unordered_set<uint64_t> m_device_sampler_alias_dedup;
 
     IVulkanLayerModule* m_divisor_mod = nullptr;
     IVulkanLayerModule* m_dyn_rendering_mod = nullptr;

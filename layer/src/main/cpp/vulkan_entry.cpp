@@ -5,6 +5,7 @@
 #include "shader/shader_rewriter.h"
 #include "shader/subgroup_broadcast_lowering.h"
 #include "shader/uniform_member_pruning.h"
+#include "shader/sampler_alias_dedup.h"
 #include "imageless_framebuffer_manager.h"
 #include "layout_compat.h"
 #include "vk_pnext.h"
@@ -1281,8 +1282,10 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
     const auto broadcast_support = LayerManager::get().get_device_subgroup_broadcast(device);
     const bool prune_uniforms = LayerManager::get().should_prune_uniform_members(device) &&
         vkfix::has_large_uniform_block(code_words, pCreateInfo->codeSize / sizeof(uint32_t));
+    const bool dedup_samplers = LayerManager::get().should_dedup_sampler_aliases(device) &&
+        vkfix::has_sampler_aliases(code_words, pCreateInfo->codeSize / sizeof(uint32_t));
     if (code_words[0] != 0x07230203u ||
-        (code_words[1] <= targetVersion && !broadcast_support && !prune_uniforms)) {
+        (code_words[1] <= targetVersion && !broadcast_support && !prune_uniforms && !dedup_samplers)) {
         return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 
@@ -1313,7 +1316,15 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
                      static_cast<unsigned long long>(count));
         }
     }
-    if (!version_changed && !broadcast_changed && !uniforms_changed) {
+    bool samplers_changed = false;
+    if (dedup_samplers) {
+        std::string error;
+        const auto result = vkfix::dedup_sampler_aliases(code, targetVersion, error);
+        samplers_changed = result == vkfix::SamplerAliasResult::Changed;
+        if (samplers_changed)
+            LOGI("Mali sampler workaround: deduplicated shader sampler aliases");
+    }
+    if (!version_changed && !broadcast_changed && !uniforms_changed && !samplers_changed) {
         return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 

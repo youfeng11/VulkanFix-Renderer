@@ -340,6 +340,16 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(vertex_input_bounds_test PRIVATE Vulkan::Headers ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
     vkfix_sanitize_test(vertex_input_bounds_test)
+    add_executable(sampler_alias_dedup_test EXCLUDE_FROM_ALL
+        tests/sampler_alias_dedup_test.cpp shader/sampler_alias_dedup.cpp)
+    target_include_directories(sampler_alias_dedup_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(sampler_alias_dedup_test PRIVATE Vulkan::Headers ${VKFIX_BOUNDS_SPIRV_TARGET})
+    vkfix_sanitize_test(sampler_alias_dedup_test)
+    add_executable(sampler_alias_dedup_gpu_test EXCLUDE_FROM_ALL tests/sampler_alias_dedup_gpu_test.cpp)
+    target_include_directories(sampler_alias_dedup_gpu_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(sampler_alias_dedup_gpu_test PRIVATE vulkan_fix Vulkan::Headers SPIRV-Tools-static ${LOG_LIB} vulkan dl)
     add_executable(uniform_member_pruning_test EXCLUDE_FROM_ALL
         tests/uniform_member_pruning_test.cpp shader/uniform_member_pruning.cpp)
     target_include_directories(uniform_member_pruning_test BEFORE PRIVATE

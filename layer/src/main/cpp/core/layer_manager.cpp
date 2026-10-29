@@ -13,6 +13,7 @@
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
 #include "shader/uniform_member_pruning.h"
+#include "shader/sampler_alias_dedup.h"
 #include "imageless_framebuffer_manager.h"
 #include "layout_compat.h"
 #include "vk_pnext.h"
@@ -658,6 +659,11 @@ bool LayerManager::should_prune_uniform_members(VkDevice device) {
     return m_device_uniform_member_pruning.count((uint64_t)(uintptr_t)device) != 0;
 }
 
+bool LayerManager::should_dedup_sampler_aliases(VkDevice device) {
+    std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
+    return m_device_sampler_alias_dedup.count((uint64_t)(uintptr_t)device) != 0;
+}
+
 VkResult LayerManager::dispatch_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
     const char* pLayerName,
@@ -993,6 +999,12 @@ VkResult LayerManager::dispatch_create_device(
             auto broadcast = vkfix::subgroup_broadcast_support(physicalDevice);
             std::unique_lock<std::shared_mutex> lock(m_device_info_mutex);
             m_device_subgroup_broadcast[(uint64_t)(uintptr_t)*pDevice] = broadcast;
+            if (vkfix::sampler_alias_dedup_enabled(native_properties.vendorID,
+                    native_properties.deviceID, native_properties.driverVersion,
+                    getenv("VULKAN_FIX_DEDUP_SAMPLER_ALIASES"))) {
+                m_device_sampler_alias_dedup.insert((uint64_t)(uintptr_t)*pDevice);
+                LOGI("Mali sampler workaround: sampler alias deduplication enabled");
+            }
             if (vkfix::uniform_member_pruning_enabled(native_properties.vendorID, api_version,
                     getenv("VULKAN_FIX_PRUNE_UNUSED_UNIFORM_MEMBERS"))) {
                 m_device_uniform_member_pruning.insert((uint64_t)(uintptr_t)*pDevice);
@@ -1065,6 +1077,7 @@ void LayerManager::dispatch_destroy_device(
         m_device_spirv_versions.erase((uint64_t)(uintptr_t)device);
         m_device_subgroup_broadcast.erase((uint64_t)(uintptr_t)device);
         m_device_uniform_member_pruning.erase((uint64_t)(uintptr_t)device);
+        m_device_sampler_alias_dedup.erase((uint64_t)(uintptr_t)device);
     }
 
     PFN_vkDestroyDevice real_fn =
