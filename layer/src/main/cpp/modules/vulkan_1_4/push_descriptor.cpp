@@ -3,6 +3,8 @@
 #include "layer_manager.h"
 #include "vk_debug_utils.h"
 #include "vk_pnext.h"
+#include "core/driver_trust.h"
+#include "core/native_instance_state.h"
 #include <algorithm>
 #include <numeric>
 #include <stdlib.h>
@@ -58,26 +60,18 @@ bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
         }
     }
 
-    // Workaround for ARM Mali GPU driver crash:
-    // ARM Mali proprietary Vulkan drivers (vendor ID 0x13B5) advertise VK_KHR_push_descriptor,
-    // but suffer from a fatal driver crash (SIGSEGV at offset 0x64) in libGLES_mali.so during
-    // vkCmdPushDescriptorSetKHR when pushing to a descriptor set index that is not defined in
-    // the command buffer's previously bound pipeline layout (e.g. multi-pass shader pipelines in
-    // Iris). Unless the user explicitly forced Skip/Bypass, automatically force emulation on Mali.
+    // Native support is trustworthy only after the cross-layout transition was
+    // exercised in the isolated worker. Missing/stale/failed measurements keep
+    // the descriptor-set fallback, independently of GPU vendor/model/version.
     if (native) {
-        PFN_vkGetPhysicalDeviceProperties real_props =
-            (PFN_vkGetPhysicalDeviceProperties)get_real_proc(get_last_instance(), VK_NULL_HANDLE,
-                                                             "vkGetPhysicalDeviceProperties");
-        if (real_props) {
-            VkPhysicalDeviceProperties props{};
-            real_props(physDev, &props);
-            if (props.vendorID == 0x13B5 || strstr(props.deviceName, "Mali") != nullptr) {
-                LOGI("Physical device %p (%s, vendor 0x%x) has known Mali driver crash bug in "
-                     "native VK_KHR_push_descriptor; forcing emulation layer!",
-                     physDev, props.deviceName, props.vendorID);
-                native = false;
-            }
-        }
+        auto instance=vkfix::native_instance_for_physical(physDev);
+        if (!instance) instance=get_last_instance();
+        const auto trust=vkfix::native_driver_trust(instance,physDev,
+                                                   get_real_instance_proc_addr());
+        native=trust.push_descriptor.verdict==vkfix::DriverProbeVerdict::Healthy;
+        LOGI("Driver probe push descriptor: %s (%s); native=%u",
+             vkfix::driver_probe_verdict_name(trust.push_descriptor.verdict),
+             trust.push_descriptor.detail.c_str(),unsigned(native));
     }
 
     {
@@ -85,7 +79,7 @@ bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
         m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
     }
     if (!native) {
-        LOGI("Physical device %p lacks native VK_KHR_push_descriptor, enabling emulation layer!",
+        LOGI("Physical device %p uses the push descriptor emulation layer",
              physDev);
     } else {
         LOGI("Physical device %p natively supports VK_KHR_push_descriptor", physDev);

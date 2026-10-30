@@ -1307,12 +1307,12 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
         const auto result = vkfix::prune_unused_uniform_members(code, targetVersion, error);
         uniforms_changed = result == vkfix::UniformPruneResult::Changed;
         if (result == vkfix::UniformPruneResult::Invalid)
-            LOGW("Mali uniform workaround rejected: %s", error.c_str());
+            LOGW("Measured uniform repair rejected: %s", error.c_str());
         if (uniforms_changed) {
             static std::atomic<uint64_t> pruned_modules{0};
             const auto count = pruned_modules.fetch_add(1, std::memory_order_relaxed) + 1;
             if (count == 1 || count % 16 == 0)
-                LOGI("Mali uniform workaround: pruned unused UBO members in %llu shader module(s)",
+                LOGI("Measured uniform repair: pruned unused UBO members in %llu shader module(s)",
                      static_cast<unsigned long long>(count));
         }
     }
@@ -1322,7 +1322,7 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
         const auto result = vkfix::dedup_sampler_aliases(code, targetVersion, error);
         samplers_changed = result == vkfix::SamplerAliasResult::Changed;
         if (samplers_changed)
-            LOGI("Mali sampler workaround: deduplicated shader sampler aliases");
+            LOGI("Measured sampler repair: deduplicated shader sampler aliases");
     }
     if (!version_changed && !broadcast_changed && !uniforms_changed && !samplers_changed) {
         return create(device, pCreateInfo, pAllocator, pShaderModule);

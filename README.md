@@ -40,6 +40,29 @@ APK 输出到 `pluginApp/build/outputs/apk/debug/`，包含 `arm64-v8a`、`armea
 Release 使用 `./gradlew :pluginApp:assembleRelease`，输出到 `pluginApp/build/outputs/apk/release/`。
 添加 `-PsplitApks=true` 可同时生成各架构的独立 APK 和通用 APK，独立 APK 的下载体积更小。
 
+## 设备驱动自检
+
+游戏启动时会自动测量 sampler 别名和大型 UBO 的读回结果。原始路径出错、修复对照前后均正确时，才启用 sampler 去重或未使用 UBO 成员裁剪；健康驱动保持原始 shader。控制失败或不支持测试条件时，报告“不确定”，不据此推断驱动缺陷。
+
+原生 push descriptor 还需通过独立进程内的跨管线布局测试，未通过确认时使用 descriptor set 模拟。测试进程 `libvulkanfix_probe.so` 随 APK 安装，崩溃和超时由父进程处理。结果按设备、驱动及探针版本在进程内复用，不依赖厂商名单。`VULKAN_FIX_DEDUP_SAMPLER_ALIASES=0/1`、`VULKAN_FIX_PRUNE_UNUSED_UNIFORM_MEMBERS=0/1` 仍可用于诊断对照；push descriptor 保留启动器的 force/skip 设置。
+
+tiler 保护通过直接绘制、间接绘制及可用的多重间接绘制压力探针选择，比较单个 render pass 与分批 LOAD 延续的输出。全部通过时保留原始路径；测出异常或无法确定时保留有界批次保护。需要保护的设备会使用可延续的 render pass 模拟动态渲染。`VULKAN_FIX_MALI_TILER_GUARD=1/0` 可强制启用或关闭，名称仅为兼容已有设置，判定不再限定 Mali。压力探针是代表性负载，仍需按实际游戏和光影回归。
+
+打开 VulkanFix 应用，分别点击“检测原生驱动”和“检测 VulkanFix”。报告区分驱动声明的能力与实际执行结果，可复制用于反馈。每轮在独立进程和测试窗口中运行，超时或驱动崩溃不会结束游戏进程。
+
+- Core：检查 Vulkan 1.0、1.1、1.2 的全部 178 个命令入口，并执行内存传输、离屏绘制、timeline semaphore 和 host query reset 等代表性探针。
+- 扩展：动态渲染清屏读回、push descriptor 计算写入、同步 2 屏障与提交、顶点 divisor 属性读取，以及 Android swapchain 创建、获取、提交和呈现。
+- 特性：验证 multiDrawIndirect、fillModeNonSolid、drawIndirectFirstInstance、samplerAnisotropy、shaderDrawParameters、timelineSemaphore、hostQueryReset、synchronization2、dynamicRendering、vertexAttributeInstanceRateDivisor 和 vertexPipelineStoresAndAtomics。
+
+查询通过表示声明支持；执行通过只证明对应探针，不能作为完整 Vulkan 一致性认证。在缺少原生非实心填充的设备上，当前兼容层会将线框替换为填充，线框执行探针会如实报告失败。
+
+开发者也可使用独立工具 `vulkanfix_driver_post`，输出为 JSON Lines；`evidence=query` 表示声明和入口查询，`evidence=functional` 表示实际执行探针。命令行没有 Android 测试窗口时会跳过呈现探针。
+
+工具可从 `layer/src/main/cpp/diagnostics` 独立配置 CMake（不需要构建 SPIRV-Tools），也可在主 CMake 构建中启用 `-DVULKAN_FIX_BUILD_DRIVER_POST=ON`，构建目标 `vulkanfix_driver_post`。使用 Android NDK 工具链和设备对应 ABI。
+在设备独立进程中运行 `timeout 30 ./vulkanfix_driver_post`；可传入加载器路径以检查 VulkanFix，例如 `timeout 30 ./vulkanfix_driver_post /path/to/libvulkanfix.so`。不要在游戏进程中运行自检；外层超时用于处理驱动函数本身卡住的情况。
+
+Core 命令清单由固定版本的 Khronos 注册表生成：`python tools/generate_driver_post_commands.py --check` 检查是否同步，`python -B tools/test_driver_post.py` 检查清单和分发表。
+
 ## 许可证
 
 ```

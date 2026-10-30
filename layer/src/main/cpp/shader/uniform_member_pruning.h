@@ -8,11 +8,6 @@
 namespace vkfix {
 enum class UniformPruneResult { Unchanged, Changed, Invalid };
 
-// Default to the affected legacy Mali path. An explicit 0/1 allows diagnosis
-// without changing advertised Vulkan features or application buffer layouts.
-bool uniform_member_pruning_enabled(uint32_t vendor, uint32_t api_version,
-                                    const char* override_value = nullptr);
-
 // Cheap preflight for direct Uniform Block structs with more than 256 members.
 // The observed Iris frame block has 305 members; this is a conservative trigger,
 // not an advertised hardware limit. Storage buffers and push constants do not

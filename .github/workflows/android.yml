@@ -107,6 +107,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fetch headers for isolated driver probes
+        run: git submodule update --init --depth 1 Vulkan-Headers
+
       - name: Set up JDK 17
         uses: actions/setup-java@v6
         with:
@@ -132,7 +135,7 @@ jobs:
           test -x "$vulkanfix_ndk_bin/llvm-readelf"
           echo "bin=$vulkanfix_ndk_bin" >> "$GITHUB_OUTPUT"
 
-      - name: Package APKs without native compilation
+      - name: Package APKs with prebuilt renderer and driver probes
         run: |
           chmod +x gradlew
           ./gradlew :pluginApp:assembleDebug :pluginApp:assembleRelease \
@@ -144,6 +147,7 @@ jobs:
           python3 tools/check_apk_native_libs.py \
             --readelf "${{ steps.ndk.outputs.bin }}/llvm-readelf" \
             --check-16k \
+            --require-driver-probes \
             --require-abis arm64-v8a,armeabi-v7a,x86,x86_64 \
             pluginApp/build/outputs/apk/debug/*.apk \
             pluginApp/build/outputs/apk/release/*.apk

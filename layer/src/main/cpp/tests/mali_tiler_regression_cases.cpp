@@ -418,7 +418,7 @@ void run_mali_tiler_regressions(void (*check)(bool, const char *)) {
     for (unsigned i = 0; i < 9; ++i)
         module.before_draw(command, 0, 8);
     module.on_cmd_end_rendering(command);
-    check(barriers == 0, "non-Arm devices keep the original render pass unchanged");
+    check(barriers == 2, "unmeasured devices retain bounded rendering independently of vendor");
     module.on_free_command_buffers(device, 1, &command);
     module.on_destroy_device(device);
     manager.remove_device_dispatch_table(device);

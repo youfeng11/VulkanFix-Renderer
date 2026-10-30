@@ -97,11 +97,8 @@ static bool has_stride(const std::vector<uint32_t>& words, spv::Decoration decor
 
 int main(int argc, char** argv) {
     using namespace vkfix;
-    check(uniform_member_pruning_enabled(0x13b5, 0x4010b1), "legacy Mali defaults on");
-    check(!uniform_member_pruning_enabled(0x13b5, 0x402000), "native Vulkan 1.2 defaults off");
-    check(!uniform_member_pruning_enabled(0x5143, 0x401000), "other vendors default off");
-    check(!uniform_member_pruning_enabled(0x13b5, 0x401000, "0"), "explicit opt out");
-    check(uniform_member_pruning_enabled(0x5143, 0x403000, "1"), "explicit diagnostic opt in");
+    // Runtime selection uses the controlled native probe; driver_trust_test
+    // covers its verdict/override policy independently of this transformation.
     spvtools::SpirvTools validator(SPV_ENV_VULKAN_1_1);
     std::string error;
     for (const char* kind : {"float", "matrix", "array"}) {

@@ -93,13 +93,7 @@ static bool literal_retained(const std::vector<uint32_t>& code) {
 }
 int main(int argc, char** argv) {
     using namespace vkfix;
-    check(sampler_alias_dedup_enabled(0x13b5, 0xa8670000, 134221824), "validated device defaults on");
-    check(!sampler_alias_dedup_enabled(0x13b5, 0xa8670001, 134221824), "other device defaults off");
-    check(!sampler_alias_dedup_enabled(0x13b5, 0xa8670000, 134221825), "other driver defaults off");
-    check(!sampler_alias_dedup_enabled(0x5143, 0xa8670000, 134221824), "other vendor defaults off");
-    check(!sampler_alias_dedup_enabled(0x13b5, 0xa8670000, 134221824, "0"), "explicit opt out");
-    check(sampler_alias_dedup_enabled(0, 0, 0, "1"), "explicit diagnostic opt in");
-    check(!sampler_alias_dedup_enabled(0, 0, 0, "unknown"), "unknown override uses auto policy");
+    // Driver selection and explicit overrides are tested in driver_trust_test.
     std::string error;
     for (bool array : {false, true}) for (bool entries : {false, true}) {
         if (!array && entries) continue;

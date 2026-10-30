@@ -4,6 +4,8 @@
 #include "vk_pnext.h"
 #include "vk_debug_utils.h"
 #include "core/layout_compat.h"
+#include "core/driver_trust.h"
+#include "core/native_instance_state.h"
 #include <string.h>
 #include <algorithm>
 
@@ -158,10 +160,20 @@ bool DynamicRenderingModule::is_phys_device_native(VkPhysicalDevice physDev) {
         }
     }
 
+    if (native) {
+        auto instance=vkfix::native_instance_for_physical(physDev);
+        if (!instance) instance=get_last_instance();
+        const auto trust=vkfix::native_driver_trust(instance,physDev,get_real_instance_proc_addr());
+        if (vkfix::use_bounded_tiler_guard(trust.tiler_budget,getenv("VULKAN_FIX_MALI_TILER_GUARD"))) {
+            native=false;
+            LOGI("Dynamic rendering uses preserving render-pass continuations: tiler pressure %s (%s)",
+                vkfix::driver_probe_verdict_name(trust.tiler_budget.verdict),trust.tiler_budget.detail.c_str());
+        }
+    }
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
     if (!native) {
-        LOGI("Physical device %p lacks native VK_KHR_dynamic_rendering, enabling emulation layer!", physDev);
+        LOGI("Physical device %p uses dynamic rendering emulation", physDev);
     } else {
         LOGI("Physical device %p natively supports VK_KHR_dynamic_rendering", physDev);
     }
@@ -296,19 +308,19 @@ void DynamicRenderingModule::on_post_create_device(
 ) {
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE) {
         bool native = is_phys_device_native(physicalDevice);
-        VkPhysicalDeviceProperties properties{};
-        auto query = (PFN_vkGetPhysicalDeviceProperties)get_real_proc(
-            get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
-        if (query) query(physicalDevice, &properties);
+        auto instance=vkfix::native_instance_for_physical(physicalDevice);
+        if (!instance) instance=get_last_instance();
+        const auto trust=vkfix::native_driver_trust(instance,physicalDevice,get_real_instance_proc_addr());
         const char* guard = getenv("VULKAN_FIX_MALI_TILER_GUARD");
-        const bool tilerGuard = !native && properties.vendorID == 0x13B5 &&
-            (!guard || strcmp(guard, "0"));
+        const bool tilerGuard = !native && vkfix::use_bounded_tiler_guard(trust.tiler_budget,guard);
+        LOGI("Driver probe tiler pressure: %s (%s); bounded rendering=%u",
+            vkfix::driver_probe_verdict_name(trust.tiler_budget.verdict),trust.tiler_budget.detail.c_str(),unsigned(tilerGuard));
         std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
         if (tilerGuard) {
             m_tiler_devices.insert((uint64_t)(uintptr_t)device);
             m_has_tiler_guard.store(true, std::memory_order_release);
-            LOGI("Mali tiler guard v2: legacy + emulated dynamic rendering enabled (4 indirect commands / 128 draws / 262144 direct vertices per batch)");
+            LOGI("Bounded tiler rendering: legacy + emulated dynamic rendering (4 indirect commands / 128 draws / 262144 direct vertices per batch)");
         }
         if (m_primary_dev.load(std::memory_order_relaxed) == VK_NULL_HANDLE) {
             m_primary_native.store(native, std::memory_order_relaxed);
@@ -850,7 +862,7 @@ VkRenderPass DynamicRenderingModule::continuation_render_pass(
     auto real = (PFN_vkCreateRenderPass)get_real_proc(get_last_instance(), device, "vkCreateRenderPass");
     VkRenderPass pass{};
     if (!real || real(device, &create, nullptr, &pass) != VK_SUCCESS || !pass) {
-        LOGE("Mali tiler guard: could not create LOAD continuation render pass");
+        LOGE("Bounded tiler rendering: could not create LOAD continuation render pass");
         return VK_NULL_HANDLE;
     }
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
@@ -925,7 +937,7 @@ void DynamicRenderingModule::track_render_pass(VkDevice device,
     auto real = (PFN_vkCreateRenderPass)get_real_proc(get_last_instance(), device, "vkCreateRenderPass");
     VkRenderPass continuation{};
     if (!real || real(device, &create, nullptr, &continuation) != VK_SUCCESS || !continuation) {
-        LOGE("Mali tiler guard: could not create legacy LOAD continuation");
+        LOGE("Bounded tiler rendering: could not create legacy LOAD continuation");
         return;
     }
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
@@ -936,7 +948,7 @@ void DynamicRenderingModule::track_render_pass(VkDevice device,
         if (destroy) destroy(device, continuation, nullptr);
         return;
     }
-    LOGI("Mali tiler guard: legacy render pass %p protected (%u attachments)",
+    LOGI("Bounded tiler rendering: legacy render pass %p protected (%u attachments)",
         (void*)pass, info->attachmentCount);
 }
 
@@ -1096,7 +1108,7 @@ void DynamicRenderingModule::before_draw(VkCommandBuffer commandBuffer, uint64_t
     dt.CmdBeginRenderPass(commandBuffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
     auto count = m_tiler_splits.fetch_add(1, std::memory_order_relaxed) + 1;
     if (count == 1 || (count & 255u) == 0)
-        LOGI("Mali tiler guard: %llu preserving render-pass continuation(s), path=%s",
+        LOGI("Bounded tiler rendering: %llu preserving render-pass continuation(s), path=%s",
             (unsigned long long)count, legacy ? "legacy" : "dynamic");
 }
 

@@ -16,6 +16,11 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name=".DriverPostService"
+            android:exported="false"
+            android:process=":driver_post" />
+
         <meta-data
             android:name="fclPlugin_V2"
             android:resource="@string/config" />

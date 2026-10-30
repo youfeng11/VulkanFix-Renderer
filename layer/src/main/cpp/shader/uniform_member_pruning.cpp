@@ -51,14 +51,6 @@ spv_target_env environment(uint32_t version) {
 }
 } // namespace
 
-bool uniform_member_pruning_enabled(uint32_t vendor, uint32_t api_version,
-                                    const char* override_value) {
-    if (override_value && !std::strcmp(override_value, "0")) return false;
-    if (override_value && !std::strcmp(override_value, "1")) return true;
-    // VK_VENDOR_ID_ARM, native Vulkan < 1.2 (ignore VulkanFix's promoted version).
-    return vendor == 0x13b5 && api_version < ((1u << 22) | (2u << 12));
-}
-
 bool has_large_uniform_block(const uint32_t* words, size_t word_count) {
     return scan(words, word_count) == Scan::LargeUniform;
 }

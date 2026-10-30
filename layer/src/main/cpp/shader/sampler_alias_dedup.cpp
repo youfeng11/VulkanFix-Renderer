@@ -141,13 +141,6 @@ spv_result_t rewrite_instruction(void* opaque, const spv_parsed_instruction_t* i
 }
 } // namespace
 
-bool sampler_alias_dedup_enabled(uint32_t vendor, uint32_t device, uint32_t driver,
-                                 const char* override_value) {
-    if (override_value && !std::strcmp(override_value, "0")) return false;
-    if (override_value && !std::strcmp(override_value, "1")) return true;
-    // Mali-G610 MC6, native driver 32.1.0: independently reproduced sampler alias bug.
-    return vendor == 0x13b5 && device == 0xa8670000 && driver == 134221824;
-}
 bool has_sampler_aliases(const uint32_t* words, size_t word_count) {
     Aliases aliases;
     return scan(words, word_count, aliases) == Scan::Aliased;

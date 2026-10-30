@@ -13,6 +13,7 @@
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
 #include "shader/uniform_member_pruning.h"
+#include "driver_trust.h"
 #include "shader/sampler_alias_dedup.h"
 #include "imageless_framebuffer_manager.h"
 #include "layout_compat.h"
@@ -995,20 +996,31 @@ VkResult LayerManager::dispatch_create_device(
         }
         const uint32_t spirv_version = ShaderRewriter::api_version_to_spirv(api_version);
         set_device_max_spirv_version(*pDevice, spirv_version);
+        // Probe the native boundary before taking metadata locks. A private
+        // native device avoids renderer recursion and the application's queues.
+        const auto trust = vkfix::native_driver_trust(nativeInstance, physicalDevice,
+                                                     get_real_instance_proc_addr());
+        const bool repair_sampler_aliases = vkfix::use_measured_repair(trust.sampler_aliases,
+                                                     getenv("VULKAN_FIX_DEDUP_SAMPLER_ALIASES"));
+        const bool repair_large_uniform = vkfix::use_measured_repair(trust.large_uniform,
+                                                     getenv("VULKAN_FIX_PRUNE_UNUSED_UNIFORM_MEMBERS"));
+        LOGI("Driver probe sampler aliases: %s (%s); repair=%u",
+             vkfix::driver_probe_verdict_name(trust.sampler_aliases.verdict),
+             trust.sampler_aliases.detail.c_str(), unsigned(repair_sampler_aliases));
+        LOGI("Driver probe large UBO: %s (%s); repair=%u",
+             vkfix::driver_probe_verdict_name(trust.large_uniform.verdict),
+             trust.large_uniform.detail.c_str(), unsigned(repair_large_uniform));
         {
             auto broadcast = vkfix::subgroup_broadcast_support(physicalDevice);
             std::unique_lock<std::shared_mutex> lock(m_device_info_mutex);
             m_device_subgroup_broadcast[(uint64_t)(uintptr_t)*pDevice] = broadcast;
-            if (vkfix::sampler_alias_dedup_enabled(native_properties.vendorID,
-                    native_properties.deviceID, native_properties.driverVersion,
-                    getenv("VULKAN_FIX_DEDUP_SAMPLER_ALIASES"))) {
+            if (repair_sampler_aliases) {
                 m_device_sampler_alias_dedup.insert((uint64_t)(uintptr_t)*pDevice);
-                LOGI("Mali sampler workaround: sampler alias deduplication enabled");
+                LOGI("Measured driver repair: sampler alias deduplication enabled");
             }
-            if (vkfix::uniform_member_pruning_enabled(native_properties.vendorID, api_version,
-                    getenv("VULKAN_FIX_PRUNE_UNUSED_UNIFORM_MEMBERS"))) {
+            if (repair_large_uniform) {
                 m_device_uniform_member_pruning.insert((uint64_t)(uintptr_t)*pDevice);
-                LOGI("Mali uniform workaround: unused large UBO member pruning enabled");
+                LOGI("Measured driver repair: unused large UBO member pruning enabled");
             }
         }
         LOGI("Created logical device %p (driver api 0x%x, max SPIR-V %s)",

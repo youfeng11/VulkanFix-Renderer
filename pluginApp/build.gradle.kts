@@ -50,11 +50,23 @@ android {
         versionCode = rootProject.extra["pluginVersionCode"] as Int
         versionName = (rootProject.extra["pluginVersionName"] as String) +
             (if (renderdocCapture) "-renderdoc" else vulkanValidation?.let { "-validation-$it" } ?: "")
+        externalNativeBuild {
+            cmake {
+                targets += "vulkanfix_post"
+                targets += "vulkanfix_probe"
+                arguments("-DANDROID_STL=c++_static", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
+            }
+        }
         if (renderdocCapture) ndk { abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a")) }
     }
 
     buildFeatures {
         resValues = true
+    }
+    externalNativeBuild {
+        cmake {
+            path = rootProject.file("layer/src/main/cpp/diagnostics/CMakeLists.txt")
+        }
     }
     splits {
         abi {

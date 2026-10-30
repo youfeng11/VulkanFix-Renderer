@@ -8,9 +8,7 @@
 namespace vkfix {
 enum class SamplerAliasResult { Unchanged, Changed, Invalid };
 
-// Match native properties, before VulkanFix's feature/version promotion.
-bool sampler_alias_dedup_enabled(uint32_t vendor, uint32_t device, uint32_t driver,
-                                 const char* override_value = nullptr);
+// Selection belongs to core/driver_trust; this file only rewrites shaders.
 bool has_sampler_aliases(const uint32_t* words, size_t word_count);
 SamplerAliasResult dedup_sampler_aliases(std::vector<uint32_t>& code,
                                         uint32_t max_spirv_version, std::string& error);
