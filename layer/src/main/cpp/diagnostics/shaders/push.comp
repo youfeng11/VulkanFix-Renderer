@@ -2,6 +2,7 @@
 layout(local_size_x = 1) in;
 layout(set = 0, binding = 0, std430) buffer Output { uint values[4]; } outputData;
 void main() {
-    uint index = gl_GlobalInvocationID.x;
-    outputData.values[index] = 0x56465800u + index;
+    uvec3 invocation = gl_GlobalInvocationID;
+    uint index = invocation.x;
+    outputData.values[index] = 0x56465800u + index + (invocation.y << 8) + (invocation.z << 16);
 }

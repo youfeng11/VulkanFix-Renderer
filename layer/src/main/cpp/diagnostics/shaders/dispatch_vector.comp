@@ -1,0 +1,8 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) buffer Out { uint values[]; };
+
+void main() {
+    uvec3 id = gl_GlobalInvocationID;
+    values[id.x] = id.y + id.z;
+}

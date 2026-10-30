@@ -379,6 +379,12 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_link_options(extension_dependencies_driver PRIVATE "-Wl,-Bsymbolic-functions")
     add_executable(extension_dependencies_integration_test EXCLUDE_FROM_ALL tests/extension_dependencies_integration_test.cpp)
     target_link_libraries(extension_dependencies_integration_test PRIVATE Vulkan::Headers dl)
+    add_library(core11_query_driver SHARED EXCLUDE_FROM_ALL tests/core11_query_driver.cpp)
+    target_link_libraries(core11_query_driver PRIVATE Vulkan::Headers)
+    target_link_options(core11_query_driver PRIVATE "-Wl,-Bsymbolic-functions")
+    add_executable(core11_queries_integration_test EXCLUDE_FROM_ALL tests/core11_queries_integration_test.cpp)
+    target_link_libraries(core11_queries_integration_test PRIVATE Vulkan::Headers dl)
+    vkfix_sanitize_test(core11_queries_integration_test)
     add_executable(validation_driver_test EXCLUDE_FROM_ALL tests/validation_driver_test.cpp)
     target_link_libraries(validation_driver_test PRIVATE Vulkan::Headers dl)
     add_executable(push_descriptor_gpu_test EXCLUDE_FROM_ALL tests/push_descriptor_gpu_test.cpp)
@@ -405,6 +411,11 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_include_directories(subgroup_broadcast_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(subgroup_broadcast_test PRIVATE Vulkan::Headers SPIRV-Tools-static ${LOG_LIB})
+    add_executable(viewport_rewrite_test EXCLUDE_FROM_ALL
+        tests/viewport_rewrite_test.cpp shader/shader_rewriter.cpp)
+    target_include_directories(viewport_rewrite_test BEFORE PRIVATE
+        $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(viewport_rewrite_test PRIVATE Vulkan::Headers SPIRV-Tools-static ${LOG_LIB})
     add_executable(subgroup_broadcast_gpu_test EXCLUDE_FROM_ALL tests/subgroup_broadcast_gpu_test.cpp)
     target_include_directories(subgroup_broadcast_gpu_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
@@ -438,6 +449,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
         tests/command_pool_regression_cases.cpp
         tests/divisor_pipeline_regression_cases.cpp
         tests/vertex_pipeline_cache_regression_cases.cpp
+        tests/core11_regression_cases.cpp
         tests/timeline_regression_cases.cpp
         tests/push_descriptor_regression_cases.cpp
         tests/mali_tiler_regression_cases.cpp

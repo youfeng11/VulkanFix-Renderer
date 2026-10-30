@@ -1,6 +1,7 @@
 #include "bind_memory2.h"
 #include "layer_manager.h"
 #include "driver_loader.h"
+#include "vk_pnext.h"
 
 REGISTER_LAYER_MODULE(BindMemory2Module);
 
@@ -37,6 +38,19 @@ bool BindMemory2Module::on_bind_buffer_memory2(
     if (!real_bind) {
         outResult = VK_ERROR_INITIALIZATION_FAILED;
         return true;
+    }
+
+    // Reject multi-device bindings before performing any partial binding.
+    for (uint32_t i = 0; i < bindInfoCount; ++i) {
+        const auto* group = vku::find_pnext<VkBindBufferMemoryDeviceGroupInfo>(
+            pBindInfos[i].pNext, VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO);
+        if (group != nullptr &&
+            (group->deviceIndexCount > 1 ||
+             (group->deviceIndexCount == 1 && group->pDeviceIndices != nullptr &&
+              group->pDeviceIndices[0] != 0))) {
+            outResult = VK_ERROR_FEATURE_NOT_PRESENT;
+            return true;
+        }
     }
 
     outResult = VK_SUCCESS;
@@ -78,6 +92,19 @@ bool BindMemory2Module::on_bind_image_memory2(
     if (!real_bind) {
         outResult = VK_ERROR_INITIALIZATION_FAILED;
         return true;
+    }
+
+    // Reject multi-device bindings before performing any partial binding.
+    for (uint32_t i = 0; i < bindInfoCount; ++i) {
+        const auto* group = vku::find_pnext<VkBindImageMemoryDeviceGroupInfo>(
+            pBindInfos[i].pNext, VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_DEVICE_GROUP_INFO);
+        if (group != nullptr &&
+            (group->deviceIndexCount > 1 || group->splitInstanceBindRegionCount > 0 ||
+             (group->deviceIndexCount == 1 && group->pDeviceIndices != nullptr &&
+              group->pDeviceIndices[0] != 0))) {
+            outResult = VK_ERROR_FEATURE_NOT_PRESENT;
+            return true;
+        }
     }
 
     outResult = VK_SUCCESS;

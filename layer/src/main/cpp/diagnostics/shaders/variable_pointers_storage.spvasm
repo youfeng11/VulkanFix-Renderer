@@ -1,0 +1,34 @@
+; VariablePointersStorageBuffer execution fixture: loads a StorageBuffer element
+; pointer through a Function-storage pointer.
+OpCapability Shader
+OpCapability VariablePointersStorageBuffer
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpName %main "main"
+OpName %buf "buf"
+OpDecorate %buf DescriptorSet 0
+OpDecorate %buf Binding 0
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %block Block
+OpDecorate %arr ArrayStride 4
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%uint_0 = OpConstant %uint 0
+%uint_4 = OpConstant %uint 4
+%arr = OpTypeRuntimeArray %uint
+%block = OpTypeStruct %arr
+%ptr_storage_block = OpTypePointer StorageBuffer %block
+%ptr_storage_uint = OpTypePointer StorageBuffer %uint
+%buf = OpVariable %ptr_storage_block StorageBuffer
+%ptr_func_storage = OpTypePointer Function %ptr_storage_uint
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%slot = OpVariable %ptr_func_storage Function
+%ac = OpAccessChain %ptr_storage_uint %buf %uint_0 %uint_0
+OpStore %slot %ac
+%loaded = OpLoad %ptr_storage_uint %slot
+OpStore %loaded %uint_4
+OpReturn
+OpFunctionEnd

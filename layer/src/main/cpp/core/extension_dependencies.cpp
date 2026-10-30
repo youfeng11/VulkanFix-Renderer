@@ -155,4 +155,22 @@ promoted_instance_extensions(uint32_t public_api,
       names.push_back(record.name);
   return names;
 }
+std::vector<const char *>
+vulkan11_device_extensions(uint32_t public_api,
+                           const ExtensionEnvironment &environment) {
+  std::vector<const char *> names;
+  if (public_api < VK_API_VERSION_1_1 ||
+      environment.device_api >= VK_API_VERSION_1_1) return names;
+  for (const auto &record : extension_records) {
+    if (record.instance || record.promoted_version != VK_API_VERSION_1_1 ||
+        !environment.available.count(record.name)) continue;
+    // Missing prerequisites for an optional native route must not prevent
+    // creation of a device that can use the layer's fallback instead.
+    auto candidate = names;
+    candidate.push_back(record.name);
+    auto plan = close_extension_dependencies(candidate, environment);
+    if (plan.result == VK_SUCCESS) names = std::move(plan.names);
+  }
+  return names;
+}
 } // namespace vkfix

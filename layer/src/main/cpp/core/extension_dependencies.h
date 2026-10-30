@@ -25,4 +25,7 @@ close_extension_dependencies(const std::vector<const char *> &requested,
 std::vector<const char *>
 promoted_instance_extensions(uint32_t public_api,
                              const ExtensionEnvironment &environment);
+std::vector<const char *>
+vulkan11_device_extensions(uint32_t public_api,
+                           const ExtensionEnvironment &environment);
 } // namespace vkfix

@@ -14,6 +14,8 @@
 #include "core/timeline_scheduler.h"
 #include "core/extension_dependencies.h"
 #include "core/native_instance_state.h"
+#include "core/shader_module_cache.h"
+#include "core/legacy_query_array.h"
 #include <chrono>
 #include <thread>
 #include <string.h>
@@ -180,7 +182,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateInstance(
         if (pCreateInfo->enabledLayerCount && pCreateInfo->ppEnabledLayerNames)
             enabledLayers.assign(pCreateInfo->ppEnabledLayerNames,
                                  pCreateInfo->ppEnabledLayerNames + pCreateInfo->enabledLayerCount);
-        vkfix::remember_native_instance(*pInstance, targetApi, query_real_instance_version(), dependencyPlan.names, enabledLayers);
+        vkfix::remember_native_instance(*pInstance, targetApi, query_real_instance_version(), dependencyPlan.names, enabledLayers, publicApi);
         set_last_instance(*pInstance);
         LOGI("Created VkInstance %p", *pInstance);
     }
@@ -666,6 +668,7 @@ static inline PFN_vkVoidFunction lookup_layer_proc(const char* pName, bool is_de
             MATCH(vkCmdDrawMultiIndexedEXT);
             MATCH(vkCmdBindIndexBuffer);
             MATCH(vkCmdPushConstants);
+            MATCH(vkCmdSetViewport);
             MATCH(vkCmdBeginQuery);
             MATCH(vkCmdEndQuery);
             MATCH(vkCmdBeginQueryIndexedEXT);
@@ -1261,7 +1264,10 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
     auto create = [&](VkDevice d, const VkShaderModuleCreateInfo* ci, const VkAllocationCallbacks* allocator, VkShaderModule* out) {
         VkResult result = real_fn(d, ci, allocator, out);
-        if (result == VK_SUCCESS && out) VertexStoreEmulator::get().shader(d, *out, ci);
+        if (result == VK_SUCCESS && out && *out) {
+            VertexStoreEmulator::get().shader(d, *out, ci);
+            vkfix::ShaderModuleCache::get().remember(d, *out, ci);
+        }
         return result;
     };
 
@@ -2365,6 +2371,14 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkEnumeratePhysicalDeviceGroupsKHR(
     return vkEnumeratePhysicalDeviceGroups(instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
 }
 
+// Physical device queries must use the instance that enumerated the handle.
+// A later instance may have different versions, extensions and dispatch routes.
+static void* physical_device_proc(VkPhysicalDevice physicalDevice, const char* name) {
+    auto instance = vkfix::native_instance_for_physical(physicalDevice);
+    if (!instance) instance = get_last_instance();
+    return get_real_proc(instance, VK_NULL_HANDLE, name);
+}
+
 // Physical Device Properties 2
 VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceFormatProperties2(
     VkPhysicalDevice physicalDevice,
@@ -2372,17 +2386,32 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceFormatProperties2(
     VkFormatProperties2* pFormatProperties
 ) {
     PFN_vkGetPhysicalDeviceFormatProperties2 real_fn =
-        (PFN_vkGetPhysicalDeviceFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFormatProperties2");
+        (PFN_vkGetPhysicalDeviceFormatProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceFormatProperties2");
     if (!real_fn) {
-        real_fn = (PFN_vkGetPhysicalDeviceFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFormatProperties2KHR");
+        real_fn = (PFN_vkGetPhysicalDeviceFormatProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceFormatProperties2KHR");
     }
     if (real_fn) {
         real_fn(physicalDevice, format, pFormatProperties);
+        if (pFormatProperties) {
+            auto real_fp = (PFN_vkGetPhysicalDeviceFormatProperties)
+                physical_device_proc(physicalDevice, "vkGetPhysicalDeviceFormatProperties");
+            if (real_fp) {
+                VkFormatProperties reference{};
+                real_fp(physicalDevice, format, &reference);
+                const auto &reported = pFormatProperties->formatProperties;
+                if (reported.linearTilingFeatures != reference.linearTilingFeatures ||
+                    reported.optimalTilingFeatures != reference.optimalTilingFeatures ||
+                    reported.bufferFeatures != reference.bufferFeatures) {
+                    LOGW("vkGetPhysicalDeviceFormatProperties2 mismatch repaired from legacy query");
+                    pFormatProperties->formatProperties = reference;
+                }
+            }
+        }
         return;
     }
     if (pFormatProperties) {
         PFN_vkGetPhysicalDeviceFormatProperties real_fp =
-            (PFN_vkGetPhysicalDeviceFormatProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFormatProperties");
+            (PFN_vkGetPhysicalDeviceFormatProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceFormatProperties");
         if (real_fp) {
             real_fp(physicalDevice, format, &pFormatProperties->formatProperties);
         }
@@ -2402,12 +2431,36 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties2(
     VkImageFormatProperties2* pImageFormatProperties
 ) {
     PFN_vkGetPhysicalDeviceImageFormatProperties2 real_fn =
-        (PFN_vkGetPhysicalDeviceImageFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceImageFormatProperties2");
+        (PFN_vkGetPhysicalDeviceImageFormatProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceImageFormatProperties2");
     if (!real_fn) {
-        real_fn = (PFN_vkGetPhysicalDeviceImageFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceImageFormatProperties2KHR");
+        real_fn = (PFN_vkGetPhysicalDeviceImageFormatProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceImageFormatProperties2KHR");
     }
     if (real_fn) {
-        return real_fn(physicalDevice, pImageFormatInfo, pImageFormatProperties);
+        const VkResult result = real_fn(physicalDevice, pImageFormatInfo, pImageFormatProperties);
+        if (result == VK_SUCCESS && pImageFormatInfo && pImageFormatProperties &&
+            pImageFormatInfo->pNext == nullptr) {
+            auto real_ifp = (PFN_vkGetPhysicalDeviceImageFormatProperties)
+                physical_device_proc(physicalDevice, "vkGetPhysicalDeviceImageFormatProperties");
+            if (real_ifp) {
+                VkImageFormatProperties reference{};
+                if (real_ifp(physicalDevice, pImageFormatInfo->format, pImageFormatInfo->type,
+                             pImageFormatInfo->tiling, pImageFormatInfo->usage,
+                             pImageFormatInfo->flags, &reference) == VK_SUCCESS) {
+                    const auto &reported = pImageFormatProperties->imageFormatProperties;
+                    if (reported.maxExtent.width != reference.maxExtent.width ||
+                        reported.maxExtent.height != reference.maxExtent.height ||
+                        reported.maxExtent.depth != reference.maxExtent.depth ||
+                        reported.maxMipLevels != reference.maxMipLevels ||
+                        reported.maxArrayLayers != reference.maxArrayLayers ||
+                        reported.sampleCounts != reference.sampleCounts ||
+                        reported.maxResourceSize != reference.maxResourceSize) {
+                        LOGW("vkGetPhysicalDeviceImageFormatProperties2 mismatch repaired from legacy query");
+                        pImageFormatProperties->imageFormatProperties = reference;
+                    }
+                }
+            }
+        }
+        return result;
     }
     if (!pImageFormatInfo || !pImageFormatProperties) return VK_ERROR_INITIALIZATION_FAILED;
 
@@ -2428,7 +2481,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkGetPhysicalDeviceImageFormatProperties2(
     }
 
     PFN_vkGetPhysicalDeviceImageFormatProperties real_ifp =
-        (PFN_vkGetPhysicalDeviceImageFormatProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceImageFormatProperties");
+        (PFN_vkGetPhysicalDeviceImageFormatProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceImageFormatProperties");
     if (real_ifp) {
         return real_ifp(
             physicalDevice,
@@ -2456,18 +2509,46 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2(
     VkQueueFamilyProperties2* pQueueFamilyProperties
 ) {
     PFN_vkGetPhysicalDeviceQueueFamilyProperties2 real_fn =
-        (PFN_vkGetPhysicalDeviceQueueFamilyProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceQueueFamilyProperties2");
+        (PFN_vkGetPhysicalDeviceQueueFamilyProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceQueueFamilyProperties2");
     if (!real_fn) {
-        real_fn = (PFN_vkGetPhysicalDeviceQueueFamilyProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceQueueFamilyProperties2KHR");
+        real_fn = (PFN_vkGetPhysicalDeviceQueueFamilyProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceQueueFamilyProperties2KHR");
     }
     if (real_fn) {
         real_fn(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+        if (pQueueFamilyPropertyCount && pQueueFamilyProperties &&
+            *pQueueFamilyPropertyCount > 0) {
+            auto real_qfp = (PFN_vkGetPhysicalDeviceQueueFamilyProperties)
+                physical_device_proc(physicalDevice, "vkGetPhysicalDeviceQueueFamilyProperties");
+            if (real_qfp) {
+                uint32_t reference_count = *pQueueFamilyPropertyCount;
+                std::vector<VkQueueFamilyProperties> reference(reference_count);
+                real_qfp(physicalDevice, &reference_count, reference.data());
+                if (reference_count == *pQueueFamilyPropertyCount) {
+                    bool same = true;
+                    for (uint32_t i = 0; same && i < reference_count; ++i) {
+                        const auto &reported = pQueueFamilyProperties[i].queueFamilyProperties;
+                        const auto &expected = reference[i];
+                        same = reported.queueFlags == expected.queueFlags &&
+                               reported.queueCount == expected.queueCount &&
+                               reported.timestampValidBits == expected.timestampValidBits &&
+                               reported.minImageTransferGranularity.width == expected.minImageTransferGranularity.width &&
+                               reported.minImageTransferGranularity.height == expected.minImageTransferGranularity.height &&
+                               reported.minImageTransferGranularity.depth == expected.minImageTransferGranularity.depth;
+                    }
+                    if (!same) {
+                        LOGW("vkGetPhysicalDeviceQueueFamilyProperties2 mismatch repaired from legacy query");
+                        for (uint32_t i = 0; i < reference_count; ++i)
+                            pQueueFamilyProperties[i].queueFamilyProperties = reference[i];
+                    }
+                }
+            }
+        }
         return;
     }
 
     if (!pQueueFamilyPropertyCount) return;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties real_qfp =
-        (PFN_vkGetPhysicalDeviceQueueFamilyProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceQueueFamilyProperties");
+        (PFN_vkGetPhysicalDeviceQueueFamilyProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceQueueFamilyProperties");
     if (!real_qfp) return;
 
     if (!pQueueFamilyProperties) {
@@ -2475,15 +2556,14 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2(
         return;
     }
 
-    uint32_t count = *pQueueFamilyPropertyCount;
-    std::vector<VkQueueFamilyProperties> nativeProps(count);
-    real_qfp(physicalDevice, &count, nativeProps.data());
-    for (uint32_t i = 0; i < count; ++i) {
-        pQueueFamilyProperties[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
-        pQueueFamilyProperties[i].pNext = nullptr;
-        pQueueFamilyProperties[i].queueFamilyProperties = nativeProps[i];
-    }
-    *pQueueFamilyPropertyCount = count;
+    vkfix::query_legacy_array<VkQueueFamilyProperties>(
+        pQueueFamilyPropertyCount, pQueueFamilyProperties,
+        [&](uint32_t* count, VkQueueFamilyProperties* values) {
+            real_qfp(physicalDevice, count, values);
+        },
+        [](VkQueueFamilyProperties2& output, const VkQueueFamilyProperties& payload) {
+            output.queueFamilyProperties = payload;
+        });
 }
 VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties2KHR(
     VkPhysicalDevice physicalDevice,
@@ -2498,17 +2578,38 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties2(
     VkPhysicalDeviceMemoryProperties2* pMemoryProperties
 ) {
     PFN_vkGetPhysicalDeviceMemoryProperties2 real_fn =
-        (PFN_vkGetPhysicalDeviceMemoryProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceMemoryProperties2");
+        (PFN_vkGetPhysicalDeviceMemoryProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceMemoryProperties2");
     if (!real_fn) {
-        real_fn = (PFN_vkGetPhysicalDeviceMemoryProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceMemoryProperties2KHR");
+        real_fn = (PFN_vkGetPhysicalDeviceMemoryProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceMemoryProperties2KHR");
     }
     if (real_fn) {
         real_fn(physicalDevice, pMemoryProperties);
+        if (pMemoryProperties) {
+            auto real_mp = (PFN_vkGetPhysicalDeviceMemoryProperties)
+                physical_device_proc(physicalDevice, "vkGetPhysicalDeviceMemoryProperties");
+            if (real_mp) {
+                VkPhysicalDeviceMemoryProperties reference{};
+                real_mp(physicalDevice, &reference);
+                const auto &reported = pMemoryProperties->memoryProperties;
+                bool same = reported.memoryTypeCount == reference.memoryTypeCount &&
+                            reported.memoryHeapCount == reference.memoryHeapCount;
+                for (uint32_t i = 0; same && i < reported.memoryTypeCount; ++i)
+                    same = reported.memoryTypes[i].propertyFlags == reference.memoryTypes[i].propertyFlags &&
+                           reported.memoryTypes[i].heapIndex == reference.memoryTypes[i].heapIndex;
+                for (uint32_t i = 0; same && i < reported.memoryHeapCount; ++i)
+                    same = reported.memoryHeaps[i].size == reference.memoryHeaps[i].size &&
+                           reported.memoryHeaps[i].flags == reference.memoryHeaps[i].flags;
+                if (!same) {
+                    LOGW("vkGetPhysicalDeviceMemoryProperties2 mismatch repaired from legacy query");
+                    pMemoryProperties->memoryProperties = reference;
+                }
+            }
+        }
         return;
     }
     if (pMemoryProperties) {
         PFN_vkGetPhysicalDeviceMemoryProperties real_mp =
-            (PFN_vkGetPhysicalDeviceMemoryProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceMemoryProperties");
+            (PFN_vkGetPhysicalDeviceMemoryProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceMemoryProperties");
         if (real_mp) {
             real_mp(physicalDevice, &pMemoryProperties->memoryProperties);
         }
@@ -2528,17 +2629,54 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceSparseImageFormatProperties2(
     VkSparseImageFormatProperties2* pProperties
 ) {
     PFN_vkGetPhysicalDeviceSparseImageFormatProperties2 real_fn =
-        (PFN_vkGetPhysicalDeviceSparseImageFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSparseImageFormatProperties2");
+        (PFN_vkGetPhysicalDeviceSparseImageFormatProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceSparseImageFormatProperties2");
     if (!real_fn) {
-        real_fn = (PFN_vkGetPhysicalDeviceSparseImageFormatProperties2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSparseImageFormatProperties2KHR");
+        real_fn = (PFN_vkGetPhysicalDeviceSparseImageFormatProperties2) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceSparseImageFormatProperties2KHR");
     }
     if (real_fn) {
+        const uint32_t capacity = pPropertyCount ? *pPropertyCount : 0;
         real_fn(physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+        if (!pFormatInfo || !pPropertyCount) return;
+        auto real_sfp = (PFN_vkGetPhysicalDeviceSparseImageFormatProperties)
+            physical_device_proc(physicalDevice, "vkGetPhysicalDeviceSparseImageFormatProperties");
+        if (!real_sfp) return;
+        if (!pProperties) {
+            uint32_t reference_count = 0;
+            real_sfp(physicalDevice, pFormatInfo->format, pFormatInfo->type, pFormatInfo->samples,
+                     pFormatInfo->usage, pFormatInfo->tiling, &reference_count, nullptr);
+            if (reference_count != *pPropertyCount) {
+                LOGW("vkGetPhysicalDeviceSparseImageFormatProperties2 count repaired from legacy query");
+                *pPropertyCount = reference_count;
+            }
+            return;
+        }
+        uint32_t reference_count = capacity;
+        if (reference_count == 0) return;
+        std::vector<VkSparseImageFormatProperties> reference(reference_count);
+        real_sfp(physicalDevice, pFormatInfo->format, pFormatInfo->type, pFormatInfo->samples,
+                 pFormatInfo->usage, pFormatInfo->tiling, &reference_count, reference.data());
+        const uint32_t reported_count = std::min(*pPropertyCount, capacity);
+        if (reference_count != reported_count) return;
+        bool same = true;
+        for (uint32_t i = 0; same && i < reference_count; ++i) {
+            const auto &reported = pProperties[i].properties;
+            const auto &expected = reference[i];
+            same = reported.aspectMask == expected.aspectMask &&
+                   reported.flags == expected.flags &&
+                   reported.imageGranularity.width == expected.imageGranularity.width &&
+                   reported.imageGranularity.height == expected.imageGranularity.height &&
+                   reported.imageGranularity.depth == expected.imageGranularity.depth;
+        }
+        if (!same) {
+            LOGW("vkGetPhysicalDeviceSparseImageFormatProperties2 mismatch repaired from legacy query");
+            for (uint32_t i = 0; i < reference_count; ++i)
+                pProperties[i].properties = reference[i];
+        }
         return;
     }
     if (!pFormatInfo || !pPropertyCount) return;
     PFN_vkGetPhysicalDeviceSparseImageFormatProperties real_sfp =
-        (PFN_vkGetPhysicalDeviceSparseImageFormatProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceSparseImageFormatProperties");
+        (PFN_vkGetPhysicalDeviceSparseImageFormatProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceSparseImageFormatProperties");
     if (!real_sfp) {
         *pPropertyCount = 0;
         return;
@@ -2547,15 +2685,16 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceSparseImageFormatProperties2(
         real_sfp(physicalDevice, pFormatInfo->format, pFormatInfo->type, pFormatInfo->samples, pFormatInfo->usage, pFormatInfo->tiling, pPropertyCount, nullptr);
         return;
     }
-    uint32_t count = *pPropertyCount;
-    std::vector<VkSparseImageFormatProperties> nativeProps(count);
-    real_sfp(physicalDevice, pFormatInfo->format, pFormatInfo->type, pFormatInfo->samples, pFormatInfo->usage, pFormatInfo->tiling, &count, nativeProps.data());
-    for (uint32_t i = 0; i < count; ++i) {
-        pProperties[i].sType = VK_STRUCTURE_TYPE_SPARSE_IMAGE_FORMAT_PROPERTIES_2;
-        pProperties[i].pNext = nullptr;
-        pProperties[i].properties = nativeProps[i];
-    }
-    *pPropertyCount = count;
+    vkfix::query_legacy_array<VkSparseImageFormatProperties>(
+        pPropertyCount, pProperties,
+        [&](uint32_t* count, VkSparseImageFormatProperties* values) {
+            real_sfp(physicalDevice, pFormatInfo->format, pFormatInfo->type,
+                     pFormatInfo->samples, pFormatInfo->usage, pFormatInfo->tiling,
+                     count, values);
+        },
+        [](VkSparseImageFormatProperties2& output, const VkSparseImageFormatProperties& payload) {
+            output.properties = payload;
+        });
 }
 VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
     VkPhysicalDevice physicalDevice,
@@ -2573,9 +2712,9 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceExternalBufferProperties(
     VkExternalBufferProperties* pExternalBufferProperties
 ) {
     PFN_vkGetPhysicalDeviceExternalBufferProperties real_fn =
-        (PFN_vkGetPhysicalDeviceExternalBufferProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalBufferProperties");
+        (PFN_vkGetPhysicalDeviceExternalBufferProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceExternalBufferProperties");
     if (!real_fn) {
-        real_fn = (PFN_vkGetPhysicalDeviceExternalBufferProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalBufferPropertiesKHR");
+        real_fn = (PFN_vkGetPhysicalDeviceExternalBufferProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceExternalBufferPropertiesKHR");
     }
     if (real_fn) {
         real_fn(physicalDevice, pExternalBufferInfo, pExternalBufferProperties);
@@ -2601,9 +2740,9 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceExternalFenceProperties(
     VkExternalFenceProperties* pExternalFenceProperties
 ) {
     PFN_vkGetPhysicalDeviceExternalFenceProperties real_fn =
-        (PFN_vkGetPhysicalDeviceExternalFenceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalFenceProperties");
+        (PFN_vkGetPhysicalDeviceExternalFenceProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceExternalFenceProperties");
     if (!real_fn) {
-        real_fn = (PFN_vkGetPhysicalDeviceExternalFenceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalFencePropertiesKHR");
+        real_fn = (PFN_vkGetPhysicalDeviceExternalFenceProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceExternalFencePropertiesKHR");
     }
     if (real_fn) {
         real_fn(physicalDevice, pExternalFenceInfo, pExternalFenceProperties);
@@ -2629,9 +2768,9 @@ VK_LAYER_EXPORT void VKAPI_CALL vkGetPhysicalDeviceExternalSemaphoreProperties(
     VkExternalSemaphoreProperties* pExternalSemaphoreProperties
 ) {
     PFN_vkGetPhysicalDeviceExternalSemaphoreProperties real_fn =
-        (PFN_vkGetPhysicalDeviceExternalSemaphoreProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalSemaphoreProperties");
+        (PFN_vkGetPhysicalDeviceExternalSemaphoreProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceExternalSemaphoreProperties");
     if (!real_fn) {
-        real_fn = (PFN_vkGetPhysicalDeviceExternalSemaphoreProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR");
+        real_fn = (PFN_vkGetPhysicalDeviceExternalSemaphoreProperties) physical_device_proc(physicalDevice, "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR");
     }
     if (real_fn) {
         real_fn(physicalDevice, pExternalSemaphoreInfo, pExternalSemaphoreProperties);
@@ -2893,6 +3032,7 @@ VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(VkDevice device, VkBu
 VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyShaderModule(
     VkDevice device, VkShaderModule module, const VkAllocationCallbacks *allocator) {
     VertexStoreEmulator::get().erase_shader(device, module);
+    vkfix::ShaderModuleCache::get().forget(device, module);
     auto real = (PFN_vkDestroyShaderModule)get_real_proc(get_last_instance(), device,
                                                          "vkDestroyShaderModule");
     if (real)

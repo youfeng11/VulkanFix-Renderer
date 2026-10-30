@@ -22,17 +22,7 @@ public:
         VkPhysicalDeviceProperties2* pProperties,
         void* pUserData) override;
 
-    void on_pre_get_features2(
-        VkPhysicalDevice physicalDevice,
-        VkPhysicalDeviceFeatures2* pFeatures,
-        void*& pUserData) override;
-
-    void on_post_get_features2(
-        VkPhysicalDevice physicalDevice,
-        VkPhysicalDeviceFeatures2* pFeatures,
-        void* pUserData) override;
-
-    void on_cmd_set_device_mask(
+    bool on_cmd_set_device_mask(
         VkCommandBuffer commandBuffer,
         uint32_t deviceMask) override;
 

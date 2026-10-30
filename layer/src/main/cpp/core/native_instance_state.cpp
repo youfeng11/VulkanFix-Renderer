@@ -12,9 +12,11 @@ std::map<VkPhysicalDevice, VkInstance> physical_instances;
 void remember_native_instance(VkInstance instance, uint32_t target_api,
                               uint32_t loader_api,
                               const std::vector<const char *> &extensions,
-                              const std::vector<const char *> &layers) {
+                              const std::vector<const char *> &layers,
+                              uint32_t public_api) {
   NativeInstanceState state;
   state.target_api = target_api ? target_api : VK_API_VERSION_1_0;
+  state.public_api = public_api ? public_api : state.target_api;
   state.instance_api = std::min(state.target_api, loader_api);
   for (auto name : extensions)
     state.enabled_extensions.insert(name);

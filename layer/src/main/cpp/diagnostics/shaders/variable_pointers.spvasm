@@ -1,0 +1,40 @@
+; VariablePointers execution fixture: writes through a pointer loaded from a
+; Function-storage pointer-to-pointer.
+OpCapability Shader
+OpCapability VariablePointers
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpName %main "main"
+OpName %buf "buf"
+OpDecorate %buf DescriptorSet 0
+OpDecorate %buf Binding 0
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %block Block
+OpDecorate %arr ArrayStride 4
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%uint_0 = OpConstant %uint 0
+%uint_1 = OpConstant %uint 1
+%uint_4 = OpConstant %uint 4
+%arr = OpTypeRuntimeArray %uint
+%block = OpTypeStruct %arr
+%ptr_storage_block = OpTypePointer StorageBuffer %block
+%ptr_storage_uint = OpTypePointer StorageBuffer %uint
+%buf = OpVariable %ptr_storage_block StorageBuffer
+%ptr_func_uint = OpTypePointer Function %uint
+%ptr_func_ptr = OpTypePointer Function %ptr_func_uint
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%v = OpVariable %ptr_func_uint Function
+%pp = OpVariable %ptr_func_ptr Function
+OpStore %v %uint_1
+OpStore %pp %v
+%loaded = OpLoad %ptr_func_uint %pp
+OpStore %loaded %uint_4
+%value = OpLoad %uint %loaded
+%ac = OpAccessChain %ptr_storage_uint %buf %uint_0 %uint_0
+OpStore %ac %value
+OpReturn
+OpFunctionEnd

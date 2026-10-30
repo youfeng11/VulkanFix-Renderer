@@ -134,6 +134,7 @@ struct DeviceBypassFlags {
     bool bypass_device_group = false;
     bool bypass_bda = false;
     bool bypass_host_query_reset = false;
+    bool bypass_negative_viewport = true;
 };
 
 class LayerManager {
@@ -372,6 +373,12 @@ public:
         VkCommandBuffer commandBuffer,
         VkPipelineBindPoint pipelineBindPoint,
         VkPipeline pipeline);
+
+    void dispatch_cmd_set_viewport(
+        VkCommandBuffer commandBuffer,
+        uint32_t firstViewport,
+        uint32_t viewportCount,
+        const VkViewport* pViewports);
 
     void dispatch_cmd_bind_vertex_buffers(
         VkCommandBuffer commandBuffer,
@@ -917,6 +924,8 @@ private:
     IVulkanLayerModule* m_sync2_mod = nullptr;
     IVulkanLayerModule* m_push_desc_mod = nullptr;
     IVulkanLayerModule* m_fill_mode_mod = nullptr;
+    IVulkanLayerModule* m_negative_viewport_mod = nullptr;
+    IVulkanLayerModule* m_dispatch_base_mod = nullptr;
     IVulkanLayerModule* m_multi_draw_indirect_mod = nullptr;
     IVulkanLayerModule* m_draw_indirect_first_instance_mod = nullptr;
     IVulkanLayerModule* m_sampler_anisotropy_mod = nullptr;

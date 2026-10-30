@@ -22,7 +22,7 @@ public:
         VkPhysicalDeviceProperties2* pProperties,
         void* pUserData) override;
 
-    void on_trim_command_pool(
+    bool on_trim_command_pool(
         VkDevice device,
         VkCommandPool commandPool,
         VkCommandPoolTrimFlags flags) override;

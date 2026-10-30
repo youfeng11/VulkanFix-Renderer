@@ -2,6 +2,8 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
+#include "legacy_query_array.h"
+#include "memory_requirements_repair.h"
 #include <vector>
 
 REGISTER_LAYER_MODULE(GetMemoryRequirements2Module);
@@ -42,6 +44,8 @@ bool GetMemoryRequirements2Module::on_get_buffer_memory_requirements2(
     }
     if (real_fn) {
         real_fn(device, pInfo, pMemoryRequirements);
+        if (pInfo && pInfo->pNext == nullptr)
+            vkfix::repair_buffer_memory_requirements(device, pInfo->buffer, pMemoryRequirements);
         return true;
     }
 
@@ -76,6 +80,8 @@ bool GetMemoryRequirements2Module::on_get_image_memory_requirements2(
     }
     if (real_fn) {
         real_fn(device, pInfo, pMemoryRequirements);
+        if (pInfo && pInfo->pNext == nullptr)
+            vkfix::repair_image_memory_requirements(device, pInfo->image, pMemoryRequirements);
         return true;
     }
 
@@ -119,19 +125,15 @@ bool GetMemoryRequirements2Module::on_get_image_sparse_memory_requirements2(
     PFN_vkGetImageSparseMemoryRequirements real_smr =
         (PFN_vkGetImageSparseMemoryRequirements) get_real_proc(get_last_instance(), device, "vkGetImageSparseMemoryRequirements");
     if (real_smr) {
-        if (!pSparseMemoryRequirements) {
-            real_smr(device, pInfo->image, pSparseMemoryRequirementCount, nullptr);
-        } else {
-            uint32_t count = *pSparseMemoryRequirementCount;
-            std::vector<VkSparseImageMemoryRequirements> nativeReqs(count);
-            real_smr(device, pInfo->image, &count, nativeReqs.data());
-            for (uint32_t i = 0; i < count; ++i) {
-                pSparseMemoryRequirements[i].sType = VK_STRUCTURE_TYPE_SPARSE_IMAGE_MEMORY_REQUIREMENTS_2;
-                pSparseMemoryRequirements[i].pNext = nullptr;
-                pSparseMemoryRequirements[i].memoryRequirements = nativeReqs[i];
-            }
-            *pSparseMemoryRequirementCount = count;
-        }
+        vkfix::query_legacy_array<VkSparseImageMemoryRequirements>(
+            pSparseMemoryRequirementCount, pSparseMemoryRequirements,
+            [&](uint32_t* count, VkSparseImageMemoryRequirements* values) {
+                real_smr(device, pInfo->image, count, values);
+            },
+            [](VkSparseImageMemoryRequirements2& output,
+               const VkSparseImageMemoryRequirements& payload) {
+                output.memoryRequirements = payload;
+            });
         return true;
     }
 

@@ -100,6 +100,12 @@ public:
         const VkGraphicsPipelineCreateInfo* pCreateInfos,
         const VkPipeline* pPipelines) {}
 
+    virtual void on_post_create_compute_pipelines(
+        VkDevice device,
+        uint32_t count,
+        const VkComputePipelineCreateInfo* pCreateInfos,
+        const VkPipeline* pPipelines) {}
+
     virtual void on_destroy_pipeline(
         VkDevice device,
         VkPipeline pipeline) {}
@@ -161,6 +167,12 @@ public:
         VkCommandBuffer commandBuffer,
         VkPipelineBindPoint pipelineBindPoint,
         VkPipeline pipeline) {}
+
+    virtual bool on_cmd_set_viewport(
+        VkCommandBuffer commandBuffer,
+        uint32_t firstViewport,
+        uint32_t viewportCount,
+        const VkViewport* pViewports) { return false; }
 
     virtual void on_cmd_bind_vertex_buffers(
         VkCommandBuffer commandBuffer,
@@ -492,14 +504,14 @@ public:
         VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties,
         VkResult& outResult) { return false; }
 
-    virtual void on_trim_command_pool(
+    virtual bool on_trim_command_pool(
         VkDevice device,
         VkCommandPool commandPool,
-        VkCommandPoolTrimFlags flags) {}
+        VkCommandPoolTrimFlags flags) { return false; }
 
-    virtual void on_cmd_set_device_mask(
+    virtual bool on_cmd_set_device_mask(
         VkCommandBuffer commandBuffer,
-        uint32_t deviceMask) {}
+        uint32_t deviceMask) { return false; }
 
     virtual bool on_get_device_group_peer_memory_features(
         VkDevice device,

@@ -74,9 +74,8 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetStencilWriteMask(VkCommandBuffer command
 
 VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetViewport(VkCommandBuffer commandBuffer, uint32_t firstViewport, uint32_t viewportCount, const VkViewport* pViewports) {
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
-    auto device = LayerManager::get().get_device_for_cmd(commandBuffer);
-    auto fn = (PFN_vkCmdSetViewport)get_real_proc(get_last_instance(), device, "vkCmdSetViewport");
-    if (fn) fn(commandBuffer, firstViewport, viewportCount, pViewports);
+    LayerManager::get().dispatch_cmd_set_viewport(
+        commandBuffer, firstViewport, viewportCount, pViewports);
 }
 
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateBufferView(VkDevice device, const VkBufferViewCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkBufferView* pView) {

@@ -2,6 +2,7 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
+#include "legacy_query_array.h"
 #include <algorithm>
 
 REGISTER_LAYER_MODULE(DeviceGroupModule);
@@ -17,22 +18,10 @@ void DeviceGroupModule::on_enumerate_device_extensions(
 ) {
     ExtensionModuleBase::on_enumerate_device_extensions(physicalDevice, extensions);
 
-    if (!is_phys_device_native(physicalDevice)) {
-        if (!vku::has_extension(extensions, VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME)) {
-            VkExtensionProperties prop{};
-            memset(&prop, 0, sizeof(prop));
-            strncpy(prop.extensionName, VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
-            prop.specVersion = VK_KHR_DEVICE_GROUP_CREATION_SPEC_VERSION;
-            extensions.push_back(prop);
-        }
-        if (!vku::has_extension(extensions, VK_KHR_MULTIVIEW_EXTENSION_NAME)) {
-            VkExtensionProperties prop{};
-            memset(&prop, 0, sizeof(prop));
-            strncpy(prop.extensionName, VK_KHR_MULTIVIEW_EXTENSION_NAME, VK_MAX_EXTENSION_NAME_SIZE - 1);
-            prop.specVersion = VK_KHR_MULTIVIEW_SPEC_VERSION;
-            extensions.push_back(prop);
-        }
-    }
+    // device_group_creation is an instance extension. Multiview is an
+    // independent native feature; singleton groups do not emulate its shaders
+    // or layered render passes and must not manufacture that capability.
+
 }
 
 void DeviceGroupModule::on_pre_create_device_custom(
@@ -42,56 +31,24 @@ void DeviceGroupModule::on_pre_create_device_custom(
     std::vector<const char*>& enabledExtensions,
     void*& pUserData
 ) {
-    for (auto it = enabledExtensions.begin(); it != enabledExtensions.end();) {
-        if (strcmp(*it, VK_KHR_DEVICE_GROUP_CREATION_EXTENSION_NAME) == 0 ||
-            strcmp(*it, VK_KHR_MULTIVIEW_EXTENSION_NAME) == 0) {
-            it = enabledExtensions.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    if (pCreateInfo) {
+    if (pCreateInfo)
         vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_DEVICE_GROUP_DEVICE_CREATE_INFO);
-        vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES);
-    }
+    // Preserve native multiview's extension and feature enablement even when
+    // device_group itself is emulated; the two capabilities are independent.
+
 }
 
 // The promotion bridge queries real limits; no synthetic multiview or allocation limits.
 void DeviceGroupModule::on_pre_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2*, void*& data) { data = nullptr; }
 void DeviceGroupModule::on_post_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2*, void*) {}
 
-void DeviceGroupModule::on_pre_get_features2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceFeatures2* pFeatures,
-    void*& pUserData
-) {
-    pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pFeatures) return;
 
-    pUserData = vku::unlink_pnext(pFeatures->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES);
-}
-
-void DeviceGroupModule::on_post_get_features2(
-    VkPhysicalDevice physicalDevice,
-    VkPhysicalDeviceFeatures2* pFeatures,
-    void* pUserData
-) {
-    if (!pFeatures || !pUserData) return;
-
-    auto* f = reinterpret_cast<VkPhysicalDeviceMultiviewFeatures*>(pUserData);
-    f->multiview = VK_TRUE;
-    f->multiviewGeometryShader = VK_FALSE;
-    f->multiviewTessellationShader = VK_FALSE;
-    vku::relink_pnext(pFeatures->pNext, pUserData);
-}
-
-void DeviceGroupModule::on_cmd_set_device_mask(
+bool DeviceGroupModule::on_cmd_set_device_mask(
     VkCommandBuffer commandBuffer,
     uint32_t deviceMask
 ) {
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
-    if (is_device_native(device)) return;
+    if (is_device_native(device)) return false;
 
     PFN_vkCmdSetDeviceMask real_fn =
         (PFN_vkCmdSetDeviceMask) get_real_proc(get_last_instance(), device, "vkCmdSetDeviceMask");
@@ -101,6 +58,8 @@ void DeviceGroupModule::on_cmd_set_device_mask(
     if (real_fn) {
         real_fn(commandBuffer, deviceMask);
     }
+    // Singleton fallback: the only valid mask is 1, already implicit in 1.0.
+    return true;
 }
 
 bool DeviceGroupModule::on_get_device_group_peer_memory_features(
@@ -185,30 +144,7 @@ bool DeviceGroupModule::on_enumerate_physical_device_groups(
         return true;
     }
 
-    uint32_t physCount = 0;
-    real_epd(inst, &physCount, nullptr);
-    if (!pPhysicalDeviceGroupProperties) {
-        *pPhysicalDeviceGroupCount = physCount;
-        outResult = VK_SUCCESS;
-        return true;
-    }
-
-    uint32_t toFill = std::min(*pPhysicalDeviceGroupCount, physCount);
-    std::vector<VkPhysicalDevice> phys(physCount);
-    real_epd(inst, &physCount, phys.data());
-
-    for (uint32_t i = 0; i < toFill; ++i) {
-        auto& group = pPhysicalDeviceGroupProperties[i];
-        group.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GROUP_PROPERTIES;
-        group.pNext = nullptr;
-        group.physicalDeviceCount = 1;
-        group.physicalDevices[0] = phys[i];
-        for (uint32_t j = 1; j < VK_MAX_DEVICE_GROUP_SIZE; ++j) {
-            group.physicalDevices[j] = VK_NULL_HANDLE;
-        }
-        group.subsetAllocation = VK_FALSE;
-    }
-    *pPhysicalDeviceGroupCount = toFill;
-    outResult = (toFill < physCount) ? VK_INCOMPLETE : VK_SUCCESS;
+    outResult = vkfix::enumerate_singleton_device_groups(
+        inst, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties, real_epd);
     return true;
 }

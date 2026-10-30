@@ -1,4 +1,4 @@
-﻿#ifndef SHADER_REWRITER_H
+#ifndef SHADER_REWRITER_H
 #define SHADER_REWRITER_H
 
 #include <atomic>
@@ -44,6 +44,25 @@ public:
     // Rewrites `code` in place when a validated downgrade is possible.
     // Returns true when `code` was modified.
     bool rewrite(std::vector<uint32_t>& code, uint32_t targetVersion);
+
+    // Inserts gl_Position.y = -gl_Position.y before every direct store to the
+    // Position builtin. Used only by the negative-viewport fallback.
+    bool flip_position_y(std::vector<uint32_t>& code);
+
+    // Adds the dispatch-base offset to gl_GlobalInvocationID and
+    // gl_WorkGroupID loads. Used only by the vkCmdDispatchBase fallback.
+    bool offset_invocation_ids(std::vector<uint32_t>& code, uint32_t base_x,
+                               uint32_t base_y, uint32_t base_z);
+
+    // True when the module declares GlobalInvocationId or WorkGroupId; used to
+    // distinguish "no IDs used" from "IDs used in an unsupported shape".
+    static bool uses_invocation_ids(const std::vector<uint32_t>& code);
+
+    // True when the module writes gl_ViewportIndex.
+    static bool uses_viewport_index(const std::vector<uint32_t>& code);
+
+    // When every store to gl_ViewportIndex writes the same constant, returns it.
+    static bool constant_viewport_index(const std::vector<uint32_t>& code, uint32_t& index);
 
     // Maximum SPIR-V version implied by a Vulkan apiVersion.
     static uint32_t api_version_to_spirv(uint32_t apiVersion);

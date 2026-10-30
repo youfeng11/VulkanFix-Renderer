@@ -72,23 +72,17 @@ bool MaintenanceModule::on_get_descriptor_set_layout_support(
         return true;
     }
 
-    if (pSupport) {
-        pSupport->supported = VK_TRUE;
-        auto* varSupport = vku::find_pnext_mut<VkDescriptorSetVariableDescriptorCountLayoutSupport>(
-            pSupport->pNext, VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_LAYOUT_SUPPORT);
-        if (varSupport) {
-            varSupport->maxVariableDescriptorCount = 1024;
-        }
-    }
-    return true;
+    // The central fallback tests actual native layout creation. Do not invent
+    // support (or a variable-descriptor limit) when maintenance3 is absent.
+    return false;
 }
 
-void MaintenanceModule::on_trim_command_pool(
+bool MaintenanceModule::on_trim_command_pool(
     VkDevice device,
     VkCommandPool commandPool,
     VkCommandPoolTrimFlags flags
 ) {
-    if (is_device_native(device)) return;
+    if (is_device_native(device)) return false;
 
     PFN_vkTrimCommandPool real_fn =
         (PFN_vkTrimCommandPool) get_real_proc(get_last_instance(), device, "vkTrimCommandPool");
@@ -98,4 +92,6 @@ void MaintenanceModule::on_trim_command_pool(
     if (real_fn) {
         real_fn(device, commandPool, flags);
     }
+    // Trimming is permitted to be a no-op; it must not reset any buffers.
+    return true;
 }

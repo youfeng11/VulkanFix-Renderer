@@ -1,0 +1,8 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) buffer Out { uint values[4]; } outData;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    atomicAdd(outData.values[index], 1u);
+}

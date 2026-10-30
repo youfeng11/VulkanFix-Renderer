@@ -24,6 +24,8 @@ void* divisor_pipeline_mock_proc(const char* name);
 void run_divisor_pipeline_regressions(void (*check)(bool, const char*));
 void* vertex_pipeline_cache_mock_proc(const char* name);
 void run_vertex_pipeline_cache_regressions(void (*check)(bool, const char*));
+void* core11_mock_proc(const char* name);
+void run_core11_regressions(void (*check)(bool, const char*));
 
 // Replace only the driver boundary; exercise the actual modules and manager.
 static bool native_atomics = false;
@@ -97,6 +99,7 @@ PFN_vkGetDeviceProcAddr get_real_device_proc_addr() {
     return nullptr;
 }
 void *get_real_proc(VkInstance, VkDevice, const char *name) {
+    if (auto mock = core11_mock_proc(name)) return mock;
     if (auto mock = device_routing_mock_proc(name)) return mock;
     if (auto mock = command_pool_mock_proc(name)) return mock;
     if (auto mock = divisor_pipeline_mock_proc(name)) return mock;
@@ -462,6 +465,7 @@ int main() {
     run_command_pool_regressions(check);
     run_divisor_pipeline_regressions(check);
     run_vertex_pipeline_cache_regressions(check);
+    run_core11_regressions(check);
     const auto phys = (VkPhysicalDevice)(uintptr_t)0x100;
     const auto device = (VkDevice)(uintptr_t)0x1000;
     test_atomics(phys);
