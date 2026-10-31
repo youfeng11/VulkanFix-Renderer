@@ -45,7 +45,7 @@ inline VkResult enumerate_singleton_device_groups(
     for (uint32_t i = 0; i < written; ++i) {
         groups[i].physicalDeviceCount = 1;
         std::fill(std::begin(groups[i].physicalDevices),
-                  std::end(groups[i].physicalDevices), VK_NULL_HANDLE);
+                  std::end(groups[i].physicalDevices), VkPhysicalDevice{});
         groups[i].physicalDevices[0] = devices[i];
         groups[i].subsetAllocation = VK_FALSE;
     }

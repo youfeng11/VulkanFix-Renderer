@@ -30,9 +30,8 @@ private:
     };
     struct Hash {
         size_t operator()(const Key &key) const {
-            size_t h = std::hash<uintptr_t>()(reinterpret_cast<uintptr_t>(key.device));
-            h ^= std::hash<uintptr_t>()(reinterpret_cast<uintptr_t>(key.module)) +
-                 0x9e3779b9 + (h << 6) + (h >> 2);
+            size_t h = std::hash<VkDevice>()(key.device);
+            h ^= std::hash<VkShaderModule>()(key.module) + 0x9e3779b9 + (h << 6) + (h >> 2);
             return h;
         }
     };
