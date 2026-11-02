@@ -1,0 +1,74 @@
+OpCapability Shader
+
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %Block Block
+OpDecorate %arrayLength SpecId 7
+
+OpMemberDecorate %Block 0 Offset 0
+OpMemberDecorate %Block 1 Offset 4
+OpMemberDecorate %Block 2 Offset 8
+OpMemberDecorate %Block 3 Offset 12
+OpDecorate %ubo DescriptorSet 0
+OpDecorate %ubo Binding 0
+OpDecorate %a DescriptorSet 0
+OpDecorate %a Binding 1
+OpDecorate %b DescriptorSet 0
+OpDecorate %b Binding 2
+OpDecorate %array DescriptorSet 0
+OpDecorate %array Binding 3
+OpDecorate %a Aliased
+OpDecorate %b Aliased
+OpDecorate %array Aliased
+%void = OpTypeVoid
+%uint = OpTypeInt 32 0
+%Block = OpTypeStruct %uint %uint %uint %uint
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%two = OpConstant %uint 2
+%three = OpConstant %uint 3
+%device = OpConstant %uint 1
+%ptrUBlock = OpTypePointer Uniform %Block
+%ptrU = OpTypePointer Uniform %uint
+%ptrSBlock = OpTypePointer StorageBuffer %Block
+%ptrS = OpTypePointer StorageBuffer %uint
+%arrayLength = OpSpecConstant %uint 2
+%lastIndex = OpSpecConstantOp %uint ISub %arrayLength %one
+%Array = OpTypeArray %Block %arrayLength
+%ptrArray = OpTypePointer StorageBuffer %Array
+%fn = OpTypeFunction %void
+%helperFn = OpTypeFunction %void %Block
+%ubo = OpVariable %ptrUBlock Uniform
+%a = OpVariable %ptrSBlock StorageBuffer
+%b = OpVariable %ptrSBlock StorageBuffer
+%array = OpVariable %ptrArray StorageBuffer
+%helper = OpFunction %void None %helperFn
+%value = OpFunctionParameter %Block
+%helperLabel = OpLabel
+OpStore %a %value
+OpReturn
+OpFunctionEnd
+%main = OpFunction %void None %fn
+%label = OpLabel
+%u = OpLoad %Block %ubo
+%oldB = OpLoad %Block %b
+%call = OpFunctionCall %void %helper %u
+OpCopyMemory %b %ubo Volatile|Aligned|Nontemporal 16
+%whole = OpLoad %Array %array
+%lastBlock = OpAccessChain %ptrSBlock %array %lastIndex
+%lastField = OpAccessChain %ptrS %lastBlock %zero
+OpStore %lastField %zero
+OpStore %array %whole
+%arrayA = OpAccessChain %ptrSBlock %array %zero
+%arrayB = OpAccessChain %ptrSBlock %array %one
+%fieldA = OpAccessChain %ptrS %arrayA %two
+%oldB3 = OpCompositeExtract %uint %oldB 3
+%old = OpAtomicIAdd %uint %fieldA %device %zero %oldB3
+%uField1 = OpAccessChain %ptrU %ubo %one
+%u1 = OpLoad %uint %uField1
+%double = OpIAdd %uint %u1 %u1
+%fieldB = OpAccessChain %ptrS %arrayB %one
+OpStore %fieldB %double
+OpReturn
+OpFunctionEnd

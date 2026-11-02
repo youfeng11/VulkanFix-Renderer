@@ -2,6 +2,7 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
+#include "native_instance_state.h"
 #include <cstring>
 #include <algorithm>
 #include <inttypes.h>
@@ -36,8 +37,10 @@ bool Vulkan11CoreModule::is_phys_device_native(VkPhysicalDevice physDev) {
     }
 
     uint32_t realApiVer = VK_API_VERSION_1_0;
+    auto instance=vkfix::native_instance_for_physical(physDev);
+    if (!instance) instance=get_last_instance();
     PFN_vkGetPhysicalDeviceProperties real_fn =
-        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(instance, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
     if (real_fn) {
         VkPhysicalDeviceProperties props{};
         real_fn(physDev, &props);
@@ -59,8 +62,10 @@ uint32_t Vulkan11CoreModule::get_phys_real_api_version(VkPhysicalDevice physDev)
     if (it != m_phys_real_api_version.end()) {
         return it->second;
     }
+    auto instance=vkfix::native_instance_for_physical(physDev);
+    if (!instance) instance=get_last_instance();
     PFN_vkGetPhysicalDeviceProperties real_props =
-        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(instance, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
     if (real_props) {
         VkPhysicalDeviceProperties props{};
         real_props(physDev, &props);
@@ -112,9 +117,28 @@ void Vulkan11CoreModule::on_get_properties(
 
 // Native properties and aggregate conversion are owned by PromotedPropertyQuery.
 void Vulkan11CoreModule::on_pre_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2*, void*& data) { data = nullptr; }
-void Vulkan11CoreModule::on_post_get_properties2(VkPhysicalDevice, VkPhysicalDeviceProperties2* properties, void*) {
+void Vulkan11CoreModule::on_post_get_properties2(VkPhysicalDevice physical, VkPhysicalDeviceProperties2* properties, void*) {
     if (properties && claim_vulkan_1_2() && properties->properties.apiVersion < VK_API_VERSION_1_1)
         properties->properties.apiVersion = VK_API_VERSION_1_1;
+    if (!properties || get_phys_real_api_version(physical)>=VK_API_VERSION_1_1) return;
+    auto subgroup=vku::find_pnext_mut<VkPhysicalDeviceSubgroupProperties>(properties->pNext,
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES);
+    if (!subgroup) return;
+    subgroup->subgroupSize=1;
+    subgroup->supportedOperations=VK_SUBGROUP_FEATURE_BASIC_BIT;
+    subgroup->supportedStages=0;
+    subgroup->quadOperationsInAllStages=VK_FALSE;
+    auto instance=vkfix::native_instance_for_physical(physical);
+    if (!instance) instance=get_last_instance();
+    auto families=(PFN_vkGetPhysicalDeviceQueueFamilyProperties)get_real_proc(instance,VK_NULL_HANDLE,
+        "vkGetPhysicalDeviceQueueFamilyProperties");
+    if (!families) return;
+    uint32_t count=0; families(physical,&count,nullptr);
+    std::vector<VkQueueFamilyProperties> queues(count);
+    if (count) families(physical,&count,queues.data());
+    for (const auto& queue:queues) if (queue.queueCount && (queue.queueFlags&VK_QUEUE_COMPUTE_BIT)) {
+        subgroup->supportedStages=VK_SHADER_STAGE_COMPUTE_BIT; break;
+    }
 }
 
 // Aggregate feature queries and device-input ownership are centralized in

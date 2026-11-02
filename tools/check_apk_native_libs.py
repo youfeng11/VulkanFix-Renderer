@@ -21,7 +21,9 @@ def check_apk(path, readelf, required_abis, check_16k=False, require_driver_prob
                 continue
             libraries += 1
             payloads.setdefault(parts[1], set()).add(parts[2])
-            if parts[2] in ('libdriver_post_fault_driver.so', 'libdriver_trust_push_fixture.so'):
+            if parts[2] in ('libdriver_post_fault_driver.so', 'libdriver_trust_push_fixture.so',
+                            'libdispatch_base_test_driver.so', 'libcore11_query_driver.so',
+                            'libstorage_buffer_test_driver.so'):
                 failures.append(f'{entry.filename}: test-only forwarding driver must not be packaged')
             if parts[2] == 'libvulkanfix.so':
                 renderer_abis.add(parts[1])

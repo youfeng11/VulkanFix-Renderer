@@ -407,15 +407,50 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(timeline_gpu_test PRIVATE vulkan_fix Vulkan::Headers ${LOG_LIB} vulkan dl)
     add_executable(subgroup_broadcast_test EXCLUDE_FROM_ALL
-        tests/subgroup_broadcast_test.cpp shader/subgroup_broadcast_lowering.cpp shader/shader_rewriter.cpp)
+        tests/subgroup_broadcast_test.cpp shader/subgroup_broadcast_lowering.cpp shader/shader_rewriter.cpp shader/storage_buffer_lowering.cpp)
     target_include_directories(subgroup_broadcast_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
-    target_link_libraries(subgroup_broadcast_test PRIVATE Vulkan::Headers SPIRV-Tools-static ${LOG_LIB})
+    target_link_libraries(subgroup_broadcast_test PRIVATE Vulkan::Headers SPIRV-Tools-opt ${LOG_LIB})
+    add_executable(subgroup_basic_test EXCLUDE_FROM_ALL tests/subgroup_basic_test.cpp
+        shader/subgroup_basic_lowering.cpp shader/shader_rewriter.cpp shader/storage_buffer_lowering.cpp)
+    target_include_directories(subgroup_basic_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(subgroup_basic_test PRIVATE Vulkan::Headers
+        ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
+    vkfix_sanitize_test(subgroup_basic_test)
+    add_executable(subgroup_basic_gpu_test EXCLUDE_FROM_ALL tests/subgroup_basic_gpu_test.cpp)
+    target_include_directories(subgroup_basic_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(subgroup_basic_gpu_test PRIVATE Vulkan::Headers SPIRV-Tools-static dl)
     add_executable(viewport_rewrite_test EXCLUDE_FROM_ALL
-        tests/viewport_rewrite_test.cpp shader/shader_rewriter.cpp)
+        tests/viewport_rewrite_test.cpp shader/shader_rewriter.cpp shader/dispatch_base_lowering.cpp shader/position_y_lowering.cpp shader/storage_buffer_lowering.cpp)
     target_include_directories(viewport_rewrite_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
-    target_link_libraries(viewport_rewrite_test PRIVATE Vulkan::Headers SPIRV-Tools-static ${LOG_LIB})
+    target_link_libraries(viewport_rewrite_test PRIVATE Vulkan::Headers SPIRV-Tools-opt ${LOG_LIB})
+    add_executable(dispatch_base_gpu_test EXCLUDE_FROM_ALL tests/dispatch_base_gpu_test.cpp)
+    add_executable(storage_buffer_lowering_test EXCLUDE_FROM_ALL
+        tests/storage_buffer_lowering_test.cpp shader/storage_buffer_lowering.cpp shader/shader_rewriter.cpp
+        shader/specialize_constants.cpp shader/constant_input_lowering.cpp
+        core/specialized_shader_stages.cpp core/shader_module_cache.cpp)
+    target_include_directories(storage_buffer_lowering_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(storage_buffer_lowering_test PRIVATE Vulkan::Headers
+        ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
+    vkfix_sanitize_test(storage_buffer_lowering_test)
+    add_executable(constant_input_test EXCLUDE_FROM_ALL tests/constant_input_test.cpp
+        shader/constant_input_lowering.cpp shader/shader_rewriter.cpp shader/storage_buffer_lowering.cpp)
+    target_include_directories(constant_input_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(constant_input_test PRIVATE Vulkan::Headers
+        ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
+    vkfix_sanitize_test(constant_input_test)
+    add_library(storage_buffer_test_driver SHARED EXCLUDE_FROM_ALL tests/storage_buffer_test_driver.cpp)
+    target_link_libraries(storage_buffer_test_driver PRIVATE Vulkan::Headers dl)
+    target_link_options(storage_buffer_test_driver PRIVATE "-Wl,-Bsymbolic-functions")
+    add_executable(storage_buffer_gpu_test EXCLUDE_FROM_ALL tests/storage_buffer_gpu_test.cpp)
+    target_include_directories(storage_buffer_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(storage_buffer_gpu_test PRIVATE Vulkan::Headers SPIRV-Tools-static dl)
+    target_include_directories(dispatch_base_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(dispatch_base_gpu_test PRIVATE Vulkan::Headers SPIRV-Tools-static dl)
+    add_library(dispatch_base_test_driver SHARED EXCLUDE_FROM_ALL tests/dispatch_base_test_driver.cpp)
+    target_link_libraries(dispatch_base_test_driver PRIVATE Vulkan::Headers dl)
+    target_link_options(dispatch_base_test_driver PRIVATE "-Wl,-Bsymbolic-functions")
     add_executable(subgroup_broadcast_gpu_test EXCLUDE_FROM_ALL tests/subgroup_broadcast_gpu_test.cpp)
     target_include_directories(subgroup_broadcast_gpu_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
@@ -450,6 +485,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
         tests/divisor_pipeline_regression_cases.cpp
         tests/vertex_pipeline_cache_regression_cases.cpp
         tests/core11_regression_cases.cpp
+        tests/core11_pipeline_lifetime_cases.cpp
         tests/timeline_regression_cases.cpp
         tests/push_descriptor_regression_cases.cpp
         tests/mali_tiler_regression_cases.cpp

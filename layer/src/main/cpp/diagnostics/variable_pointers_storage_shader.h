@@ -1,6 +1,7 @@
 // Generated from diagnostics/shaders/variable_pointers_storage.spvasm.
 #pragma once
 #include <cstdint>
+// variable_pointers_storage.spvasm SHA256 1fb902fa65ce49613defad81dfa66bb9a3f08458490d05f0037f82f17d4bfe7b
 static constexpr uint32_t post_variable_pointers_storage_comp[] = {
     0x07230203, 0x00010300, 0x00070000, 0x00000011, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
     0x00001159, 0x0003000e, 0x00000000, 0x00000001, 0x0005000f, 0x00000005, 0x00000001, 0x6e69616d,

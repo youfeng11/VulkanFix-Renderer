@@ -3,7 +3,11 @@
 #include "layer_manager.h"
 #include "renderdoc_manager.h"
 #include "shader/shader_rewriter.h"
+#include "shader/storage_buffer_lowering.h"
+#include "shader/specialize_constants.h"
 #include "shader/subgroup_broadcast_lowering.h"
+#include "shader/subgroup_basic_lowering.h"
+#include "shader/constant_input_lowering.h"
 #include "shader/uniform_member_pruning.h"
 #include "shader/sampler_alias_dedup.h"
 #include "imageless_framebuffer_manager.h"
@@ -15,6 +19,7 @@
 #include "core/extension_dependencies.h"
 #include "core/native_instance_state.h"
 #include "core/shader_module_cache.h"
+#include "core/specialized_shader_stages.h"
 #include "core/legacy_query_array.h"
 #include <chrono>
 #include <thread>
@@ -22,6 +27,9 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <algorithm>
+#include <new>
+#include <stdexcept>
 
 // Highest instance version the real loader accepts. Used to clamp the version
 // requested by the application when the layer advertises Vulkan 1.2 on an older
@@ -57,6 +65,14 @@ static void init_vulkan_layer() {
 }
 
 extern "C" {
+
+// Bind internal rewrites to this layer even in Debug builds, where exported
+// Vulkan symbols can be preempted by the platform loader.
+static VKAPI_ATTR VkResult VKAPI_CALL create_layer_shader(VkDevice,const VkShaderModuleCreateInfo*,
+                                               const VkAllocationCallbacks*,VkShaderModule*);
+static VKAPI_ATTR void VKAPI_CALL destroy_layer_shader(VkDevice,VkShaderModule,const VkAllocationCallbacks*);
+static VKAPI_ATTR VkResult VKAPI_CALL create_layer_graphics(VkDevice, VkPipelineCache, uint32_t,
+    const VkGraphicsPipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline*);
 
 // ============================================================================
 // Core Intercepted Entry Points
@@ -267,7 +283,7 @@ VK_LAYER_EXPORT void VKAPI_CALL vkDestroyDevice(
     LayerManager::get().dispatch_destroy_device(device, pAllocator);
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateGraphicsPipelines(
+static VKAPI_ATTR VkResult VKAPI_CALL create_layer_graphics(
     VkDevice device,
     VkPipelineCache pipelineCache,
     uint32_t createInfoCount,
@@ -275,8 +291,25 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     const VkAllocationCallbacks* pAllocator,
     VkPipeline* pPipelines
 ) {
+    const bool native_group = (LayerManager::get().get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup) != 0;
+    vkfix::SpecializedShaderStages stages(device,create_layer_shader,destroy_layer_shader,std::nullopt,native_group);
+    VkResult result;
+    try {
+        result=stages.prepare(createInfoCount,pCreateInfos);
+    } catch (const std::bad_alloc&) {
+        result=VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    if (result!=VK_SUCCESS) {
+        if (pPipelines) std::fill_n(pPipelines,createInfoCount,VK_NULL_HANDLE);
+        return result;
+    }
     return LayerManager::get().dispatch_create_graphics_pipelines(
-        device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+        device, pipelineCache, createInfoCount, stages.graphics(pCreateInfos), pAllocator, pPipelines);
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache cache,
+    uint32_t count, const VkGraphicsPipelineCreateInfo* infos,
+    const VkAllocationCallbacks* allocator, VkPipeline* pipelines) {
+    return create_layer_graphics(device, cache, count, infos, allocator, pipelines);
 }
 
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateComputePipelines(
@@ -287,8 +320,19 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateComputePipelines(
     const VkAllocationCallbacks* pAllocator,
     VkPipeline* pPipelines
 ) {
+    vkfix::SpecializedShaderStages stages(device,create_layer_shader,destroy_layer_shader);
+    VkResult result;
+    try {
+        result=stages.prepare(createInfoCount,pCreateInfos);
+    } catch (const std::bad_alloc&) {
+        result=VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    if (result!=VK_SUCCESS) {
+        if (pPipelines) std::fill_n(pPipelines,createInfoCount,VK_NULL_HANDLE);
+        return result;
+    }
     return LayerManager::get().dispatch_create_compute_pipelines(
-        device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+        device, pipelineCache, createInfoCount, stages.compute(pCreateInfos), pAllocator, pPipelines);
 }
 
 VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreatePipelineCache(
@@ -1257,8 +1301,8 @@ FORWARD_DEV(VkResult, vkMapMemory, device,
              VkMemoryMapFlags flags, void **ppData),
             (device, memory, offset, size, flags, ppData))
 FORWARD_DEV_VOID(vkUnmapMemory, device, (VkDevice device, VkDeviceMemory memory), (device, memory))
-VK_LAYER_EXPORT VkResult VKAPI_CALL
-vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInfo,
+static VKAPI_ATTR VkResult VKAPI_CALL
+create_layer_shader_impl(VkDevice device, const VkShaderModuleCreateInfo *pCreateInfo,
                      const VkAllocationCallbacks *pAllocator, VkShaderModule *pShaderModule) {
     auto real_fn = (PFN_vkCreateShaderModule)get_real_proc(get_last_instance(), device, "vkCreateShaderModule");
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
@@ -1278,6 +1322,7 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
     }
 
     const uint32_t targetVersion = LayerManager::get().get_device_max_spirv_version(device);
+    const uint32_t native_extensions = LayerManager::get().get_device_spirv_extensions(device);
     if (targetVersion == 0) {
         return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
@@ -1290,13 +1335,72 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
         vkfix::has_large_uniform_block(code_words, pCreateInfo->codeSize / sizeof(uint32_t));
     const bool dedup_samplers = LayerManager::get().should_dedup_sampler_aliases(device) &&
         vkfix::has_sampler_aliases(code_words, pCreateInfo->codeSize / sizeof(uint32_t));
+    const bool legacy_storage = targetVersion < 0x00010300u &&
+        !(native_extensions & vkfix::NativeStorageBufferClass) &&
+        vkfix::has_storage_buffer_class(code_words, pCreateInfo->codeSize / sizeof(uint32_t));
+    const bool aggregate_storage = !legacy_storage &&
+        vkfix::has_storage_buffer_array_access(code_words, pCreateInfo->codeSize / sizeof(uint32_t));
+    const bool basic_subgroups=targetVersion<0x10300u &&
+        vkfix::has_basic_subgroups(code_words,pCreateInfo->codeSize/sizeof(uint32_t));
+    const bool singleton_index = !(native_extensions & vkfix::NativeDeviceGroup) &&
+        vkfix::has_device_index(code_words, pCreateInfo->codeSize / sizeof(uint32_t));
+    const bool deferred_view = !(native_extensions & vkfix::NativeMultiview) &&
+        vkfix::has_view_index(code_words, pCreateInfo->codeSize / sizeof(uint32_t));
     if (code_words[0] != 0x07230203u ||
-        (code_words[1] <= targetVersion && !broadcast_support && !prune_uniforms && !dedup_samplers)) {
+        (code_words[1] <= targetVersion && !broadcast_support && !prune_uniforms && !dedup_samplers &&
+         !legacy_storage && !aggregate_storage && !basic_subgroups && !singleton_index && !deferred_view)) {
         return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 
     std::vector<uint32_t> code(pCreateInfo->codeSize / sizeof(uint32_t));
     memcpy(code.data(), pCreateInfo->pCode, pCreateInfo->codeSize);
+    bool index_changed = false;
+    if (singleton_index) {
+        std::string error;
+        const auto result = vkfix::lower_singleton_device_index(code, error);
+        if (result == vkfix::DeviceIndexLowering::Invalid) {
+            LOGE("Singleton DeviceIndex lowering failed: %s", error.c_str());
+            return VK_ERROR_UNKNOWN;
+        }
+        index_changed = result == vkfix::DeviceIndexLowering::Changed;
+    }
+    bool basic_changed=false;
+    if (basic_subgroups) {
+        std::string error;
+        const auto result=vkfix::lower_basic_subgroups(code,error);
+        if (result==vkfix::BasicSubgroupLowering::Invalid) {
+            LOGE("Basic subgroup lowering failed: %s",error.c_str()); return VK_ERROR_UNKNOWN;
+        }
+        basic_changed=result==vkfix::BasicSubgroupLowering::Changed;
+    }
+
+    // A descriptor array whose length is specialized cannot be statically
+    // expanded yet. Keep the unspecialized source for each pipeline stage;
+    // give the native driver a real, default-specialized module meanwhile.
+    // This also lets a 1.0 driver admit the module without modern storage types.
+    std::vector<uint32_t> deferred_source;
+    // A real default module uses view 0. Keep the application input available
+    // for stage-specific view variants; never bake that default into its source.
+    if (deferred_view) deferred_source = code;
+    bool arrays_changed=false;
+    if (legacy_storage || aggregate_storage) {
+        std::string error;
+        auto normalized=code;
+        auto result=vkfix::normalize_storage_buffer_arrays(normalized,error,native_extensions);
+        if (result==vkfix::StorageBufferLowering::NeedsSpecialization) {
+            deferred_source=code;
+            if (!vkfix::specialize_constants(normalized,nullptr,error)) {
+                LOGE("Storage-buffer default specialization failed: %s",error.c_str());
+                return VK_ERROR_UNKNOWN;
+            }
+            result=vkfix::normalize_storage_buffer_arrays(normalized,error,native_extensions);
+            if (result!=vkfix::StorageBufferLowering::Changed) {
+                LOGE("Storage-buffer default normalization failed: %s",error.c_str());
+                return VK_ERROR_UNKNOWN;
+            }
+        }
+        if (result==vkfix::StorageBufferLowering::Changed) { code=std::move(normalized); arrays_changed=true; }
+    }
 
     bool broadcast_changed = false;
     if (auto support = broadcast_support) {
@@ -1306,7 +1410,24 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
         if (result == vkfix::BroadcastLowering::Invalid)
             LOGW("Subgroup broadcast lowering rejected: %s", error.c_str());
     }
-    const bool version_changed = ShaderRewriter::get().rewrite(code, targetVersion);
+    bool view_changed = false;
+    if (deferred_view) {
+        std::string error;
+        const auto result = vkfix::lower_view_index(code, 0, error);
+        if (result == vkfix::ConstantInputLowering::Invalid) {
+            LOGE("Default ViewIndex lowering failed: %s", error.c_str()); return VK_ERROR_UNKNOWN;
+        }
+        view_changed = result == vkfix::ConstantInputLowering::Changed;
+    }
+    const bool version_changed = ShaderRewriter::get().rewrite(code, targetVersion, native_extensions);
+    bool aggregates_changed=false;
+    if (aggregate_storage) {
+        std::string error;
+        const auto result=vkfix::normalize_storage_buffer_arrays(code,error,native_extensions);
+        aggregates_changed=result==vkfix::StorageBufferLowering::Changed;
+        if (result==vkfix::StorageBufferLowering::Invalid)
+            LOGW("Storage-buffer array normalization rejected: %s",error.c_str());
+    }
     bool uniforms_changed = false;
     if (prune_uniforms) {
         std::string error;
@@ -1330,14 +1451,35 @@ vkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *pCreateInf
         if (samplers_changed)
             LOGI("Measured sampler repair: deduplicated shader sampler aliases");
     }
-    if (!version_changed && !broadcast_changed && !uniforms_changed && !samplers_changed) {
+    if (!version_changed && !broadcast_changed && !uniforms_changed && !samplers_changed && !aggregates_changed && !arrays_changed && !basic_changed && !index_changed && !view_changed) {
         return create(device, pCreateInfo, pAllocator, pShaderModule);
     }
 
     VkShaderModuleCreateInfo modified = *pCreateInfo;
     modified.codeSize = code.size() * sizeof(uint32_t);
     modified.pCode = code.data();
-    return create(device, &modified, pAllocator, pShaderModule);
+    const auto result=create(device, &modified, pAllocator, pShaderModule);
+    if (result==VK_SUCCESS && !deferred_source.empty() && pShaderModule && *pShaderModule) {
+        auto source=*pCreateInfo;
+        source.pCode=deferred_source.data(); source.codeSize=deferred_source.size()*sizeof(uint32_t);
+        vkfix::ShaderModuleCache::get().remember(device,*pShaderModule,&source,true,deferred_view);
+    }
+    return result;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL create_layer_shader(VkDevice device,const VkShaderModuleCreateInfo* ci,
+    const VkAllocationCallbacks* allocator,VkShaderModule* out) {
+    if (out) *out=VK_NULL_HANDLE;
+    try {
+        return create_layer_shader_impl(device,ci,allocator,out);
+    } catch (const std::bad_alloc&) {
+        // Registration can allocate after the native object was created.
+        if (out && *out) { destroy_layer_shader(device,*out,allocator); *out=VK_NULL_HANDLE; }
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL vkCreateShaderModule(VkDevice device,const VkShaderModuleCreateInfo* ci,
+    const VkAllocationCallbacks* allocator,VkShaderModule* out) {
+    return create_layer_shader(device,ci,allocator,out);
 }
 // VK_KHR_separate_depth_stencil_layouts emulation: rewrite the separate
 // depth/stencil layouts to the combined layouts understood by Vulkan 1.0.
@@ -3029,7 +3171,7 @@ VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(VkDevice device, VkBu
     if (real)
         real(device, buffer, allocator);
 }
-VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyShaderModule(
+static VKAPI_ATTR void VKAPI_CALL destroy_layer_shader(
     VkDevice device, VkShaderModule module, const VkAllocationCallbacks *allocator) {
     VertexStoreEmulator::get().erase_shader(device, module);
     vkfix::ShaderModuleCache::get().forget(device, module);
@@ -3037,6 +3179,10 @@ VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyShaderModule(
                                                          "vkDestroyShaderModule");
     if (real)
         real(device, module, allocator);
+}
+VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyShaderModule(
+    VkDevice device,VkShaderModule module,const VkAllocationCallbacks* allocator) {
+    destroy_layer_shader(device,module,allocator);
 }
 VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo *ci,

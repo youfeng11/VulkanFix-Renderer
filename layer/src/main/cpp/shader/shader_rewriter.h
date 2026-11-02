@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "spirv_extensions.h"
 
 /**
  * SPIR-V downgrade rewriter.
@@ -27,10 +28,9 @@
  * can never turn a working shader into a broken one.
  *
  * Defaults:
- *   - optional high-version capabilities (descriptor indexing, 8/16-bit
- *     storage, subgroup, physical storage buffer, memory model, demote) are
- *     attempted for removal; anything actually used makes validation fail and
- *     the module is kept as-is;
+ *   - demote is lowered to fragment termination for legacy drivers;
+ *   - promoted extension declarations are restored only for enabled native
+ *     routes; read-only contracts and other capability declarations are kept;
  *   - VULKAN_FIX_SPIRV_KEEP_CAPS=1 keeps all capability declarations;
  *   - VULKAN_FIX_SHADER_REWRITE=0 disables the whole pass;
  *   - VULKAN_FIX_SPIRV_MAX_VERSION=1.0|1.1|...|1.6 overrides the target;
@@ -43,16 +43,18 @@ public:
 
     // Rewrites `code` in place when a validated downgrade is possible.
     // Returns true when `code` was modified.
-    bool rewrite(std::vector<uint32_t>& code, uint32_t targetVersion);
+    bool rewrite(std::vector<uint32_t>& code, uint32_t targetVersion, uint32_t native_extensions = 0);
 
-    // Inserts gl_Position.y = -gl_Position.y before every direct store to the
-    // Position builtin. Used only by the negative-viewport fallback.
-    bool flip_position_y(std::vector<uint32_t>& code);
+    // Flips the final Position output without changing shader-visible reads.
+    // execution_model is SPIR-V Vertex (0), TessellationEvaluation (2), or Geometry (3).
+    bool flip_position_y(std::vector<uint32_t>& code, const char* entry_point = "main",
+                         uint32_t execution_model = 0);
 
     // Adds the dispatch-base offset to gl_GlobalInvocationID and
     // gl_WorkGroupID loads. Used only by the vkCmdDispatchBase fallback.
     bool offset_invocation_ids(std::vector<uint32_t>& code, uint32_t base_x,
-                               uint32_t base_y, uint32_t base_z);
+                               uint32_t base_y, uint32_t base_z,
+                               const char* entry_point = "main", bool* no_offset = nullptr);
 
     // True when the module declares GlobalInvocationId or WorkGroupId; used to
     // distinguish "no IDs used" from "IDs used in an unsupported shape".
@@ -77,8 +79,8 @@ private:
     ShaderRewriter& operator=(const ShaderRewriter&) = delete;
 
     void ensure_initialized();
-    static bool validate(const std::vector<uint32_t>& code, uint32_t version);
-    static uint64_t hash_code(const std::vector<uint32_t>& code, uint32_t target);
+    static bool validate(const std::vector<uint32_t>& code, uint32_t version, uint32_t native_extensions = 0);
+    static uint64_t hash_code(const std::vector<uint32_t>& code, uint32_t target, uint32_t native_extensions);
     void load_disk_cache();
     void save_disk_cache();
 

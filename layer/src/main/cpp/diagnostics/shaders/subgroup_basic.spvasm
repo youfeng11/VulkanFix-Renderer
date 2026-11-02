@@ -1,0 +1,114 @@
+OpCapability Shader
+OpCapability GroupNonUniform
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %sgSize %sgLane %sgId %sgCount %localId %groupId
+OpExecutionMode %main LocalSize 2 3 2
+OpDecorate %sgSize BuiltIn SubgroupSize
+OpDecorate %sgLane BuiltIn SubgroupLocalInvocationId
+OpDecorate %sgId BuiltIn SubgroupId
+OpDecorate %sgCount BuiltIn NumSubgroups
+OpDecorate %localId BuiltIn LocalInvocationId
+OpDecorate %groupId BuiltIn WorkgroupId
+OpDecorate %Words ArrayStride 4
+OpDecorate %Buffer Block
+OpMemberDecorate %Buffer 0 Offset 0
+OpDecorate %output DescriptorSet 0
+OpDecorate %output Binding 0
+%void = OpTypeVoid
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%v3uint = OpTypeVector %uint 3
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%two = OpConstant %uint 2
+%three = OpConstant %uint 3
+%four = OpConstant %uint 4
+%five = OpConstant %uint 5
+%six = OpConstant %uint 6
+%seven = OpConstant %uint 7
+%eight = OpConstant %uint 8
+%twelve = OpConstant %uint 12
+%fortyTwo = OpConstant %uint 42
+%hundred = OpConstant %uint 100
+%subgroup = OpConstant %uint 3
+%wgSemantics = OpConstant %uint 264
+%bufferSemantics = OpConstant %uint 72
+%ptrInput = OpTypePointer Input %uint
+%ptrInput3 = OpTypePointer Input %v3uint
+%Words = OpTypeRuntimeArray %uint
+%Buffer = OpTypeStruct %Words
+%ptrBuffer = OpTypePointer StorageBuffer %Buffer
+%ptrOutput = OpTypePointer StorageBuffer %uint
+%Shared = OpTypeArray %uint %twelve
+%ptrShared = OpTypePointer Workgroup %Shared
+%ptrSharedUint = OpTypePointer Workgroup %uint
+%fn = OpTypeFunction %void
+%helperFn = OpTypeFunction %uint
+%sgSize = OpVariable %ptrInput Input
+%sgLane = OpVariable %ptrInput Input
+%sgId = OpVariable %ptrInput Input
+%sgCount = OpVariable %ptrInput Input
+%localId = OpVariable %ptrInput3 Input
+%groupId = OpVariable %ptrInput3 Input
+%output = OpVariable %ptrBuffer StorageBuffer
+%shared = OpVariable %ptrShared Workgroup
+%helper = OpFunction %uint DontInline %helperFn
+%helperEntry = OpLabel
+%loaded = OpLoad %uint %sgSize
+OpReturnValue %loaded
+OpFunctionEnd
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%localVector = OpLoad %v3uint %localId
+%x = OpCompositeExtract %uint %localVector 0
+%y = OpCompositeExtract %uint %localVector 1
+%z = OpCompositeExtract %uint %localVector 2
+%yStride = OpIMul %uint %y %two
+%zStride = OpIMul %uint %z %six
+%xy = OpIAdd %uint %x %yStride
+%local = OpIAdd %uint %xy %zStride
+%groupVector = OpLoad %v3uint %groupId
+%groupX = OpCompositeExtract %uint %groupVector 0
+%groupBase = OpIMul %uint %groupX %twelve
+%global = OpIAdd %uint %groupBase %local
+%base = OpIMul %uint %global %eight
+%copied = OpCopyObject %ptrInput %sgSize
+%copyRead = OpLoad %uint %copied
+%helperRead = OpFunctionCall %uint %helper
+%size = OpBitwiseOr %uint %copyRead %helperRead
+%lane = OpLoad %uint %sgLane
+%id = OpLoad %uint %sgId
+%count = OpLoad %uint %sgCount
+%elect = OpGroupNonUniformElect %bool %subgroup
+%elected = OpSelect %uint %elect %one %zero
+%slot = OpAccessChain %ptrSharedUint %shared %local
+%ownValue = OpIAdd %uint %local %fortyTwo
+OpStore %slot %ownValue
+OpControlBarrier %subgroup %subgroup %wgSemantics
+OpMemoryBarrier %subgroup %bufferSemantics
+%ownRead = OpLoad %uint %slot
+%field0 = OpAccessChain %ptrOutput %output %zero %base
+OpStore %field0 %size
+%i1 = OpIAdd %uint %base %one
+%field1 = OpAccessChain %ptrOutput %output %zero %i1
+OpStore %field1 %lane
+%i2 = OpIAdd %uint %base %two
+%field2 = OpAccessChain %ptrOutput %output %zero %i2
+OpStore %field2 %id
+%i3 = OpIAdd %uint %base %three
+%field3 = OpAccessChain %ptrOutput %output %zero %i3
+OpStore %field3 %count
+%i4 = OpIAdd %uint %base %four
+%field4 = OpAccessChain %ptrOutput %output %zero %i4
+OpStore %field4 %elected
+%i6 = OpIAdd %uint %base %six
+%field6 = OpAccessChain %ptrOutput %output %zero %i6
+%before = OpAtomicIAdd %uint %field6 %subgroup %zero %hundred
+%i5 = OpIAdd %uint %base %five
+%field5 = OpAccessChain %ptrOutput %output %zero %i5
+OpStore %field5 %before
+%i7 = OpIAdd %uint %base %seven
+%field7 = OpAccessChain %ptrOutput %output %zero %i7
+OpStore %field7 %ownRead
+OpReturn
+OpFunctionEnd

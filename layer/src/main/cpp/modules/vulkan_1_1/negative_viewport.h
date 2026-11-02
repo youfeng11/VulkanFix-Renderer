@@ -1,6 +1,7 @@
 #pragma once
 
 #include "layer_module.h"
+#include "device_object_key.h"
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -33,6 +34,7 @@ public:
                                  const VkCommandBufferBeginInfo*) override;
     void on_reset_command_buffer(VkCommandBuffer commandBuffer,
                                  VkCommandBufferResetFlags) override;
+    void on_free_command_buffers(VkDevice, uint32_t, const VkCommandBuffer*) override;
     void on_cmd_bind_pipeline(VkCommandBuffer commandBuffer,
                               VkPipelineBindPoint bindPoint, VkPipeline pipeline) override;
     bool on_cmd_set_viewport(VkCommandBuffer commandBuffer, uint32_t firstViewport,
@@ -59,12 +61,15 @@ public:
                                             uint32_t maxDrawCount, uint32_t stride) override;
 
 private:
+    using Key = vkfix::DeviceObjectKey;
+    using KeyHash = vkfix::DeviceObjectKeyHash;
     struct Pending {
         VkDevice device = VK_NULL_HANDLE;
         VkShaderModule module = VK_NULL_HANDLE;
         bool dynamic_variant = false;
         bool uses_viewport_index = false;
         uint32_t constant_viewport = UINT32_MAX;
+        VkShaderStageFlagBits stage = VK_SHADER_STAGE_VERTEX_BIT;
     };
     bool native_support(VkPhysicalDevice physicalDevice) const;
     bool has_negative_static_viewport(const VkGraphicsPipelineCreateInfo&) const;
@@ -74,9 +79,10 @@ private:
     mutable std::mutex m_mutex;
     std::unordered_map<uint64_t, bool> m_emulate;
     std::unordered_map<const VkGraphicsPipelineCreateInfo*, Pending> m_pending;
-    std::unordered_map<uint64_t, VkPipeline> m_variants;
-    std::unordered_map<uint64_t, bool> m_pipeline_uses_viewport_index;
-    std::unordered_map<uint64_t, uint32_t> m_pipeline_constant_viewport;
+    std::unordered_map<Key, VkPipeline, KeyHash> m_variants;
+    std::unordered_map<Key, bool, KeyHash> m_pipeline_uses_viewport_index;
+    std::unordered_map<Key, uint32_t, KeyHash> m_pipeline_constant_viewport;
+    std::unordered_map<uint64_t, VkDevice> m_cmd_devices;
     std::unordered_map<uint64_t, VkPipeline> m_cmd_pipeline;
     std::unordered_map<uint64_t, std::set<uint32_t>> m_cmd_negative;
     std::unordered_map<uint64_t, std::set<uint32_t>> m_cmd_positive;

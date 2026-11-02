@@ -48,6 +48,20 @@ int main() {
     app.apiVersion = VK_API_VERSION_1_0;
     check(create(&info, nullptr, &b) == VK_SUCCESS && a != b,
           "a later instance changes the global last-instance handle");
+    const char* selected_route=getenv("VKFIX_CORE11_QUERY_ROUTE");
+    if (!selected_route || strcmp(selected_route,"1")) {
+        for (const char* suffix:{"","KHR"}) {
+            auto properties=load<PFN_vkGetPhysicalDeviceProperties2>(gipa,a,"vkGetPhysicalDeviceProperties2",suffix);
+            if (!properties) return 1;
+            VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+            VkPhysicalDeviceProperties2 output{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,&subgroup};
+            properties(physical,&output);
+            check(subgroup.subgroupSize==1 && subgroup.supportedStages==VK_SHADER_STAGE_COMPUTE_BIT &&
+                  subgroup.supportedOperations==VK_SUBGROUP_FEATURE_BASIC_BIT && !subgroup.quadOperationsInAllStages &&
+                  output.pNext==&subgroup && !subgroup.pNext,
+                  "legacy subgroup query uses the owning instance and preserves the application chain");
+        }
+    }
 
     for (const char* suffix : {"", "KHR"}) {
         auto families = load<PFN_vkGetPhysicalDeviceQueueFamilyProperties2>(gipa, a,

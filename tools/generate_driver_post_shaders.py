@@ -29,13 +29,19 @@ def generate(glslc, validator):
             "dispatch_atomic.comp": "vulkan1.1",
             "dispatch_convert.comp": "vulkan1.1",
             "viewport_index.vert": "vulkan1.1",
+            "viewport_index.geom": "vulkan1.1",
+            "viewport_stage.vert": "vulkan1.1",
+            "viewport_stage.geom": "vulkan1.1",
+            "viewport_stage.tesc": "vulkan1.1",
+            "viewport_stage.tese": "vulkan1.1",
             "spirv14.comp": "spirv1.4",
         }
         for name, target in targets.items():
             source = DIRECTORY / "shaders" / name
             output = Path(temporary) / "shader.spv"
             compile_target = "vulkan1.1" if target == "spirv1.4" else target
-            subprocess.run([glslc, f"--target-env={compile_target}", "-O", str(source), "-o", str(output)], check=True)
+            optimization = "-O0" if name.startswith("viewport_stage.") else "-O"
+            subprocess.run([glslc, f"--target-env={compile_target}", optimization, str(source), "-o", str(output)], check=True)
             subprocess.run([validator, "--target-env", compile_target, str(output)], check=True)
             if target == "spirv1.4":
                 words = list(struct.unpack(f"<{len(output.read_bytes()) // 4}I", output.read_bytes()))
@@ -53,16 +59,41 @@ def generate(glslc, validator):
     return "\n".join(lines) + "\n"
 
 
+def generate_assembly(assembler, validator):
+    headers = {}
+    with tempfile.TemporaryDirectory(prefix="vulkanfix-post-assembly-") as temporary:
+        for stem in ("variable_pointers", "variable_pointers_storage", "storage_arrays", "storage_arrays_static", "subgroup_basic"):
+            source = DIRECTORY / "shaders" / f"{stem}.spvasm"
+            output = Path(temporary) / "shader.spv"
+            subprocess.run([str(assembler), "--target-env", "vulkan1.1", str(source), "-o", str(output)], check=True)
+            subprocess.run([validator, "--target-env", "vulkan1.1", str(output)], check=True)
+            data = output.read_bytes()
+            words = struct.unpack(f"<{len(data) // 4}I", data)
+            digest = hashlib.sha256(source.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+            lines = [f"// Generated from diagnostics/shaders/{source.name}.", "#pragma once", "#include <cstdint>",
+                     f"// {source.name} SHA256 {digest}", f"static constexpr uint32_t post_{stem}_comp[] = {{"]
+            for i in range(0, len(words), 8):
+                lines.append("    " + ", ".join(f"0x{word:08x}" for word in words[i:i+8]) + ",")
+            lines.append("};")
+            headers[f"{stem}_shader.h"] = "\n".join(lines) + "\n"
+    return headers
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--glslc", required=True)
     parser.add_argument("--spirv-val", required=True)
+    parser.add_argument("--spirv-as", help="defaults to spirv-as next to --spirv-val")
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     generated = generate(args.glslc, args.spirv_val)
-    header = DIRECTORY / "driver_post_shaders.h"
-    if args.check:
-        if not header.exists() or header.read_text(encoding="utf-8") != generated:
-            parser.exit(1, "POST shader fixtures are stale; regenerate using NDK r27d.\n")
-    else:
-        header.write_text(generated, encoding="utf-8", newline="\n")
+    validator = Path(args.spirv_val)
+    assembler = args.spirv_as or validator.with_name(f"spirv-as{validator.suffix}")
+    headers = {"driver_post_shaders.h": generated, **generate_assembly(assembler, args.spirv_val)}
+    for name, content in headers.items():
+        header = DIRECTORY / name
+        if args.check:
+            if not header.exists() or header.read_text(encoding="utf-8") != content:
+                parser.exit(1, f"POST shader fixture {name} is stale; regenerate using NDK r27d.\n")
+        else:
+            header.write_text(content, encoding="utf-8", newline="\n")

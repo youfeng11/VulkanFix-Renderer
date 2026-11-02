@@ -4,6 +4,7 @@
 #include "layer_module.h"
 #include "subgroup_broadcast.h"
 #include "device_object_key.h"
+#include "shader/spirv_extensions.h"
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -248,6 +249,8 @@ public:
     // (1.0 -> SPIR-V 1.0, 1.1 -> 1.3, 1.2 -> 1.5, 1.3 -> 1.6). 0 when unknown.
     void set_device_max_spirv_version(VkDevice device, uint32_t version);
     uint32_t get_device_max_spirv_version(VkDevice device);
+    uint32_t get_device_spirv_extensions(VkDevice device);
+    bool uses_software_multiview(VkDevice device);
     vkfix::SubgroupBroadcastSupport get_device_subgroup_broadcast(VkDevice device);
     bool should_prune_uniform_members(VkDevice device);
     bool should_dedup_sampler_aliases(VkDevice device);
@@ -916,6 +919,8 @@ private:
     // Per-device SPIR-V version ceiling, used by the shader rewriter.
     std::shared_mutex m_device_info_mutex;
     std::unordered_map<uint64_t, uint32_t> m_device_spirv_versions;
+    std::unordered_map<uint64_t, uint32_t> m_device_spirv_extensions;
+    std::unordered_set<uint64_t> m_device_software_multiview;
     std::unordered_map<uint64_t, vkfix::SubgroupBroadcastSupport> m_device_subgroup_broadcast;
     std::unordered_set<uint64_t> m_device_uniform_member_pruning;
     std::unordered_set<uint64_t> m_device_sampler_alias_dedup;

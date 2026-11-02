@@ -689,6 +689,16 @@ uint32_t LayerManager::get_device_max_spirv_version(VkDevice device) {
     return it != m_device_spirv_versions.end() ? it->second : 0;
 }
 
+uint32_t LayerManager::get_device_spirv_extensions(VkDevice device) {
+    std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
+    auto it=m_device_spirv_extensions.find((uint64_t)(uintptr_t)device);
+    return it==m_device_spirv_extensions.end()?0:it->second;
+}
+bool LayerManager::uses_software_multiview(VkDevice device) {
+    std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
+    return m_device_software_multiview.count((uint64_t)(uintptr_t)device) != 0;
+}
+
 vkfix::SubgroupBroadcastSupport LayerManager::get_device_subgroup_broadcast(VkDevice device) {
     std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
     auto it = m_device_subgroup_broadcast.find((uint64_t)(uintptr_t)device);
@@ -917,6 +927,11 @@ VkResult LayerManager::dispatch_create_device(
         if (pDevice) *pDevice = VK_NULL_HANDLE;
         return promotedFeatures.result();
     }
+    bool requested_multiview = false;
+    if (auto* mv = vku::find_pnext<VkPhysicalDeviceMultiviewFeatures>(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES))
+        requested_multiview = mv->multiview;
+    if (auto* v11 = vku::find_pnext<VkPhysicalDeviceVulkan11Features>(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES))
+        requested_multiview |= v11->multiview;
     if (!has_mod_features && modCreateInfo.pEnabledFeatures) {
         modFeatures = *modCreateInfo.pEnabledFeatures;
         modCreateInfo.pEnabledFeatures = &modFeatures;
@@ -1050,7 +1065,7 @@ VkResult LayerManager::dispatch_create_device(
 
         // Record the SPIR-V ceiling implied by the *real* driver API version.
         PFN_vkGetPhysicalDeviceProperties real_props = (PFN_vkGetPhysicalDeviceProperties)
-            get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+            get_real_proc(nativeInstance, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
         uint32_t api_version = VK_API_VERSION_1_0;
         VkPhysicalDeviceProperties native_properties{};
         if (real_props) {
@@ -1059,6 +1074,29 @@ VkResult LayerManager::dispatch_create_device(
         }
         const uint32_t spirv_version = ShaderRewriter::api_version_to_spirv(api_version);
         set_device_max_spirv_version(*pDevice, spirv_version);
+        uint32_t shader_routes=0;
+        auto enabled=[&](const char* name) {
+            return std::any_of(dependencyPlan.names.begin(),dependencyPlan.names.end(),
+                [&](const char* candidate) { return strcmp(candidate,name)==0; });
+        };
+        auto route=[&](uint32_t promoted,const char* name,uint32_t flag) {
+            if (api_version>=promoted || enabled(name)) shader_routes|=flag;
+        };
+        route(VK_API_VERSION_1_1,VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME,vkfix::NativeStorageBufferClass);
+        route(VK_API_VERSION_1_1,VK_KHR_MULTIVIEW_EXTENSION_NAME,vkfix::NativeMultiview);
+        route(VK_API_VERSION_1_1,VK_KHR_DEVICE_GROUP_EXTENSION_NAME,vkfix::NativeDeviceGroup);
+        route(VK_API_VERSION_1_1,VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,vkfix::NativeDrawParameters);
+        route(VK_API_VERSION_1_1,VK_KHR_16BIT_STORAGE_EXTENSION_NAME,vkfix::Native16BitStorage);
+        route(VK_API_VERSION_1_1,VK_KHR_VARIABLE_POINTERS_EXTENSION_NAME,vkfix::NativeVariablePointers);
+        route(VK_API_VERSION_1_1,VK_KHR_RELAXED_BLOCK_LAYOUT_EXTENSION_NAME,vkfix::NativeRelaxedBlockLayout);
+        route(VK_API_VERSION_1_1,VK_KHR_MAINTENANCE_2_EXTENSION_NAME,vkfix::NativeInputAttachmentAspects);
+        route(VK_API_VERSION_1_2,VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME,vkfix::NativeVulkanMemoryModel);
+        {
+            std::unique_lock<std::shared_mutex> lock(m_device_info_mutex);
+            m_device_spirv_extensions[(uint64_t)(uintptr_t)*pDevice]=shader_routes;
+            if (requested_multiview && !(shader_routes & vkfix::NativeMultiview))
+                m_device_software_multiview.insert((uint64_t)(uintptr_t)*pDevice);
+        }
         // Probe the native boundary before taking metadata locks. A private
         // native device avoids renderer recursion and the application's queues.
         const auto trust = vkfix::native_driver_trust(nativeInstance, physicalDevice,
@@ -1151,6 +1189,8 @@ void LayerManager::dispatch_destroy_device(
     {
         std::unique_lock<std::shared_mutex> info_lock(m_device_info_mutex);
         m_device_spirv_versions.erase((uint64_t)(uintptr_t)device);
+        m_device_spirv_extensions.erase((uint64_t)(uintptr_t)device);
+        m_device_software_multiview.erase((uint64_t)(uintptr_t)device);
         m_device_subgroup_broadcast.erase((uint64_t)(uintptr_t)device);
         m_device_uniform_member_pruning.erase((uint64_t)(uintptr_t)device);
         m_device_sampler_alias_dedup.erase((uint64_t)(uintptr_t)device);
@@ -1293,7 +1333,13 @@ VkResult LayerManager::dispatch_create_compute_pipelines(
 
     VkPipelineCache effectiveCache = PipelineCacheManager::get().prepare_pipeline_cache(device, pipelineCache);
     auto cacheGuard = PipelineCacheManager::get().lock_cache_for_creation(device, effectiveCache);
-    VkResult res = real_fn(device, effectiveCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+    std::vector<VkComputePipelineCreateInfo> nativeInfos;
+    if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled() && pCreateInfos && createInfoCount) {
+        nativeInfos.assign(pCreateInfos, pCreateInfos + createInfoCount);
+        for (auto& info : nativeInfos) m_dispatch_base_mod->on_modify_compute_pipeline_create_info(device, info);
+    }
+    VkResult res = real_fn(device, effectiveCache, createInfoCount,
+                          nativeInfos.empty() ? pCreateInfos : nativeInfos.data(), pAllocator, pPipelines);
     if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled())
         m_dispatch_base_mod->on_post_create_compute_pipelines(
             device, createInfoCount, pCreateInfos, pPipelines);
@@ -1666,6 +1712,10 @@ void LayerManager::dispatch_destroy_descriptor_update_template(
 }
 
 VkResult LayerManager::command_recording_error(VkCommandBuffer cmd) {
+    if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled()) {
+        const auto result = m_dispatch_base_mod->command_recording_error(cmd);
+        if (result != VK_SUCCESS) return result;
+    }
     return m_push_desc_mod && m_push_desc_mod->is_enabled() ?
         m_push_desc_mod->command_recording_error(cmd) : VK_SUCCESS;
 }
@@ -1942,6 +1992,8 @@ void LayerManager::dispatch_destroy_pipeline(
     if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled()) {
         m_dispatch_base_mod->on_destroy_pipeline(device, pipeline);
     }
+    if (m_negative_viewport_mod && m_negative_viewport_mod->is_enabled())
+        m_negative_viewport_mod->on_destroy_pipeline(device, pipeline);
 
     const auto& dt = get_dispatch_table(device);
     if (dt.DestroyPipeline) {
@@ -1955,6 +2007,12 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     VkPipeline pipeline
 ) {
     VertexStoreEmulator::get().bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
+    // Compute tracking is required even when graphics draws can bypass their
+    // emulation modules. Publish it before the graphics fast path.
+    if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled())
+        m_dispatch_base_mod->on_cmd_bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
+    if (m_negative_viewport_mod && m_negative_viewport_mod->is_enabled())
+        m_negative_viewport_mod->on_cmd_bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
 
     // Binding state does not access memory. Do not mark it as a barrier action:
     // identical barriers separated only by binds can still be deduplicated.
@@ -1968,13 +2026,6 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
         m_divisor_mod->on_cmd_bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
     }
-    if (m_negative_viewport_mod && m_negative_viewport_mod->is_enabled()) {
-        m_negative_viewport_mod->on_cmd_bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
-    }
-    if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled()) {
-        m_dispatch_base_mod->on_cmd_bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
-    }
-
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdBindPipeline) {

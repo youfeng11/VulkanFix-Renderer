@@ -1,4 +1,5 @@
 #include "shader/shader_rewriter.h"
+#include "shader/storage_buffer_lowering.h"
 
 #include "vk_common.h"
 
@@ -157,6 +158,66 @@ std::string read_literal_string(const uint32_t* words, size_t word_count) {
     return std::string(bytes, len);
 }
 
+// Core SPIR-V capabilities need their original extension declarations again
+// when targeting a version preceding their promotion. Only use routes enabled
+// on this logical device; advertised wrapper extensions do not establish one.
+bool restore_promoted_extensions(std::vector<uint32_t>& code, uint32_t version,
+                                 uint32_t native_extensions,
+                                 const std::vector<std::string>& stripped) {
+    std::unordered_set<uint32_t> capabilities;
+    std::unordered_set<std::string> extensions;
+    size_t insertion = kSpirvHeaderWords;
+    for (size_t at = kSpirvHeaderWords; at < code.size();) {
+        const uint32_t count = code[at] >> 16;
+        const auto op = static_cast<spv::Op>(code[at] & 0xffffu);
+        if (!count || count > code.size() - at) return false;
+        if (op == spv::OpCapability && count == 2)
+            capabilities.insert(code[at + 1]);
+        if (op == spv::OpExtension && count >= 2)
+            extensions.insert(read_literal_string(code.data() + at + 1, count - 1));
+        if (op == spv::OpCapability || op == spv::OpExtension) insertion = at + count;
+        at += count;
+    }
+    std::vector<uint32_t> declarations;
+    auto has = [&](spv::Capability capability) {
+        return capabilities.count(static_cast<uint32_t>(capability)) != 0;
+    };
+    auto add = [&](uint32_t flags, const char* extension) {
+        if ((native_extensions & flags) != flags || extensions.count(extension) ||
+            std::find(stripped.begin(), stripped.end(), extension) != stripped.end()) return;
+        extensions.insert(extension);
+        const size_t words = (std::strlen(extension) + 1 + 3) / 4;
+        const size_t at = declarations.size();
+        declarations.resize(at + words + 1, 0);
+        declarations[at] = (static_cast<uint32_t>(words + 1) << 16) | spv::OpExtension;
+        std::memcpy(declarations.data() + at + 1, extension, std::strlen(extension));
+    };
+    if (version < 0x00010300u) {
+        if (vkfix::has_storage_buffer_class(code.data(), code.size()))
+            add(vkfix::NativeStorageBufferClass, "SPV_KHR_storage_buffer_storage_class");
+        if (has(spv::CapabilityMultiView))
+            add(vkfix::NativeMultiview, "SPV_KHR_multiview");
+        if (has(spv::CapabilityDeviceGroup))
+            add(vkfix::NativeDeviceGroup, "SPV_KHR_device_group");
+        if (has(spv::CapabilityDrawParameters))
+            add(vkfix::NativeDrawParameters, "SPV_KHR_shader_draw_parameters");
+        if (has(spv::CapabilityStorageBuffer16BitAccess) ||
+            has(spv::CapabilityUniformAndStorageBuffer16BitAccess) ||
+            has(spv::CapabilityStoragePushConstant16) || has(spv::CapabilityStorageInputOutput16))
+            add(vkfix::Native16BitStorage, "SPV_KHR_16bit_storage");
+        if (has(spv::CapabilityVariablePointers) || has(spv::CapabilityVariablePointersStorageBuffer)) {
+            const uint32_t flags = vkfix::NativeVariablePointers | vkfix::NativeStorageBufferClass;
+            add(flags, "SPV_KHR_storage_buffer_storage_class");
+            add(flags, "SPV_KHR_variable_pointers");
+        }
+    }
+    if (version < 0x00010500u &&
+        (has(spv::CapabilityVulkanMemoryModel) || has(spv::CapabilityVulkanMemoryModelDeviceScope)))
+        add(vkfix::NativeVulkanMemoryModel, "SPV_KHR_vulkan_memory_model");
+    code.insert(code.begin() + insertion, declarations.begin(), declarations.end());
+    return true;
+}
+
 }  // namespace
 
 ShaderRewriter& ShaderRewriter::get() {
@@ -231,7 +292,7 @@ ShaderRewriter::~ShaderRewriter() {
 
 void ShaderRewriter::load_disk_cache() {
     constexpr uint32_t kDiskCacheMagic = 0x564B4658u;  // "VKFX"
-    constexpr uint32_t kDiskCacheVersion = 3u;
+    constexpr uint32_t kDiskCacheVersion = 6u;
     FILE* file = std::fopen(m_cache_path.c_str(), "rb");
     if (file == nullptr) return;
 
@@ -281,7 +342,7 @@ void ShaderRewriter::load_disk_cache() {
 void ShaderRewriter::save_disk_cache() {
     if (m_cache_path.empty()) return;
     constexpr uint32_t kDiskCacheMagic = 0x564B4658u;  // "VKFX"
-    constexpr uint32_t kDiskCacheVersion = 3u;
+    constexpr uint32_t kDiskCacheVersion = 6u;
 
     std::lock_guard<std::mutex> lock(m_cache_mutex);
     if (m_cache.empty()) return;
@@ -325,7 +386,8 @@ const char* ShaderRewriter::spirv_version_string(uint32_t version) {
     return buffer;
 }
 
-uint64_t ShaderRewriter::hash_code(const std::vector<uint32_t>& code, uint32_t target) {
+uint64_t ShaderRewriter::hash_code(const std::vector<uint32_t>& code, uint32_t target,
+                                 uint32_t native_extensions) {
     uint64_t hash = 1469598103934665603ull;
     for (uint32_t word : code) {
         hash ^= word;
@@ -333,10 +395,13 @@ uint64_t ShaderRewriter::hash_code(const std::vector<uint32_t>& code, uint32_t t
     }
     hash ^= static_cast<uint64_t>(target) << 32;
     hash *= 1099511628211ull;
+    hash ^= native_extensions;
+    hash *= 1099511628211ull;
     return hash;
 }
 
-bool ShaderRewriter::validate(const std::vector<uint32_t>& code, uint32_t version) {
+bool ShaderRewriter::validate(const std::vector<uint32_t>& code, uint32_t version,
+                             uint32_t native_extensions) {
     spvtools::SpirvTools tools(env_for_version(version));
     std::vector<std::string> messages;
     tools.SetMessageConsumer([&messages](spv_message_level_t, const char*, const spv_position_t&, const char* message) {
@@ -344,7 +409,9 @@ bool ShaderRewriter::validate(const std::vector<uint32_t>& code, uint32_t versio
             messages.emplace_back(message);
         }
     });
-    const bool valid = tools.Validate(code);
+    spvtools::ValidatorOptions options;
+    options.SetRelaxBlockLayout((native_extensions & vkfix::NativeRelaxedBlockLayout) != 0);
+    const bool valid = tools.Validate(code.data(), code.size(), options);
     if (!valid) {
         static std::atomic<uint32_t> failures{0};
         const uint32_t index = failures.fetch_add(1, std::memory_order_relaxed);
@@ -357,7 +424,8 @@ bool ShaderRewriter::validate(const std::vector<uint32_t>& code, uint32_t versio
     return valid;
 }
 
-bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion) {
+bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion,
+                            uint32_t native_extensions) {
     ensure_initialized();
     if (!m_enabled) return false;
 
@@ -366,9 +434,12 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     if (code.size() < kSpirvHeaderWords || code[0] != kSpirvMagic) return false;
 
     const uint32_t current = code[1];
-    if (current <= target) return false;
+    const bool legacy_storage = target < 0x00010300u &&
+        !(native_extensions & vkfix::NativeStorageBufferClass);
+    if (current <= target && !(legacy_storage &&
+        vkfix::has_storage_buffer_class(code.data(), code.size()))) return false;
 
-    const uint64_t key = hash_code(code, target);
+    const uint64_t key = hash_code(code, target, native_extensions);
     {
         std::lock_guard<std::mutex> lock(m_cache_mutex);
         auto it = m_cache.find(key);
@@ -379,10 +450,20 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
         }
     }
 
-    const std::vector<uint32_t> original = code;
+    std::vector<uint32_t> lowered = code;
+    if (legacy_storage && vkfix::has_storage_buffer_class(lowered.data(), lowered.size())) {
+        std::string error;
+        const auto result=vkfix::lower_storage_buffer_class(lowered,error);
+        if (result==vkfix::StorageBufferLowering::NeedsSpecialization) return false;
+        if (result == vkfix::StorageBufferLowering::Invalid) {
+            LOGW("StorageBuffer lowering rejected: %s", error.c_str());
+            return false;
+        }
+    }
+    const auto& input = lowered;
     std::vector<uint32_t> output;
-    output.reserve(code.size());
-    output.insert(output.end(), code.begin(), code.begin() + kSpirvHeaderWords);
+    output.reserve(input.size());
+    output.insert(output.end(), input.begin(), input.begin() + kSpirvHeaderWords);
 
     // SPIR-V 1.4 relaxed OpEntryPoint interfaces to allow all global variables.
     // For 1.3 targets only Input/Output variables are legal, so collect each
@@ -395,25 +476,25 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     uint32_t max_id = 0;
     {
         size_t scan = kSpirvHeaderWords;
-        while (scan < code.size()) {
-            const uint32_t scan_word = code[scan];
+        while (scan < input.size()) {
+            const uint32_t scan_word = input[scan];
             const uint32_t scan_count = scan_word >> 16;
             const uint16_t scan_opcode = static_cast<uint16_t>(scan_word & 0xFFFFu);
-            if (scan_count == 0 || scan + scan_count > code.size()) break;
+            if (scan_count == 0 || scan + scan_count > input.size()) break;
             if (scan_opcode == static_cast<uint16_t>(spv::OpTypeBool) && scan_count >= 2) {
-                bool_type_id = code[scan + 1];
+                bool_type_id = input[scan + 1];
                 max_id = std::max(max_id, bool_type_id);
             } else if (scan_opcode == static_cast<uint16_t>(spv::OpTypeVector) && scan_count >= 4) {
-                vector_components[code[scan + 1]] = code[scan + 2];
-                vector_counts[code[scan + 1]] = code[scan + 3];
-                max_id = std::max(max_id, code[scan + 1]);
+                vector_components[input[scan + 1]] = input[scan + 2];
+                vector_counts[input[scan + 1]] = input[scan + 3];
+                max_id = std::max(max_id, input[scan + 1]);
             }
             if (scan_opcode == static_cast<uint16_t>(spv::OpVariable) && scan_count >= 4) {
-                variable_storage[code[scan + 2]] = code[scan + 3];
+                variable_storage[input[scan + 2]] = input[scan + 3];
             }
             if (scan_count >= 3) {
-                value_types[code[scan + 2]] = code[scan + 1];
-                max_id = std::max(max_id, code[scan + 2]);
+                value_types[input[scan + 2]] = input[scan + 1];
+                max_id = std::max(max_id, input[scan + 2]);
             }
             scan += scan_count;
         }
@@ -423,15 +504,15 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     size_t replaced_instructions = 0;
     size_t dropped_interfaces = 0;
     size_t type_insert_pos = 0;
-    uint32_t next_id = (code.size() > 3 && code[3] > 0) ? code[3] - 1 : max_id;
+    uint32_t next_id = (input.size() > 3 && input[3] > 0) ? input[3] - 1 : max_id;
     std::unordered_map<uint32_t, uint32_t> created_bool_vectors;
     size_t offset = kSpirvHeaderWords;
     bool malformed = false;
-    while (offset < code.size()) {
-        const uint32_t word = code[offset];
+    while (offset < input.size()) {
+        const uint32_t word = input[offset];
         const uint32_t word_count = word >> 16;
         const uint16_t opcode = static_cast<uint16_t>(word & 0xFFFFu);
-        if (word_count == 0 || offset + word_count > code.size()) {
+        if (word_count == 0 || offset + word_count > input.size()) {
             malformed = true;
             break;
         }
@@ -448,38 +529,31 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
             opcode == static_cast<uint16_t>(spv::OpDemoteToHelperInvocation)) {
             replacement_opcode = static_cast<uint16_t>(spv::OpKill);
         }
-        if (m_strip_debug && is_debug_opcode(opcode)) {
+        if ((m_strip_debug && is_debug_opcode(opcode)) ||
+            (target < 0x00010100u && opcode == static_cast<uint16_t>(spv::OpModuleProcessed))) {
             drop = true;
         } else if (opcode == static_cast<uint16_t>(spv::OpCapability) && word_count >= 2) {
-            drop = m_strip_caps.find(code[offset + 1]) != m_strip_caps.end();
+            drop = m_strip_caps.find(input[offset + 1]) != m_strip_caps.end();
         } else if (opcode == static_cast<uint16_t>(spv::OpExtension) && word_count >= 2) {
-            const std::string name = read_literal_string(&code[offset + 1], word_count - 1);
+            const std::string name = read_literal_string(&input[offset + 1], word_count - 1);
             for (const std::string& stripped : m_strip_extensions) {
                 if (name == stripped) {
                     drop = true;
                     break;
                 }
             }
-        } else if ((opcode == static_cast<uint16_t>(spv::OpDecorate) && word_count >= 3 &&
-                    code[offset + 2] == static_cast<uint32_t>(spv::DecorationNonWritable)) ||
-                   (opcode == static_cast<uint16_t>(spv::OpMemberDecorate) && word_count >= 4 &&
-                    code[offset + 3] == static_cast<uint32_t>(spv::DecorationNonWritable))) {
-            // NonWritable is a pure optimisation hint. SPIR-V 1.3 restricts the
-            // legal targets, and some 1.5/1.6 modules decorate types/members
-            // that the 1.3 validator rejects; dropping it is semantics-preserving.
-            drop = true;
         }
 
         if (opcode == static_cast<uint16_t>(spv::OpImageFetch) && word_count >= 6) {
-            const uint32_t image_operands = code[offset + 5];
+            const uint32_t image_operands = input[offset + 5];
             if ((image_operands & static_cast<uint32_t>(spv::ImageOperandsSignExtendMask)) != 0) {
                 const uint32_t new_mask = image_operands & ~static_cast<uint32_t>(spv::ImageOperandsSignExtendMask);
                 std::vector<uint32_t> fetch;
                 fetch.push_back(0);
-                for (size_t i = 1; i < 5; ++i) fetch.push_back(code[offset + i]);
+                for (size_t i = 1; i < 5; ++i) fetch.push_back(input[offset + i]);
                 if (new_mask != 0) {
                     fetch.push_back(new_mask);
-                    for (size_t i = 6; i < word_count; ++i) fetch.push_back(code[offset + i]);
+                    for (size_t i = 6; i < word_count; ++i) fetch.push_back(input[offset + i]);
                 }
                 fetch[0] = (static_cast<uint32_t>(fetch.size()) << 16) |
                            static_cast<uint32_t>(spv::OpImageFetch);
@@ -490,10 +564,10 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
             }
         }
         if (opcode == static_cast<uint16_t>(spv::OpSelect) && word_count >= 6 && bool_type_id != 0) {
-            const uint32_t result_type = code[offset + 1];
+            const uint32_t result_type = input[offset + 1];
             auto count_it = vector_counts.find(result_type);
             auto component_it = vector_components.find(result_type);
-            auto condition_it = value_types.find(code[offset + 3]);
+            auto condition_it = value_types.find(input[offset + 3]);
             if (count_it != vector_counts.end() && component_it != vector_components.end() &&
                 condition_it != value_types.end() && condition_it->second == bool_type_id) {
                 uint32_t bool_vector = 0;
@@ -524,7 +598,7 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
                     }
                 }
                 if (bool_vector != 0) {
-                    const uint32_t condition = code[offset + 3];
+                    const uint32_t condition = input[offset + 3];
                     const uint32_t construct_id = ++next_id;
                     const uint32_t construct_words = 3 + count_it->second;
                     std::vector<uint32_t> construct;
@@ -534,7 +608,7 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
                     for (uint32_t i = 0; i < count_it->second; ++i) construct.push_back(condition);
                     output.insert(output.end(), construct.begin(), construct.end());
                     const size_t select_offset = output.size();
-                    output.insert(output.end(), code.begin() + offset, code.begin() + offset + word_count);
+                    output.insert(output.end(), input.begin() + offset, input.begin() + offset + word_count);
                     output[select_offset + 3] = construct_id;
                     ++replaced_instructions;
                     offset += word_count;
@@ -545,7 +619,7 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
         if (!drop && opcode == static_cast<uint16_t>(spv::OpEntryPoint) && target < 0x00010400u) {
             size_t interface_start = 3;
             while (interface_start < word_count) {
-                const uint32_t name_word = code[offset + interface_start];
+                const uint32_t name_word = input[offset + interface_start];
                 bool terminated = false;
                 for (int byte = 0; byte < 4; ++byte) {
                     if (((name_word >> (8 * byte)) & 0xFFu) == 0) {
@@ -561,13 +635,13 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
             std::vector<uint32_t> entry;
             entry.reserve(word_count);
             entry.push_back(0);  // header filled in below
-            entry.push_back(code[offset + 1]);  // execution model
-            entry.push_back(code[offset + 2]);  // entry point id
+            entry.push_back(input[offset + 1]);  // execution model
+            entry.push_back(input[offset + 2]);  // entry point id
             for (size_t i = 3; i < interface_start; ++i) {
-                entry.push_back(code[offset + i]);
+                entry.push_back(input[offset + i]);
             }
             for (size_t i = interface_start; i < word_count; ++i) {
-                const uint32_t interface_id = code[offset + i];
+                const uint32_t interface_id = input[offset + i];
                 auto variable = variable_storage.find(interface_id);
                 if (variable != variable_storage.end() &&
                     (variable->second == static_cast<uint32_t>(spv::StorageClassInput) ||
@@ -588,7 +662,7 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
             dropped_declaration = true;
         } else {
             const size_t output_offset = output.size();
-            output.insert(output.end(), code.begin() + offset, code.begin() + offset + word_count);
+            output.insert(output.end(), input.begin() + offset, input.begin() + offset + word_count);
             if (replacement_opcode != opcode) {
                 output[output_offset] = (word & 0xFFFF0000u) | replacement_opcode;
                 ++replaced_instructions;
@@ -612,7 +686,8 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     }
     output[1] = target;
 
-    if (!validate(output, target)) {
+    if (!restore_promoted_extensions(output, target, native_extensions, m_strip_extensions)) return false;
+    if (!validate(output, target, native_extensions)) {
         {
             std::lock_guard<std::mutex> lock(m_cache_mutex);
             if (m_cache.size() >= kMaxCachedModules) {
@@ -659,141 +734,6 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
              static_cast<unsigned long long>(rewritten),
              static_cast<unsigned long long>(m_rejected.load(std::memory_order_relaxed)));
     }
-    return true;
-}
-
-bool ShaderRewriter::flip_position_y(std::vector<uint32_t>& code) {
-    // Handles both gl_Position as a lone output variable and glslang's
-    // gl_PerVertex struct member accessed through an access chain. Anything
-    // else is left untouched so it cannot be silently misrendered.
-    constexpr uint32_t kMagic = 0x07230203u;
-    if (code.size() < 5 || code[0] != kMagic) return false;
-    const auto word_count = [&](size_t at) { return code[at] >> 16; };
-    const auto opcode = [&](size_t at) { return code[at] & 0xFFFFu; };
-
-    std::unordered_map<uint32_t, uint32_t> result_type;
-    std::unordered_map<uint32_t, uint32_t> integer_constant;
-    std::unordered_set<uint32_t> position_pointers;
-    uint32_t position_struct = 0;
-    uint32_t position_member = 0;
-
-    for (size_t i = 5; i < code.size();) {
-        const uint32_t wc = word_count(i);
-        if (wc == 0 || i + wc > code.size()) return false;
-        const uint32_t op = opcode(i);
-        if (op == 59 && wc >= 4) {
-            result_type[code[i + 2]] = code[i + 1];
-            if (code[i + 3] == 3) {
-                // Filled after decorations are known.
-            }
-        } else if (op == 65 && wc >= 5) {
-            result_type[code[i + 2]] = code[i + 1];
-        } else if (op == 43 && wc >= 4) {
-            integer_constant[code[i + 2]] = code[i + 3];
-        } else if (op == 71 && wc >= 4 && code[i + 2] == 11 && code[i + 3] == 0) {
-            position_pointers.insert(code[i + 1]);
-        } else if (op == 72 && wc >= 5 && code[i + 3] == 11 && code[i + 4] == 0) {
-            position_struct = code[i + 1];
-            position_member = code[i + 2];
-        }
-        i += wc;
-    }
-
-    if (position_struct) {
-        // Find the Output variable holding gl_PerVertex and the access chain
-        // that selects the Position member.
-        std::unordered_set<uint32_t> struct_variables;
-        for (size_t i = 5; i < code.size();) {
-            const uint32_t wc = word_count(i);
-            if (opcode(i) == 59 && wc >= 4 && code[i + 3] == 3) {
-                const auto type = result_type.find(code[i + 2]);
-                if (type != result_type.end()) {
-                    for (size_t j = 5; j < code.size();) {
-                        const uint32_t inner_wc = word_count(j);
-                        if (opcode(j) == 32 && inner_wc >= 4 && code[j + 1] == type->second &&
-                            code[j + 3] == position_struct)
-                            struct_variables.insert(code[i + 2]);
-                        j += inner_wc;
-                    }
-                }
-            }
-            i += wc;
-        }
-        for (size_t i = 5; i < code.size();) {
-            const uint32_t wc = word_count(i);
-            if (opcode(i) == 65 && wc >= 5 && struct_variables.count(code[i + 3])) {
-                const auto index = integer_constant.find(code[i + 4]);
-                if (index != integer_constant.end() && index->second == position_member)
-                    position_pointers.insert(code[i + 2]);
-            }
-            i += wc;
-        }
-    }
-    if (position_pointers.empty()) return false;
-
-    uint32_t bound = code[3];
-    std::vector<uint32_t> output;
-    output.reserve(code.size() + 32);
-    output.insert(output.end(), code.begin(), code.begin() + 5);
-    bool changed = false;
-    for (size_t i = 5; i < code.size();) {
-        const uint32_t wc = word_count(i);
-        if (wc == 0 || i + wc > code.size()) return false;
-        if (opcode(i) == 62 && wc >= 3 && position_pointers.count(code[i + 1])) {
-            const uint32_t pointer = code[i + 1];
-            const uint32_t object = code[i + 2];
-            const auto type = result_type.find(pointer);
-            if (type == result_type.end()) return false;
-            uint32_t vector_type = 0;
-            for (size_t j = 5; j < code.size();) {
-                const uint32_t inner_wc = word_count(j);
-                if (opcode(j) == 32 && inner_wc >= 4 && code[j + 1] == type->second)
-                    vector_type = code[j + 3];
-                j += inner_wc;
-            }
-            if (!vector_type) return false;
-            uint32_t component_type = 0;
-            for (size_t j = 5; j < code.size();) {
-                const uint32_t inner_wc = word_count(j);
-                if (opcode(j) == 23 && inner_wc >= 4 && code[j + 1] == vector_type) {
-                    component_type = code[j + 2];
-                    if (code[j + 3] != 4) return false;
-                }
-                j += inner_wc;
-            }
-            if (!component_type) return false;
-            const uint32_t extracted = bound++;
-            const uint32_t negated = bound++;
-            const uint32_t inserted = bound++;
-            output.push_back((5u << 16) | 81u); // OpCompositeExtract
-            output.push_back(component_type);
-            output.push_back(extracted);
-            output.push_back(object);
-            output.push_back(1);
-            output.push_back((4u << 16) | 127u); // OpFNegate
-            output.push_back(component_type);
-            output.push_back(negated);
-            output.push_back(extracted);
-            output.push_back((6u << 16) | 82u); // OpCompositeInsert
-            output.push_back(vector_type);
-            output.push_back(inserted);
-            output.push_back(negated);
-            output.push_back(object);
-            output.push_back(1);
-            output.push_back((wc << 16) | 62u); // OpStore with replaced object
-            output.push_back(pointer);
-            output.push_back(inserted);
-            for (uint32_t j = 3; j < wc; ++j) output.push_back(code[i + j]);
-            changed = true;
-        } else {
-            output.insert(output.end(), code.begin() + i, code.begin() + i + wc);
-        }
-        i += wc;
-    }
-    if (!changed) return false;
-    output[3] = bound;
-    if (!validate(output, 0x00010300u)) return false;
-    code = std::move(output);
     return true;
 }
 
@@ -856,214 +796,5 @@ bool ShaderRewriter::constant_viewport_index(const std::vector<uint32_t> &code,
     }
     if (!found) return false;
     index = value;
-    return true;
-}
-
-bool ShaderRewriter::offset_invocation_ids(std::vector<uint32_t> &code, uint32_t base_x,
-                                           uint32_t base_y, uint32_t base_z) {
-    if ((base_x | base_y | base_z) == 0) return false;
-    constexpr uint32_t kMagic = 0x07230203u;
-    if (code.size() < 5 || code[0] != kMagic) return false;
-    const auto word_count = [&](size_t at) { return code[at] >> 16; };
-    const auto opcode = [&](size_t at) { return code[at] & 0xFFFFu; };
-
-    std::unordered_map<uint32_t, uint32_t> integer_constant;
-    std::unordered_map<uint32_t, uint32_t> result_type;
-    std::unordered_map<uint32_t, uint32_t> pointer_target;
-    std::unordered_map<uint32_t, uint32_t> builtin;
-    std::unordered_map<uint32_t, uint32_t> vector_component;
-    std::unordered_map<uint32_t, uint32_t> vector_count;
-    for (size_t i = 5; i < code.size();) {
-        const uint32_t wc = word_count(i);
-        if (wc == 0 || i + wc > code.size()) return false;
-        const uint32_t op = opcode(i);
-        if (op == 43 && wc >= 4) integer_constant[code[i + 2]] = code[i + 3];
-        if (op == 59 && wc >= 4) result_type[code[i + 2]] = code[i + 1];
-        if (op == 65 && wc >= 5) result_type[code[i + 2]] = code[i + 1];
-        if (op == 32 && wc >= 4) pointer_target[code[i + 1]] = code[i + 3];
-        if (op == 23 && wc >= 4) {
-            vector_component[code[i + 1]] = code[i + 2];
-            vector_count[code[i + 1]] = code[i + 3];
-        }
-        if (op == 71 && wc >= 4 && code[i + 2] == 11) builtin[code[i + 1]] = code[i + 3];
-        i += wc;
-    }
-
-    // Builtin input variables that expose the full uvec3 builtin.
-    std::unordered_map<uint32_t, uint32_t> builtin_vectors;
-    for (const auto &entry : builtin) {
-        if (entry.second != spv::BuiltInGlobalInvocationId &&
-            entry.second != spv::BuiltInWorkgroupId)
-            continue;
-        auto type = result_type.find(entry.first);
-        if (type == result_type.end()) continue;
-        auto target = pointer_target.find(type->second);
-        if (target == pointer_target.end()) continue;
-        if (vector_count[target->second] == 3) builtin_vectors[entry.first] = target->second;
-    }
-
-    // Component access chains over those builtins.
-    std::unordered_map<uint32_t, uint32_t> chain_component;
-    for (size_t i = 5; i < code.size();) {
-        const uint32_t wc = word_count(i);
-        if (opcode(i) == 65 && wc >= 5 && builtin_vectors.count(code[i + 3])) {
-            auto index = integer_constant.find(code[i + 4]);
-            if (index != integer_constant.end() && index->second < 3)
-                chain_component[code[i + 2]] = index->second;
-        }
-        i += wc;
-    }
-
-    enum class PatchKind { Component, Vector };
-    struct Patch {
-        size_t load_index;
-        uint32_t old_id;
-        uint32_t result_type;
-        PatchKind kind;
-        uint32_t base;
-        uint32_t rhs_id = 0;
-        uint32_t sum_id = 0;
-    };
-    std::vector<Patch> patches;
-    for (size_t i = 5; i < code.size();) {
-        const uint32_t wc = word_count(i);
-        if (opcode(i) == 61 && wc >= 4) {
-            const uint32_t pointer = code[i + 3];
-            auto direct = builtin_vectors.find(pointer);
-            if (direct != builtin_vectors.end()) {
-                if (vector_count[direct->second] != 3) return false;
-                patches.push_back({i, code[i + 2], code[i + 1], PatchKind::Vector,
-                                   base_x, 0, 0});
-            } else {
-                auto chain = chain_component.find(pointer);
-                if (chain != chain_component.end()) {
-                    const uint32_t base = chain->second == 0 ? base_x
-                                        : chain->second == 1 ? base_y
-                                                              : base_z;
-                    if (base) patches.push_back({i, code[i + 2], code[i + 1],
-                                                 PatchKind::Component, base, 0, 0});
-                }
-            }
-        }
-        i += wc;
-    }
-    if (patches.empty()) return false;
-
-    uint32_t bound = code[3];
-    std::vector<uint32_t> constants;
-    std::unordered_map<uint32_t, uint32_t> replacement;
-    for (auto &patch : patches) {
-        if (patch.kind == PatchKind::Component) {
-            const uint32_t constant = bound++;
-            constants.push_back((4u << 16) | 43u);
-            constants.push_back(patch.result_type);
-            constants.push_back(constant);
-            constants.push_back(patch.base);
-            patch.rhs_id = constant;
-        } else {
-            const uint32_t vector_type = patch.result_type;
-            auto component_it = vector_component.find(vector_type);
-            if (component_it == vector_component.end() || vector_count[vector_type] != 3)
-                return false;
-            const uint32_t component_type = component_it->second;
-            const uint32_t values[3] = {base_x, base_y, base_z};
-            uint32_t ids[3];
-            for (size_t c = 0; c < 3; ++c) {
-                ids[c] = bound++;
-                constants.push_back((4u << 16) | 43u);
-                constants.push_back(component_type);
-                constants.push_back(ids[c]);
-                constants.push_back(values[c]);
-            }
-            const uint32_t composite = bound++;
-            constants.push_back((6u << 16) | 44u); // OpConstantComposite
-            constants.push_back(vector_type);
-            constants.push_back(composite);
-            constants.push_back(ids[0]);
-            constants.push_back(ids[1]);
-            constants.push_back(ids[2]);
-            patch.rhs_id = composite;
-        }
-        patch.sum_id = bound++;
-        replacement[patch.old_id] = patch.sum_id;
-    }
-
-    const auto is_id_operand = [](uint32_t op, uint32_t j, uint32_t wc) {
-        switch (op) {
-        case 57: return j >= 4;             // OpFunctionCall
-        case 61: return j == 3;             // OpLoad pointer
-        case 62: return j == 2;             // OpStore object
-        case 65: return j >= 3;             // OpAccessChain base/indices
-        case 77: return j == 3;             // OpVectorExtractDynamic vector
-        case 78: return j == 3 || j == 4;   // OpVectorInsertDynamic vector/component
-        case 79: return j == 3 || j == 4;   // OpVectorShuffle vectors
-        case 80: return j >= 3;             // OpCompositeConstruct
-        case 109: case 110: case 111: case 112: case 113: case 114:
-        case 115: case 116: case 117: case 118: case 119: case 120:
-        case 121: case 122: case 123: case 124: case 126: case 127:
-            return j == 3;                  // unary conversion/bit ops
-        case 81: return j == 3;             // OpCompositeExtract composite
-        case 82: return j == 3 || j == 4;   // OpCompositeInsert object/composite
-        case 95: case 96: case 97: case 98:
-            return j == 4;                  // OpImageFetch/Gather/DrefGather/Read coordinate
-        case 99: return j == 2 || j == 3;   // OpImageWrite coordinate/texel
-        case 60: return j == 4;             // OpImageTexelPointer coordinate
-        case 227: case 229: case 232: case 233:
-        case 234: case 235: case 236: case 237:
-        case 238: case 239: case 240: case 241: case 242:
-            return j == 3 || j == 6;        // atomics pointer/value
-        case 228: return j == 1 || j == 4;  // OpAtomicStore pointer/value
-        case 230: case 231: return j == 3 || j == 6 || j == 7;
-        case 83: return j == 3;             // OpCopyObject
-        case 128: case 129: case 130: case 131: case 132: case 133:
-        case 134: case 135: case 136: case 137: case 138: case 139:
-        case 140: case 141: case 142: case 143: case 144: case 145:
-        case 146: case 147: case 148: case 149: case 150: case 151:
-        case 152: case 157: case 158: case 159: case 160:
-        case 164: case 165: case 166: case 167: case 168:
-        case 169: case 170: case 171: case 172: case 173:
-        case 194: case 195: case 196: case 197: case 198: case 199:
-            return j == 3 || j == 4 || (op == 169 && j == 5);
-        case 153: case 154: case 155: case 156: case 161: case 163:
-            return j == 3;                  // unary logical/relational
-        case 254: return j == 1;            // OpReturnValue
-        default: (void)wc; return false;
-        }
-    };
-    std::vector<uint32_t> output;
-    output.insert(output.end(), code.begin(), code.begin() + 5);
-    bool constants_emitted = false;
-    for (size_t i = 5; i < code.size();) {
-        const uint32_t wc = word_count(i);
-        if (wc == 0 || i + wc > code.size()) return false;
-        const uint32_t op = opcode(i);
-        if (!constants_emitted && op == 54) { // OpFunction
-            output.insert(output.end(), constants.begin(), constants.end());
-            constants_emitted = true;
-        }
-        auto patch = std::find_if(patches.begin(), patches.end(),
-                                  [&](const Patch &p) { return p.load_index == i; });
-        const bool is_load = op == 61 && wc >= 4;
-        for (uint32_t j = 0; j < wc; ++j) {
-            uint32_t word = code[i + j];
-            if (j > 0 && !(is_load && j == 2) && is_id_operand(op, j, wc)) {
-                auto it = replacement.find(word);
-                if (it != replacement.end()) word = it->second;
-            }
-            output.push_back(word);
-        }
-        if (patch != patches.end()) {
-            output.push_back((5u << 16) | 128u); // OpIAdd
-            output.push_back(patch->result_type);
-            output.push_back(patch->sum_id);
-            output.push_back(patch->old_id);
-            output.push_back(patch->rhs_id);
-        }
-        i += wc;
-    }
-    if (!constants_emitted) return false;
-    output[3] = bound;
-    if (!validate(output, 0x00010300u)) return false;
-    code = std::move(output);
     return true;
 }

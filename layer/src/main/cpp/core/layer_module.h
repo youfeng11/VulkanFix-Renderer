@@ -100,6 +100,7 @@ public:
         const VkGraphicsPipelineCreateInfo* pCreateInfos,
         const VkPipeline* pPipelines) {}
 
+    virtual void on_modify_compute_pipeline_create_info(VkDevice, VkComputePipelineCreateInfo&) {}
     virtual void on_post_create_compute_pipelines(
         VkDevice device,
         uint32_t count,

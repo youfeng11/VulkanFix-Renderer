@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -15,10 +16,14 @@ namespace vkfix {
 class ShaderModuleCache {
 public:
     static ShaderModuleCache &get();
-    void remember(VkDevice, VkShaderModule, const VkShaderModuleCreateInfo *);
+    void remember(VkDevice, VkShaderModule, const VkShaderModuleCreateInfo *,
+                  bool specialize_at_pipeline = false, bool select_view_at_pipeline = false);
     void forget(VkDevice, VkShaderModule);
     void forget_device(VkDevice);
     bool copy(VkDevice, VkShaderModule, std::vector<uint32_t> &) const;
+    std::shared_ptr<const std::vector<uint32_t>> acquire(VkDevice, VkShaderModule) const;
+    std::shared_ptr<const std::vector<uint32_t>> acquire_deferred(VkDevice, VkShaderModule) const;
+    std::shared_ptr<const std::vector<uint32_t>> acquire_view_deferred(VkDevice, VkShaderModule) const;
 
 private:
     struct Key {
@@ -36,7 +41,13 @@ private:
         }
     };
     mutable std::mutex mutex_;
-    std::unordered_map<Key, std::vector<uint32_t>, Hash> modules_;
-    static constexpr size_t kMaxModules = 4096;
+    // Live Vulkan objects, rather than an arbitrary shader-count threshold,
+    // determine lifetime. Pipelines can keep a snapshot after module deletion.
+    struct Module {
+        std::shared_ptr<const std::vector<uint32_t>> words;
+        bool specialize_at_pipeline;
+        bool select_view_at_pipeline;
+    };
+    std::unordered_map<Key, Module, Hash> modules_;
 };
 } // namespace vkfix

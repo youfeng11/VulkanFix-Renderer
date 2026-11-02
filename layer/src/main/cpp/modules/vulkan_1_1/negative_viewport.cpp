@@ -13,9 +13,8 @@
 REGISTER_LAYER_MODULE(NegativeViewportModule);
 
 namespace {
-uint64_t pipeline_key(VkDevice device, VkPipeline pipeline) {
-    return (uint64_t)(uintptr_t)device * 0x9e3779b97f4a7c15ull ^
-           (uint64_t)(uintptr_t)pipeline;
+vkfix::DeviceObjectKey pipeline_key(VkDevice device, VkPipeline pipeline) {
+    return vkfix::DeviceObjectKey::make(device, pipeline);
 }
 bool uses_dynamic_viewport(const VkGraphicsPipelineCreateInfo &createInfo) {
     const auto *dynamic = createInfo.pDynamicState;
@@ -80,9 +79,8 @@ void NegativeViewportModule::on_post_create_device(VkPhysicalDevice physicalDevi
                                                    VkDevice device, VkResult result,
                                                    void *) {
     if (result != VK_SUCCESS || device == VK_NULL_HANDLE) return;
-    // Use the layer's deterministic viewport path even on drivers that report
-    // maintenance1: the self-check exercises negative viewport slots that some
-    // drivers ignore, and the same path also covers 1.0 drivers.
+    // The current policy selects the fallback on every device. The native
+    // capability below is diagnostic information, not evidence of a driver defect.
     const bool emulate = true;
     LOGI("NegativeViewport: post device emulate=%d native=%d", int(emulate),
          int(native_support(physicalDevice)));
@@ -103,15 +101,24 @@ void NegativeViewportModule::on_destroy_device(VkDevice device) {
         get_last_instance(), device, "vkDestroyPipeline");
     std::lock_guard<std::mutex> lock(m_mutex);
     m_emulate.erase((uint64_t)(uintptr_t)device);
-    if (destroy_pipeline)
-        for (const auto &entry : m_variants)
-            destroy_pipeline(device, entry.second, nullptr);
-    m_variants.clear();
-    m_pipeline_uses_viewport_index.clear();
-    m_pipeline_constant_viewport.clear();
-    m_cmd_pipeline.clear();
-    m_cmd_negative.clear();
-    m_cmd_positive.clear();
+    for (auto it = m_variants.begin(); it != m_variants.end();) {
+        if (it->first.device == device) {
+            if (destroy_pipeline) destroy_pipeline(device, it->second, nullptr);
+            it = m_variants.erase(it);
+        } else ++it;
+    }
+    for (auto it = m_pipeline_uses_viewport_index.begin(); it != m_pipeline_uses_viewport_index.end();)
+        if (it->first.device == device) it = m_pipeline_uses_viewport_index.erase(it); else ++it;
+    for (auto it = m_pipeline_constant_viewport.begin(); it != m_pipeline_constant_viewport.end();)
+        if (it->first.device == device) it = m_pipeline_constant_viewport.erase(it); else ++it;
+    for (auto it = m_cmd_devices.begin(); it != m_cmd_devices.end();) {
+        if (it->second == device) {
+            m_cmd_pipeline.erase(it->first);
+            m_cmd_negative.erase(it->first);
+            m_cmd_positive.erase(it->first);
+            it = m_cmd_devices.erase(it);
+        } else ++it;
+    }
     for (auto it = m_pending.begin(); it != m_pending.end();) {
         if (it->second.device == device) {
             if (destroy && it->second.module) destroy(device, it->second.module, nullptr);
@@ -145,17 +152,26 @@ void NegativeViewportModule::on_modify_pipeline_create_info(
     const bool dynamic = has_dynamic_viewport(createInfo);
     if ((!static_negative && !dynamic) || !createInfo.pStages || createInfo.stageCount == 0)
         return;
-    int vertex_stage = -1;
-    for (uint32_t i = 0; i < createInfo.stageCount; ++i)
-        if (createInfo.pStages[i].stage == VK_SHADER_STAGE_VERTEX_BIT) {
-            vertex_stage = int(i);
-            break;
+    // Viewport mapping follows the last pre-rasterization stage. Flipping VS
+    // outputs can change later shader calculations and misses positions rebuilt
+    // by TES/GS. Stage-array order does not define execution order.
+    int position_stage = -1;
+    uint32_t execution_model = 0, rank = 0;
+    for (uint32_t i = 0; i < createInfo.stageCount; ++i) {
+        const auto stage = createInfo.pStages[i].stage;
+        const uint32_t candidate = stage == VK_SHADER_STAGE_GEOMETRY_BIT ? 3 :
+            stage == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT ? 2 :
+            stage == VK_SHADER_STAGE_VERTEX_BIT ? 1 : 0;
+        if (candidate > rank) {
+            position_stage = int(i); rank = candidate;
+            execution_model = candidate == 1 ? 0 : candidate;
         }
-    if (vertex_stage < 0) return;
+    }
+    if (position_stage < 0) return;
 
     std::vector<uint32_t> code;
     if (!vkfix::ShaderModuleCache::get().copy(
-            device, createInfo.pStages[vertex_stage].module, code))
+            device, createInfo.pStages[position_stage].module, code))
         return;
 
     auto adjust_negative_viewports = [&]() -> bool {
@@ -209,7 +225,8 @@ void NegativeViewportModule::on_modify_pipeline_create_info(
         }
     }
 
-    if (!ShaderRewriter::get().flip_position_y(code)) return;
+    if (!ShaderRewriter::get().flip_position_y(code,
+            createInfo.pStages[position_stage].pName, execution_model)) return;
 
     auto *stages = (VkPipelineShaderStageCreateInfo *)malloc(
         sizeof(VkPipelineShaderStageCreateInfo) * createInfo.stageCount);
@@ -233,6 +250,7 @@ void NegativeViewportModule::on_modify_pipeline_create_info(
         if (uses_index) ShaderRewriter::constant_viewport_index(code, constant_viewport);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_pending[&createInfo] = {device, patched, true, uses_index, constant_viewport};
+        m_pending[&createInfo].stage = createInfo.pStages[position_stage].stage;
         return;
     }
 
@@ -259,7 +277,7 @@ void NegativeViewportModule::on_modify_pipeline_create_info(
     }
     viewport_state->pViewports = viewports;
     createInfo.pViewportState = viewport_state;
-    stages[vertex_stage].module = patched;
+    stages[position_stage].module = patched;
     allocationsToFree.push_back(viewport_state);
     allocationsToFree.push_back(viewports);
 
@@ -283,6 +301,7 @@ void NegativeViewportModule::on_post_create_graphics_pipelines(
         m_pending.erase(it);
         if (pending.dynamic_variant && pPipelines && pPipelines[i] && create) {
             VkGraphicsPipelineCreateInfo ci = pCreateInfos[i];
+            ci.flags &= ~VK_PIPELINE_CREATE_DERIVATIVE_BIT;
             ci.basePipelineHandle = VK_NULL_HANDLE;
             ci.basePipelineIndex = -1;
             auto *stages = (VkPipelineShaderStageCreateInfo *)malloc(
@@ -291,7 +310,7 @@ void NegativeViewportModule::on_post_create_graphics_pipelines(
                 memcpy(stages, ci.pStages,
                        sizeof(VkPipelineShaderStageCreateInfo) * ci.stageCount);
                 for (uint32_t s = 0; s < ci.stageCount; ++s)
-                    if (stages[s].stage == VK_SHADER_STAGE_VERTEX_BIT) {
+                    if (stages[s].stage == pending.stage) {
                         stages[s].module = pending.module;
                         break;
                     }
@@ -331,6 +350,7 @@ void NegativeViewportModule::on_destroy_pipeline(VkDevice device, VkPipeline pip
 void NegativeViewportModule::on_begin_command_buffer(VkCommandBuffer commandBuffer,
                                                       const VkCommandBufferBeginInfo *) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    m_cmd_devices.erase((uint64_t)(uintptr_t)commandBuffer);
     m_cmd_pipeline.erase((uint64_t)(uintptr_t)commandBuffer);
     m_cmd_negative.erase((uint64_t)(uintptr_t)commandBuffer);
     m_cmd_positive.erase((uint64_t)(uintptr_t)commandBuffer);
@@ -341,11 +361,17 @@ void NegativeViewportModule::on_reset_command_buffer(VkCommandBuffer commandBuff
     on_begin_command_buffer(commandBuffer, nullptr);
 }
 
+void NegativeViewportModule::on_free_command_buffers(VkDevice, uint32_t count, const VkCommandBuffer* commands) {
+    if (commands) for (uint32_t i = 0; i < count; ++i) on_begin_command_buffer(commands[i], nullptr);
+}
+
 void NegativeViewportModule::on_cmd_bind_pipeline(VkCommandBuffer commandBuffer,
                                                    VkPipelineBindPoint bindPoint,
                                                    VkPipeline pipeline) {
     if (bindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
+    const auto device = LayerManager::get().get_device_for_cmd(commandBuffer);
     std::lock_guard<std::mutex> lock(m_mutex);
+    m_cmd_devices[(uint64_t)(uintptr_t)commandBuffer] = device;
     m_cmd_pipeline[(uint64_t)(uintptr_t)commandBuffer] = pipeline;
 }
 
@@ -394,6 +420,7 @@ bool NegativeViewportModule::on_cmd_set_viewport(VkCommandBuffer commandBuffer,
     real(commandBuffer, firstViewport, count, adjusted.data());
     std::lock_guard<std::mutex> lock(m_mutex);
     const auto key = (uint64_t)(uintptr_t)commandBuffer;
+    m_cmd_devices[key] = device;
     auto &negatives = m_cmd_negative[key];
     auto &positives = m_cmd_positive[key];
     for (uint32_t i = 0; i < count; ++i) {
