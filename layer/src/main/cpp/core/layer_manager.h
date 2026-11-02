@@ -532,7 +532,8 @@ public:
         return *cached_table;
     }
 
-    void init_device_dispatch_table(VkDevice device);
+    void init_device_dispatch_table(VkDevice device,
+        uint32_t nativeApi = VK_API_VERSION_1_0, bool renderPass2Extension = false);
     void remove_device_dispatch_table(VkDevice device);
 
     VkDevice get_device_for_cmd_slow(VkCommandBuffer cmd);

@@ -18,6 +18,7 @@
 #include "modules/vulkan_1_1/negative_viewport.h"
 #include "core11_aggregate_repair.h"
 #include "modules/vulkan_1_1/dispatch_base.h"
+#include "modules/vulkan_1_2/renderpass2.h"
 #include "shader/uniform_member_pruning.h"
 #include "driver_trust.h"
 #include "shader/sampler_alias_dedup.h"
@@ -92,7 +93,8 @@ void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
     m_modules.push_back(std::move(module));
 }
 
-void LayerManager::init_device_dispatch_table(VkDevice device) {
+void LayerManager::init_device_dispatch_table(VkDevice device, uint32_t nativeApi,
+                                            bool renderPass2Extension) {
     if (device == VK_NULL_HANDLE) return;
     DeviceDispatchTable dt{};
     VkInstance inst = get_last_instance();
@@ -197,21 +199,31 @@ void LayerManager::init_device_dispatch_table(VkDevice device) {
     if (!dt.ResetQueryPool) {
         LOAD_PROC_OPT(ResetQueryPool, "vkResetQueryPoolEXT");
     }
-    LOAD_PROC(CreateRenderPass2);
-    if (!dt.CreateRenderPass2) {
+    // A promoted core name is not an alias on an older logical device. In
+    // particular Android can return a non-null loader stub for that name.
+    if (nativeApi >= VK_API_VERSION_1_2) {
+        LOAD_PROC(CreateRenderPass2);
+        LOAD_PROC(CmdBeginRenderPass2);
+        LOAD_PROC(CmdNextSubpass2);
+        LOAD_PROC(CmdEndRenderPass2);
+    } else if (renderPass2Extension) {
         LOAD_PROC_OPT(CreateRenderPass2, "vkCreateRenderPass2KHR");
-    }
-    LOAD_PROC(CmdBeginRenderPass2);
-    if (!dt.CmdBeginRenderPass2) {
         LOAD_PROC_OPT(CmdBeginRenderPass2, "vkCmdBeginRenderPass2KHR");
-    }
-    LOAD_PROC(CmdNextSubpass2);
-    if (!dt.CmdNextSubpass2) {
         LOAD_PROC_OPT(CmdNextSubpass2, "vkCmdNextSubpass2KHR");
-    }
-    LOAD_PROC(CmdEndRenderPass2);
-    if (!dt.CmdEndRenderPass2) {
         LOAD_PROC_OPT(CmdEndRenderPass2, "vkCmdEndRenderPass2KHR");
+    }
+    const bool nativeRenderPass2 = dt.CreateRenderPass2 && dt.CmdBeginRenderPass2 &&
+                                  dt.CmdNextSubpass2 && dt.CmdEndRenderPass2;
+    if (!nativeRenderPass2) {
+        dt.CreateRenderPass2 = nullptr;
+        dt.CmdBeginRenderPass2 = nullptr;
+        dt.CmdNextSubpass2 = nullptr;
+        dt.CmdEndRenderPass2 = nullptr;
+    }
+    if (m_renderpass2_mod && m_renderpass2_mod->is_enabled()) {
+        static_cast<RenderPass2Module*>(m_renderpass2_mod)->set_native_route(device, nativeRenderPass2);
+        LOGI("Device %p: RenderPass2 route=%s", device,
+             nativeRenderPass2 ? (nativeApi >= VK_API_VERSION_1_2 ? "core" : "KHR") : "emulated");
     }
     LOAD_PROC(CmdDrawIndirectCount);
     if (!dt.CmdDrawIndirectCount) {
@@ -392,6 +404,13 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
     if (VertexStoreEmulator::get().enabled(device)) return true;
 
     if (!pName) return true;
+    // Keep both public spellings on the same enabled backend route. Returning
+    // a raw core pointer here would bypass the KHR alias on a Vulkan 1.1 device.
+    if (!strcmp(pName, "vkCreateRenderPass2") || !strcmp(pName, "vkCreateRenderPass2KHR") ||
+        !strcmp(pName, "vkCmdBeginRenderPass2") || !strcmp(pName, "vkCmdBeginRenderPass2KHR") ||
+        !strcmp(pName, "vkCmdNextSubpass2") || !strcmp(pName, "vkCmdNextSubpass2KHR") ||
+        !strcmp(pName, "vkCmdEndRenderPass2") || !strcmp(pName, "vkCmdEndRenderPass2KHR"))
+        return true;
     // Viewport sign tracking must see every call; the module falls through to
     // the native command when emulation is not active.
     if (!strcmp(pName, "vkCmdSetViewport")) return true;
@@ -953,9 +972,12 @@ VkResult LayerManager::dispatch_create_device(
     const auto nativeContext = vkfix::native_state_for_physical(physicalDevice);
     const bool enableCore11Routes = nativeContext &&
         nativeContext->public_api >= VK_API_VERSION_1_1 && environment.device_api < VK_API_VERSION_1_1;
+    const bool enableRenderPass2Route = m_renderpass2_mod && m_renderpass2_mod->is_enabled() &&
+        nativeContext && nativeContext->public_api >= VK_API_VERSION_1_2 &&
+        environment.device_api < VK_API_VERSION_1_2;
     // Core 1.1 callers need promoted command extensions even when they did not
     // spell out any KHR names in VkDeviceCreateInfo.
-    if (!enabledExtensions.empty() || enableCore11Routes) {
+    if (!enabledExtensions.empty() || enableCore11Routes || enableRenderPass2Route) {
         res = gatherExtensions(nullptr);
         // Device layers are superseded; enabled layers belong to the instance.
         // Never read the legacy VkDeviceCreateInfo layer-name fields.
@@ -968,6 +990,15 @@ VkResult LayerManager::dispatch_create_device(
     if (res == VK_SUCCESS && enableCore11Routes) {
         auto routes = vkfix::vulkan11_device_extensions(nativeContext->public_api, environment);
         enabledExtensions.insert(enabledExtensions.end(), routes.begin(), routes.end());
+    }
+    if (res == VK_SUCCESS && enableRenderPass2Route &&
+        environment.available.count(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)) {
+        auto candidate = enabledExtensions;
+        candidate.push_back(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
+        // An unavailable optional prerequisite must leave the emulation route
+        // usable instead of making otherwise valid device creation fail.
+        if (vkfix::close_extension_dependencies(candidate, environment).result == VK_SUCCESS)
+            enabledExtensions.push_back(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
     }
     auto dependencyPlan = res == VK_SUCCESS
                               ? vkfix::close_extension_dependencies(enabledExtensions, environment)
@@ -1010,7 +1041,9 @@ VkResult LayerManager::dispatch_create_device(
             std::unique_lock<std::shared_mutex> lock(m_state_rw_mutex);
             m_device_phys[(uint64_t)(uintptr_t)*pDevice] = physicalDevice;
         }
-        init_device_dispatch_table(*pDevice);
+        const bool renderPass2Enabled = std::any_of(dependencyPlan.names.begin(), dependencyPlan.names.end(),
+            [](const char* name) { return strcmp(name, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME) == 0; });
+        init_device_dispatch_table(*pDevice, environment.device_api, renderPass2Enabled);
         RenderDocManager::get().on_device_created(*pDevice, nativeInstance);
         update_device_bypass_flags(*pDevice);
         PipelineCacheManager::get().init_for_device(physicalDevice, *pDevice);
@@ -2979,14 +3012,6 @@ VkResult LayerManager::dispatch_create_render_pass2(
     const auto& dt = get_dispatch_table(device);
     if (dt.CreateRenderPass2) {
         return tracked(dt.CreateRenderPass2(device, pCreateInfo, pAllocator, pRenderPass));
-    }
-    PFN_vkCreateRenderPass2KHR real_fn =
-        (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2KHR");
-    if (!real_fn) {
-        real_fn = (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2");
-    }
-    if (real_fn) {
-        return tracked(real_fn(device, pCreateInfo, pAllocator, pRenderPass));
     }
     return VK_ERROR_INITIALIZATION_FAILED;
 }

@@ -8,6 +8,9 @@ public:
     RenderPass2Module();
     ~RenderPass2Module() override = default;
 
+    // Set from the enabled logical-device route, after resolving its commands.
+    void set_native_route(VkDevice device, bool native);
+
     bool on_create_render_pass2(
         VkDevice device,
         const VkRenderPassCreateInfo2* pCreateInfo,

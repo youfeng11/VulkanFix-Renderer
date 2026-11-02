@@ -22,6 +22,12 @@ RenderPass2Module::RenderPass2Module()
     LOGI("RenderPass2Module initialized");
 }
 
+void RenderPass2Module::set_native_route(VkDevice device, bool native) {
+    std::unique_lock<std::shared_mutex> lock(m_ext_mutex);
+    m_device_native[(uint64_t)(uintptr_t)device] = native;
+    m_native_cache.invalidate();
+}
+
 bool RenderPass2Module::on_create_render_pass2(
     VkDevice device,
     const VkRenderPassCreateInfo2* pCreateInfo,
@@ -30,16 +36,6 @@ bool RenderPass2Module::on_create_render_pass2(
     VkResult& outResult
 ) {
     if (is_device_native(device)) return false;
-
-    PFN_vkCreateRenderPass2KHR real_fn =
-        (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2KHR");
-    if (!real_fn) {
-        real_fn = (PFN_vkCreateRenderPass2KHR) get_real_proc(get_last_instance(), device, "vkCreateRenderPass2");
-    }
-    if (real_fn) {
-        outResult = real_fn(device, pCreateInfo, pAllocator, pRenderPass);
-        return true;
-    }
 
     if (!pCreateInfo) {
         outResult = VK_ERROR_INITIALIZATION_FAILED;

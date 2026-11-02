@@ -108,6 +108,12 @@ VKAPI_ATTR void VKAPI_CALL end_pass(VkCommandBuffer) {
     in_pass = false;
     events += 'E';
 }
+VKAPI_ATTR void VKAPI_CALL begin_pass2(VkCommandBuffer cmd, const VkRenderPassBeginInfo* info,
+                                      const VkSubpassBeginInfo* subpass) {
+    begin_pass(cmd, info, subpass->contents);
+}
+VKAPI_ATTR void VKAPI_CALL next_subpass2(VkCommandBuffer, const VkSubpassBeginInfo*, const VkSubpassEndInfo*) {}
+VKAPI_ATTR void VKAPI_CALL end_pass2(VkCommandBuffer cmd, const VkSubpassEndInfo*) { end_pass(cmd); }
 VKAPI_ATTR void VKAPI_CALL barrier(VkCommandBuffer, VkPipelineStageFlags src,
                                    VkPipelineStageFlags dst, VkDependencyFlags, uint32_t count,
                                    const VkMemoryBarrier *memory, uint32_t,
@@ -147,6 +153,12 @@ void *mali_tiler_mock_proc(const char *name) {
     PROC(CreateRenderPass, create_pass);
     PROC(CreateRenderPass2, create_pass2);
     PROC(CreateRenderPass2KHR, create_pass2);
+    PROC(CmdBeginRenderPass2, begin_pass2);
+    PROC(CmdBeginRenderPass2KHR, begin_pass2);
+    PROC(CmdNextSubpass2, next_subpass2);
+    PROC(CmdNextSubpass2KHR, next_subpass2);
+    PROC(CmdEndRenderPass2, end_pass2);
+    PROC(CmdEndRenderPass2KHR, end_pass2);
     PROC(DestroyRenderPass, destroy_pass);
     PROC(CreateFramebuffer, create_fb);
     PROC(DestroyFramebuffer, destroy_fb);
@@ -171,6 +183,11 @@ void run_mali_tiler_regressions(void (*check)(bool, const char *)) {
     multi->on_post_create_device(phys, device, VK_SUCCESS, nullptr);
     manager.register_module(std::move(multi));
     manager.init_device_dispatch_table(device);
+    check(!manager.get_dispatch_table(device).CreateRenderPass2,
+          "non-null RenderPass2 loader symbols do not authorize an unenabled device route");
+    // This fixture injects logical device state directly, without CreateDevice.
+    // Select an enabled KHR route and provide its complete four-command set.
+    manager.init_device_dispatch_table(device, VK_API_VERSION_1_1, true);
     manager.update_device_bypass_flags(device);
     check(manager.should_intercept_device_proc(device, "vkCreateRenderPass2KHR") &&
               manager.should_intercept_device_proc(device, "vkCmdBeginQuery") &&
