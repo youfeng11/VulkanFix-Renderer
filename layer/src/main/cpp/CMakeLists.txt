@@ -457,6 +457,13 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_include_directories(multiview_draw_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(multiview_draw_gpu_test PRIVATE Vulkan::Headers
         ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB} dl)
+    add_executable(shader_module_lifetime_test EXCLUDE_FROM_ALL tests/shader_module_lifetime_test.cpp
+        core/specialized_shader_stages.cpp core/shader_module_cache.cpp
+        shader/constant_input_lowering.cpp shader/specialize_constants.cpp)
+    target_include_directories(shader_module_lifetime_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(shader_module_lifetime_test PRIVATE Vulkan::Headers
+        ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
+    vkfix_sanitize_test(shader_module_lifetime_test)
     add_executable(constant_input_test EXCLUDE_FROM_ALL tests/constant_input_test.cpp
         shader/constant_input_lowering.cpp shader/shader_rewriter.cpp shader/storage_buffer_lowering.cpp)
     target_include_directories(constant_input_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
