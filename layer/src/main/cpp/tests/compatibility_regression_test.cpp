@@ -1,6 +1,7 @@
 #include "core/driver_loader.h"
 #include "core/layer_manager.h"
 #include "core/vertex_store_emulator.h"
+#include "core/multiview_pipeline_layouts.h"
 #include "modules/vulkan_1_0/vertex_pipeline_stores_and_atomics.h"
 #include "modules/vulkan_1_2/buffer_device_address.h"
 #include "shader/vertex_store_lowering.h"
@@ -286,6 +287,46 @@ static void test_vertex_resource_lifetimes(VkPhysicalDevice physical) {
           "device cleanup destroys each remaining native layout once");
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL create_multiview_layout(VkDevice device, const VkPipelineLayoutCreateInfo* ci,
+    const VkAllocationCallbacks* allocator, VkPipelineLayout* out) {
+    return LayerManager::get().dispatch_create_pipeline_layout(device,ci,allocator,out,true);
+}
+static VKAPI_ATTR void VKAPI_CALL destroy_multiview_layout(VkDevice device, VkPipelineLayout layout, const VkAllocationCallbacks* allocator) {
+    LayerManager::get().dispatch_destroy_pipeline_layout(device,layout,allocator,true);
+}
+static void test_multiview_vertex_layout(VkPhysicalDevice physical) {
+    auto device = (VkDevice)(uintptr_t)0xa002; auto command = (VkCommandBuffer)(uintptr_t)0xa003;
+    auto& emulator = VertexStoreEmulator::get(); auto& layouts = vkfix::MultiviewPipelineLayouts::get();
+    const auto sets_before = cloned_sets_created - cloned_sets_destroyed;
+    const auto layouts_before = cloned_layouts_created - cloned_layouts_destroyed;
+    emulator.enable(device,physical);
+    auto set_layout = (VkDescriptorSetLayout)0xa101; auto source = (VkPipelineLayout)0xa102;
+    VkDescriptorSetLayoutBinding binding{0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_VERTEX_BIT,nullptr};
+    VkDescriptorSetLayoutCreateInfo si{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; si.bindingCount = 1; si.pBindings = &binding;
+    emulator.set_layout(device,set_layout,&si);
+    VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO}; ci.setLayoutCount = 1; ci.pSetLayouts = &set_layout;
+    check(layouts.remember(device,source,ci,create_multiview_layout,destroy_multiview_layout) == VK_SUCCESS,
+        "multiview private layout enters ordinary layer module creation");
+    auto retained = layouts.acquire(device,source);
+    check(retained && retained->native() && emulator.memory_stats(device).cloned_pipeline_layouts == 1,
+        "vertex-store metadata includes the private replay layout");
+    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO}; ai.commandPool = (VkCommandPool)0xa103; ai.commandBufferCount = 1;
+    emulator.allocate_commands(device,&ai,&command);
+    auto set = (VkDescriptorSet)0xa104; const uint32_t offset = 64;
+    emulator.bind_sets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,retained->native(),0,1,&set,1,&offset);
+    layouts.forget(device,source); emulator.erase_set_layout(device,set_layout); retained.reset();
+    auto stats = emulator.memory_stats(device);
+    check(stats.cloned_pipeline_layouts == 1 && stats.cloned_set_layouts == 1,
+        "binding a private multiview layout retains vertex-store descriptor metadata beyond source destruction");
+    emulator.clear_commands(command);
+    stats = emulator.memory_stats(device);
+    check(!stats.cloned_pipeline_layouts && !stats.cloned_set_layouts,
+        "private layout destruction and command reset retire vertex-store clones");
+    layouts.forget_device(device); emulator.destroy_device(device);
+    check(cloned_sets_created - cloned_sets_destroyed == sets_before && cloned_layouts_created - cloned_layouts_destroyed == layouts_before,
+        "multiview/vertex-store integration releases each native layout once");
+}
+
 static void test_addresses(VkPhysicalDevice phys, VkDevice device) {
     BufferDeviceAddressModule module;
     std::vector<VkExtensionProperties> exts;
@@ -474,6 +515,7 @@ int main() {
     const auto device = (VkDevice)(uintptr_t)0x1000;
     test_atomics(phys);
     test_vertex_resource_lifetimes(phys);
+    test_multiview_vertex_layout(phys);
     test_addresses(phys, device);
     test_dispatch_reuse(device);
     test_vertex_lowering();

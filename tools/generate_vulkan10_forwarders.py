@@ -4,17 +4,17 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 NAMES = """
-vkAllocateDescriptorSets vkBindBufferMemory vkBindImageMemory
+vkBindBufferMemory vkBindImageMemory
 vkCmdSetBlendConstants vkCmdSetDepthBias vkCmdSetDepthBounds vkCmdSetLineWidth
 vkCmdSetScissor vkCmdSetStencilCompareMask vkCmdSetStencilReference
-vkCmdSetStencilWriteMask vkCmdSetViewport vkCreateBufferView vkCreateDescriptorPool
-vkCreateEvent vkCreateFence vkCreateQueryPool vkDestroyBufferView vkDestroyDescriptorPool
+vkCmdSetStencilWriteMask vkCmdSetViewport vkCreateBufferView
+vkCreateEvent vkCreateFence vkCreateQueryPool vkDestroyBufferView
 vkDestroyEvent vkDestroyFence vkDestroyQueryPool vkFlushMappedMemoryRanges
-vkFreeDescriptorSets vkGetBufferMemoryRequirements vkGetDeviceMemoryCommitment
+vkGetBufferMemoryRequirements vkGetDeviceMemoryCommitment
 vkGetEventStatus vkGetImageMemoryRequirements vkGetImageSparseMemoryRequirements
 vkGetImageSubresourceLayout vkGetPhysicalDeviceSparseImageFormatProperties
 vkGetQueryPoolResults vkGetRenderAreaGranularity vkInvalidateMappedMemoryRanges
-vkResetDescriptorPool vkResetEvent vkResetFences vkSetEvent vkUpdateDescriptorSets
+vkResetEvent vkResetFences vkSetEvent
 """.split()
 
 
@@ -42,10 +42,13 @@ def generate(root):
         args = ", ".join(p.findtext("name") for p in params)
         dispatch_type, dispatch_name = params[0].findtext("type"), params[0].findtext("name")
         lines.append(f"VK_LAYER_EXPORT {result} VKAPI_CALL {name}({signature}) {{")
+        if name == "vkCmdSetViewport":
+            lines.append("    LayerManager::get().dispatch_cmd_set_viewport(commandBuffer, firstViewport, viewportCount, pViewports);")
+            lines.extend(["}", ""])
+            continue
         if dispatch_type == "VkDevice":
             device = dispatch_name
         elif dispatch_type == "VkCommandBuffer":
-            lines.append(f"    TBDRBarrierOptimizer::get().on_cmd_action({dispatch_name});")
             lines.append(f"    auto device = LayerManager::get().get_device_for_cmd({dispatch_name});")
             device = "device"
         elif dispatch_type == "VkPhysicalDevice":
@@ -53,6 +56,20 @@ def generate(root):
         else:
             raise RuntimeError(f"Unsupported dispatch type: {name} {dispatch_type}")
         lines.append(f'    auto fn = (PFN_{name})get_real_proc(get_last_instance(), {device}, "{name}");')
+        if dispatch_type == "VkCommandBuffer":
+            replay_args = args.replace(dispatch_name, "target")
+            lines.append(f"    if (vkfix::MultiviewCommands::get().capture({dispatch_name}, true, [=] {{")
+            if name == "vkCmdSetBlendConstants":
+                lines.append("        std::array<float, 4> owned; std::memcpy(owned.data(), blendConstants, sizeof(owned));")
+                replay_args = replay_args.replace("blendConstants", "owned.data()")
+            elif name == "vkCmdSetScissor":
+                lines.append("        std::vector<VkRect2D> owned; if (scissorCount) owned.assign(pScissors, pScissors + scissorCount);")
+                replay_args = replay_args.replace("pScissors", "owned.data()")
+            lines.extend(["        return [=](VkCommandBuffer target, uint32_t) {",
+                          "            if (!fn) return VK_ERROR_INITIALIZATION_FAILED;",
+                          "            TBDRBarrierOptimizer::get().on_cmd_action(target);",
+                          f"            fn({replay_args}); return VK_SUCCESS;", "        };", "    })) return;",
+                          f"    TBDRBarrierOptimizer::get().on_cmd_action({dispatch_name});"])
         if result == "void":
             lines.append(f"    if (fn) fn({args});")
         elif result == "VkResult":

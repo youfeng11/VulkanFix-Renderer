@@ -75,11 +75,15 @@ bool RenderPass2Module::on_create_render_pass2(
     std::vector<bool> hasDs(pCreateInfo->subpassCount, false);
 
     std::vector<VkSubpassDescription> subpasses(pCreateInfo->subpassCount);
+    std::vector<uint32_t> viewMasks(pCreateInfo->subpassCount);
+    bool multiviewEnabled = false;
     for (uint32_t s = 0; s < pCreateInfo->subpassCount; ++s) {
         const auto& src = pCreateInfo->pSubpasses[s];
         auto& dst = subpasses[s];
         dst.flags = src.flags;
         dst.pipelineBindPoint = src.pipelineBindPoint;
+        viewMasks[s] = src.viewMask;
+        multiviewEnabled |= src.viewMask != 0;
 
         if (src.inputAttachmentCount > 0 && src.pInputAttachments) {
             inputRefs[s].resize(src.inputAttachmentCount);
@@ -118,6 +122,7 @@ bool RenderPass2Module::on_create_render_pass2(
     }
 
     std::vector<VkSubpassDependency> dependencies(pCreateInfo->dependencyCount);
+    std::vector<int32_t> viewOffsets(pCreateInfo->dependencyCount);
     for (uint32_t i = 0; i < pCreateInfo->dependencyCount; ++i) {
         const auto& src = pCreateInfo->pDependencies[i];
         auto& dst = dependencies[i];
@@ -128,6 +133,7 @@ bool RenderPass2Module::on_create_render_pass2(
         dst.srcAccessMask = src.srcAccessMask;
         dst.dstAccessMask = src.dstAccessMask;
         dst.dependencyFlags = src.dependencyFlags;
+        viewOffsets[i] = src.viewOffset;
     }
 
     VkRenderPassCreateInfo ci1{};
@@ -140,6 +146,19 @@ bool RenderPass2Module::on_create_render_pass2(
     ci1.pSubpasses = subpasses.empty() ? nullptr : subpasses.data();
     ci1.dependencyCount = (uint32_t)dependencies.size();
     ci1.pDependencies = dependencies.empty() ? nullptr : dependencies.data();
+
+    // RenderPass2 moved multiview fields into the subpasses/dependencies.
+    // Preserve the full relation when using a 1.0/KHR render-pass entry point.
+    VkRenderPassMultiviewCreateInfo multiview{VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO};
+    if (multiviewEnabled || pCreateInfo->correlatedViewMaskCount) {
+        multiview.subpassCount = uint32_t(viewMasks.size());
+        multiview.pViewMasks = viewMasks.data();
+        multiview.dependencyCount = uint32_t(viewOffsets.size());
+        multiview.pViewOffsets = viewOffsets.empty() ? nullptr : viewOffsets.data();
+        multiview.correlationMaskCount = pCreateInfo->correlatedViewMaskCount;
+        multiview.pCorrelationMasks = pCreateInfo->pCorrelatedViewMasks;
+        ci1.pNext = &multiview;
+    }
 
     PFN_vkCreateRenderPass real_crp =
         (PFN_vkCreateRenderPass) get_real_proc(get_last_instance(), device, "vkCreateRenderPass");

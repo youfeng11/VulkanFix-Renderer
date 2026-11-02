@@ -270,12 +270,12 @@ public:
         VkDevice device,
         const VkPipelineLayoutCreateInfo* pCreateInfo,
         const VkAllocationCallbacks* pAllocator,
-        VkPipelineLayout* pPipelineLayout);
+        VkPipelineLayout* pPipelineLayout, bool internal_multiview = false);
 
     void dispatch_destroy_pipeline_layout(
         VkDevice device,
         VkPipelineLayout pipelineLayout,
-        const VkAllocationCallbacks* pAllocator);
+        const VkAllocationCallbacks* pAllocator, bool internal_multiview = false);
 
     VkResult dispatch_allocate_command_buffers(
         VkDevice device,

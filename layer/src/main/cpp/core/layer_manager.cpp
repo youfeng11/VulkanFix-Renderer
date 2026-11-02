@@ -23,8 +23,32 @@
 #include "driver_trust.h"
 #include "shader/sampler_alias_dedup.h"
 #include "imageless_framebuffer_manager.h"
+#include "multiview_render_pass.h"
+#include "multiview_pipelines.h"
+#include "multiview_attachments.h"
+#include "multiview_descriptors.h"
+#include "multiview_commands.h"
+#include "multiview_pipeline_layouts.h"
 #include "layout_compat.h"
 #include "vk_pnext.h"
+#include <stdexcept>
+
+static VKAPI_ATTR void VKAPI_CALL multiview_begin_native(VkCommandBuffer cmd, const VkRenderPassBeginInfo* info, VkSubpassContents contents) {
+    LayerManager::get().dispatch_cmd_begin_render_pass(cmd, info, contents);
+}
+static VKAPI_ATTR void VKAPI_CALL multiview_end_native(VkCommandBuffer cmd) { LayerManager::get().dispatch_cmd_end_render_pass(cmd); }
+static VKAPI_ATTR VkResult VKAPI_CALL multiview_layout_create(VkDevice device, const VkPipelineLayoutCreateInfo* info,
+    const VkAllocationCallbacks* allocator, VkPipelineLayout* layout) {
+    return LayerManager::get().dispatch_create_pipeline_layout(device, info, allocator, layout, true);
+}
+static VKAPI_ATTR void VKAPI_CALL multiview_layout_destroy(VkDevice device, VkPipelineLayout layout, const VkAllocationCallbacks* allocator) {
+    LayerManager::get().dispatch_destroy_pipeline_layout(device, layout, allocator, true);
+}
+static VKAPI_ATTR void VKAPI_CALL multiview_barrier_native(VkCommandBuffer cmd, VkPipelineStageFlags src,
+    VkPipelineStageFlags dst, VkDependencyFlags flags, uint32_t mc, const VkMemoryBarrier* memory,
+    uint32_t bc, const VkBufferMemoryBarrier* buffers, uint32_t ic, const VkImageMemoryBarrier* images) {
+    LayerManager::get().dispatch_cmd_pipeline_barrier(cmd, src, dst, flags, mc, memory, bc, buffers, ic, images);
+}
 
 LayerManager& LayerManager::get() {
     static LayerManager s_instance;
@@ -404,6 +428,11 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
     if (VertexStoreEmulator::get().enabled(device)) return true;
 
     if (!pName) return true;
+    if (uses_software_multiview(device) && !strncmp(pName, "vkCmd", 5)) return true;
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview) &&
+        (!strcmp(pName, "vkAllocateDescriptorSets") || !strcmp(pName, "vkFreeDescriptorSets") ||
+         !strcmp(pName, "vkCreateDescriptorPool") || !strcmp(pName, "vkResetDescriptorPool") ||
+         !strcmp(pName, "vkDestroyDescriptorPool") || !strcmp(pName, "vkUpdateDescriptorSets"))) return true;
     // Keep both public spellings on the same enabled backend route. Returning
     // a raw core pointer here would bypass the KHR alias on a Vulkan 1.1 device.
     if (!strcmp(pName, "vkCreateRenderPass2") || !strcmp(pName, "vkCreateRenderPass2KHR") ||
@@ -1136,6 +1165,12 @@ void LayerManager::dispatch_destroy_device(
     const VkAllocationCallbacks* pAllocator
 ) {
     vkfix::TimelineScheduler::get().stop(device);
+    vkfix::MultiviewCommands::get().forget_device(device);
+    // Private pipeline callbacks need live module state and dispatch tables.
+    vkfix::MultiviewPipelines::get().forget_device(device);
+    vkfix::MultiviewPipelineLayouts::get().forget_device(device);
+    vkfix::MultiviewDescriptors::get().forget_device(device);
+    vkfix::MultiviewAttachments::get().forget_device(device);
     vkfix::ShaderModuleCache::get().forget_device(device);
     PipelineCacheManager::get().on_destroy_device(device);
     RenderDocManager::get().on_device_destroyed(device);
@@ -1196,6 +1231,9 @@ void LayerManager::dispatch_destroy_device(
         m_device_sampler_alias_dedup.erase((uint64_t)(uintptr_t)device);
     }
 
+    // Internal passes can outlive the application's render-pass handle through
+    // pipeline/command-buffer snapshots. Retire them while the device is live.
+    vkfix::MultiviewRenderPasses::get().forget_device(device);
     PFN_vkDestroyDevice real_fn =
         (PFN_vkDestroyDevice) get_real_proc(get_last_instance(), device, "vkDestroyDevice");
     if (real_fn) {
@@ -1440,6 +1478,14 @@ VkResult LayerManager::dispatch_create_descriptor_set_layout(
     }
 
     VkResult res = real_fn(device, &modInfo, pAllocator, pSetLayout);
+    if (res == VK_SUCCESS && pSetLayout && *pSetLayout &&
+        !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+        try { vkfix::MultiviewDescriptors::get().remember_layout(device, *pSetLayout, modInfo); }
+        catch (const std::bad_alloc&) {
+            dispatch_destroy_descriptor_set_layout(device, *pSetLayout, pAllocator);
+            *pSetLayout = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+    }
     if (res == VK_SUCCESS) VertexStoreEmulator::get().set_layout(device, *pSetLayout, &modInfo);
 
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
@@ -1454,6 +1500,7 @@ void LayerManager::dispatch_destroy_descriptor_set_layout(
     VkDescriptorSetLayout descriptorSetLayout,
     const VkAllocationCallbacks* pAllocator
 ) {
+    vkfix::MultiviewDescriptors::get().forget_layout(device, descriptorSetLayout);
     VertexStoreEmulator::get().erase_set_layout(device, descriptorSetLayout);
 
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
@@ -1476,7 +1523,7 @@ VkResult LayerManager::dispatch_create_pipeline_layout(
     VkDevice device,
     const VkPipelineLayoutCreateInfo* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
-    VkPipelineLayout* pPipelineLayout
+    VkPipelineLayout* pPipelineLayout, bool internal_multiview
 ) {
     const auto& dt = get_dispatch_table(device);
     PFN_vkCreatePipelineLayout real_fn = dt.CreatePipelineLayout;
@@ -1486,12 +1533,27 @@ VkResult LayerManager::dispatch_create_pipeline_layout(
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkResult res = real_fn(device, pCreateInfo, pAllocator, pPipelineLayout);
-    if (res == VK_SUCCESS) VertexStoreEmulator::get().layout(device, *pPipelineLayout, pCreateInfo);
-
-    if (res == VK_SUCCESS && pCreateInfo && pPipelineLayout) {
-        if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
-            m_push_desc_mod->on_post_create_pipeline_layout(device, pCreateInfo, res, *pPipelineLayout);
+    if (res != VK_SUCCESS) return res; // Failure output handles are undefined.
+    if (!pPipelineLayout || !*pPipelineLayout) return VK_ERROR_INITIALIZATION_FAILED;
+    try {
+        if (pCreateInfo && !internal_multiview && uses_software_multiview(device)) {
+            const auto status = vkfix::MultiviewPipelineLayouts::get().remember(device, *pPipelineLayout, *pCreateInfo,
+                multiview_layout_create, multiview_layout_destroy);
+            if (status != VK_SUCCESS) {
+                dispatch_destroy_pipeline_layout(device, *pPipelineLayout, pAllocator, internal_multiview);
+                *pPipelineLayout = VK_NULL_HANDLE; return status;
+            }
         }
+        VertexStoreEmulator::get().layout(device, *pPipelineLayout, pCreateInfo);
+        if (pCreateInfo) {
+            if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled())
+                m_dispatch_base_mod->on_post_create_pipeline_layout(device, pCreateInfo, res, *pPipelineLayout);
+            if (m_push_desc_mod && m_push_desc_mod->is_enabled())
+                m_push_desc_mod->on_post_create_pipeline_layout(device, pCreateInfo, res, *pPipelineLayout);
+        }
+    } catch (const std::bad_alloc&) {
+        dispatch_destroy_pipeline_layout(device, *pPipelineLayout, pAllocator, internal_multiview);
+        *pPipelineLayout = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
 
     return res;
@@ -1500,9 +1562,12 @@ VkResult LayerManager::dispatch_create_pipeline_layout(
 void LayerManager::dispatch_destroy_pipeline_layout(
     VkDevice device,
     VkPipelineLayout pipelineLayout,
-    const VkAllocationCallbacks* pAllocator
+    const VkAllocationCallbacks* pAllocator, bool internal_multiview
 ) {
+    if (!internal_multiview) vkfix::MultiviewPipelineLayouts::get().forget(device, pipelineLayout);
     VertexStoreEmulator::get().erase_layout(device, pipelineLayout);
+    if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled())
+        m_dispatch_base_mod->on_destroy_pipeline_layout(device, pipelineLayout);
 
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
         m_push_desc_mod->on_destroy_pipeline_layout(device, pipelineLayout);
@@ -1594,6 +1659,7 @@ void LayerManager::dispatch_free_command_buffers(
 void LayerManager::notify_command_buffers_freed(VkDevice device, uint32_t count,
                                                 const VkCommandBuffer* commands) {
     if (!commands || count == 0) return;
+    for (uint32_t i = 0; i < count; ++i) vkfix::MultiviewCommands::get().forget(commands[i]);
     for (uint32_t i = 0; i < count; ++i) TBDRBarrierOptimizer::get().on_cmd_free(commands[i]);
     for (auto& module : m_modules)
         if (module->is_enabled()) module->on_free_command_buffers(device, count, commands);
@@ -1625,7 +1691,19 @@ VkResult LayerManager::dispatch_begin_command_buffer(
         m_dyn_rendering_mod->on_pre_begin_command_buffer(commandBuffer, pBeginInfo, modBeginInfo, modInheritanceInfo, has_mod_inheritance);
     }
 
-    return dt.BeginCommandBuffer(commandBuffer, has_mod_inheritance ? &modBeginInfo : pBeginInfo);
+    if (uses_software_multiview(device)) {
+        VkCommandPool pool{};
+        { std::shared_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
+          const auto found = m_cmd_devices.find((uint64_t)(uintptr_t)commandBuffer);
+          if (found != m_cmd_devices.end()) pool = found->second.pool; }
+        const auto status = vkfix::MultiviewCommands::get().begin(device, commandBuffer, pool, *pBeginInfo,
+            (get_device_spirv_extensions(device) & vkfix::NativeInputAttachmentAspects) != 0,
+            {multiview_begin_native, multiview_end_native, multiview_barrier_native});
+        if (status != VK_SUCCESS) return status;
+    }
+    const auto result = dt.BeginCommandBuffer(commandBuffer, has_mod_inheritance ? &modBeginInfo : pBeginInfo);
+    if (result != VK_SUCCESS) vkfix::MultiviewCommands::get().forget(commandBuffer);
+    return result;
 }
 
 VkResult LayerManager::dispatch_reset_command_buffer(
@@ -1642,7 +1720,9 @@ VkResult LayerManager::dispatch_reset_command_buffer(
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.ResetCommandBuffer) {
-        return dt.ResetCommandBuffer(commandBuffer, flags);
+        const auto result = dt.ResetCommandBuffer(commandBuffer, flags);
+        if (result == VK_SUCCESS) vkfix::MultiviewCommands::get().forget(commandBuffer);
+        return result;
     }
     return VK_ERROR_INITIALIZATION_FAILED;
 }
@@ -1655,6 +1735,13 @@ VkResult LayerManager::dispatch_create_descriptor_update_template(
 ) {
     if (!pCreateInfo || !pDescriptorUpdateTemplate) return VK_ERROR_INITIALIZATION_FAILED;
     auto complete = [&](VkResult result) {
+        if (result == VK_SUCCESS && !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+            try { vkfix::MultiviewDescriptors::get().remember_template(device, *pDescriptorUpdateTemplate, *pCreateInfo); }
+            catch (const std::bad_alloc&) {
+                dispatch_destroy_descriptor_update_template(device, *pDescriptorUpdateTemplate, pAllocator);
+                *pDescriptorUpdateTemplate = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY;
+            }
+        }
         if (m_push_desc_mod && m_push_desc_mod->is_enabled())
             m_push_desc_mod->on_post_create_descriptor_update_template(device, pCreateInfo,
                 result, result == VK_SUCCESS ? *pDescriptorUpdateTemplate : VK_NULL_HANDLE);
@@ -1691,6 +1778,7 @@ void LayerManager::dispatch_destroy_descriptor_update_template(
     VkDescriptorUpdateTemplate descriptorUpdateTemplate,
     const VkAllocationCallbacks* pAllocator
 ) {
+    vkfix::MultiviewDescriptors::get().forget_template(device, descriptorUpdateTemplate);
     if (m_push_desc_mod && m_push_desc_mod->is_enabled())
         m_push_desc_mod->on_destroy_descriptor_update_template(device, descriptorUpdateTemplate,
                                                               pAllocator);
@@ -1712,6 +1800,8 @@ void LayerManager::dispatch_destroy_descriptor_update_template(
 }
 
 VkResult LayerManager::command_recording_error(VkCommandBuffer cmd) {
+    const auto multiview = vkfix::MultiviewCommands::get().error(cmd);
+    if (multiview != VK_SUCCESS) return multiview;
     if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled()) {
         const auto result = m_dispatch_base_mod->command_recording_error(cmd);
         if (result != VK_SUCCESS) return result;
@@ -1727,6 +1817,7 @@ void LayerManager::track_descriptor_binding(VkCommandBuffer cmd, VkPipelineBindP
 }
 
 void LayerManager::track_command_pool_reset(VkDevice device, VkCommandPool pool, bool destroyed) {
+    vkfix::MultiviewCommands::get().forget_pool(device, pool);
     std::vector<VkCommandBuffer> commands;
     {
         std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
@@ -1760,6 +1851,7 @@ void LayerManager::dispatch_cmd_push_descriptor_set(
     uint32_t descriptorWriteCount,
     const VkWriteDescriptorSet* pDescriptorWrites
 ) {
+    if (vkfix::MultiviewCommands::get().unsupported(commandBuffer)) return;
     // Descriptor writes are command state, not barrier-relevant memory access.
 
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
@@ -1783,6 +1875,7 @@ void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
     uint32_t set,
     const void* pData
 ) {
+    if (vkfix::MultiviewCommands::get().unsupported(commandBuffer)) return;
     // Descriptor writes are command state, not barrier-relevant memory access.
 
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
@@ -1814,6 +1907,14 @@ VkResult LayerManager::dispatch_create_image(
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkResult res = real_fn(device, pCreateInfo, pAllocator, pImage);
+    if (res == VK_SUCCESS && pCreateInfo && pImage && *pImage &&
+        !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+        try { vkfix::MultiviewAttachments::get().remember_image(device, *pImage, *pCreateInfo); }
+        catch (const std::bad_alloc&) {
+            dispatch_destroy_image(device, *pImage, pAllocator);
+            *pImage = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+    }
     if (res == VK_SUCCESS) VertexStoreEmulator::get().image(device, *pImage, pCreateInfo);
     if (res == VK_SUCCESS && pCreateInfo && pImage && *pImage != VK_NULL_HANDLE) {
         if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
@@ -1828,6 +1929,7 @@ void LayerManager::dispatch_destroy_image(
     VkImage image,
     const VkAllocationCallbacks* pAllocator
 ) {
+    vkfix::MultiviewAttachments::get().forget_image(device, image);
     VertexStoreEmulator::get().erase_image(device, image);
 
     if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
@@ -1860,6 +1962,14 @@ VkResult LayerManager::dispatch_create_image_view(
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkResult res = real_fn(device, pCreateInfo, pAllocator, pView);
+    if (res == VK_SUCCESS && pCreateInfo && pView && *pView &&
+        !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+        try { vkfix::MultiviewAttachments::get().remember_view(device, *pView, *pCreateInfo); }
+        catch (const std::bad_alloc&) {
+            dispatch_destroy_image_view(device, *pView, pAllocator);
+            *pView = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+    }
     if (res == VK_SUCCESS) VertexStoreEmulator::get().view(device, *pView, pCreateInfo);
     if (res == VK_SUCCESS && pCreateInfo && pView && *pView != VK_NULL_HANDLE) {
         if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
@@ -1874,6 +1984,7 @@ void LayerManager::dispatch_destroy_image_view(
     VkImageView imageView,
     const VkAllocationCallbacks* pAllocator
 ) {
+    vkfix::MultiviewAttachments::get().forget_view(device, imageView);
     VertexStoreEmulator::get().erase_view(device, imageView);
 
     if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
@@ -1984,6 +2095,7 @@ void LayerManager::dispatch_destroy_pipeline(
     VkPipeline pipeline,
     const VkAllocationCallbacks* pAllocator
 ) {
+    vkfix::MultiviewPipelines::get().forget(device, pipeline);
     VertexStoreEmulator::get().erase_pipeline(device, pipeline);
 
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
@@ -2006,6 +2118,17 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     VkPipelineBindPoint pipelineBindPoint,
     VkPipeline pipeline
 ) {
+    if (vkfix::MultiviewCommands::get().capture(commandBuffer, true, [&] {
+        auto variants = pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS ?
+            vkfix::MultiviewPipelines::get().acquire(get_device_for_cmd(commandBuffer), pipeline) : nullptr;
+        return [variants = std::move(variants), pipelineBindPoint, pipeline](VkCommandBuffer cmd, uint32_t view) {
+            auto selected = pipeline;
+            if (variants && (variants->view_mask() & (uint32_t(1) << view))) {
+                selected = variants->for_view(view); if (!selected) return VK_ERROR_FEATURE_NOT_PRESENT;
+            }
+            LayerManager::get().dispatch_cmd_bind_pipeline(cmd, pipelineBindPoint, selected); return VK_SUCCESS;
+        };
+    })) return;
     VertexStoreEmulator::get().bind_pipeline(commandBuffer, pipelineBindPoint, pipeline);
     // Compute tracking is required even when graphics draws can bypass their
     // emulation modules. Publish it before the graphics fast path.
@@ -2039,6 +2162,12 @@ void LayerManager::dispatch_cmd_set_viewport(
     uint32_t viewportCount,
     const VkViewport* pViewports
 ) {
+    if (vkfix::MultiviewCommands::get().capture(commandBuffer, true, [&] {
+        std::vector<VkViewport> values; if (viewportCount) values.assign(pViewports, pViewports + viewportCount);
+        return [values = std::move(values), firstViewport](VkCommandBuffer cmd, uint32_t) {
+            LayerManager::get().dispatch_cmd_set_viewport(cmd, firstViewport, uint32_t(values.size()), values.data()); return VK_SUCCESS;
+        };
+    })) return;
     VkDevice device = get_device_for_cmd(commandBuffer);
     if (m_negative_viewport_mod && m_negative_viewport_mod->is_enabled()) {
         if (static_cast<NegativeViewportModule *>(m_negative_viewport_mod)
@@ -2057,6 +2186,13 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers(
     const VkBuffer* pBuffers,
     const VkDeviceSize* pOffsets
 ) {
+    if (vkfix::MultiviewCommands::get().capture(commandBuffer, true, [&] {
+        std::vector<VkBuffer> buffers; std::vector<VkDeviceSize> offsets;
+        if (bindingCount) { buffers.assign(pBuffers, pBuffers + bindingCount); offsets.assign(pOffsets, pOffsets + bindingCount); }
+        return [buffers = std::move(buffers), offsets = std::move(offsets), firstBinding](VkCommandBuffer cmd, uint32_t) {
+            LayerManager::get().dispatch_cmd_bind_vertex_buffers(cmd, firstBinding, uint32_t(buffers.size()), buffers.data(), offsets.data()); return VK_SUCCESS;
+        };
+    })) return;
     VertexStoreEmulator::get().bind_vertices(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets);
 
     // Vertex buffer binding is not a memory access; keep the TBDR dedup window open.
@@ -2087,6 +2223,7 @@ void LayerManager::dispatch_cmd_bind_vertex_buffers2(
     const VkDeviceSize* pSizes,
     const VkDeviceSize* pStrides
 ) {
+    if (vkfix::MultiviewCommands::get().unsupported(commandBuffer)) return;
     VertexStoreEmulator::get().bind_vertices(commandBuffer, firstBinding, bindingCount, pBuffers, pOffsets, pStrides, pSizes);
 
     // Vertex buffer binding is not a memory access; keep the TBDR dedup window open.
@@ -2141,10 +2278,12 @@ void LayerManager::block_tiler_split(VkCommandBuffer commandBuffer, bool begin) 
 
 void LayerManager::track_render_pass(VkDevice device, const VkRenderPassCreateInfo* info,
                                    VkRenderPass pass) {
+    vkfix::MultiviewRenderPasses::get().remember(device, pass, info);
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->track_render_pass(device, info, pass);
 }
 
 void LayerManager::forget_render_pass(VkDevice device, VkRenderPass pass) {
+    vkfix::MultiviewRenderPasses::get().forget(device, pass);
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->forget_render_pass(device, pass);
 }
 
@@ -2155,6 +2294,9 @@ void LayerManager::dispatch_cmd_draw(
     uint32_t firstVertex,
     uint32_t firstInstance
 ) {
+    if (vkfix::MultiviewCommands::get().capture(commandBuffer, false, [=] {
+        return [=](VkCommandBuffer cmd, uint32_t) { LayerManager::get().dispatch_cmd_draw(cmd, vertexCount, instanceCount, firstVertex, firstInstance); return VK_SUCCESS; };
+    })) return;
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer,
         uint64_t(vertexCount) * instanceCount);
     if (VertexStoreEmulator::get().draw(commandBuffer, vertexCount, instanceCount, firstVertex, 0, firstInstance, false)) return;
@@ -2192,6 +2334,9 @@ void LayerManager::dispatch_cmd_draw_indexed(
     int32_t vertexOffset,
     uint32_t firstInstance
 ) {
+    if (vkfix::MultiviewCommands::get().capture(commandBuffer, false, [=] {
+        return [=](VkCommandBuffer cmd, uint32_t) { LayerManager::get().dispatch_cmd_draw_indexed(cmd, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance); return VK_SUCCESS; };
+    })) return;
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer,
         uint64_t(indexCount) * instanceCount);
     if (VertexStoreEmulator::get().draw(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance, true)) return;
@@ -2229,6 +2374,9 @@ void LayerManager::dispatch_cmd_draw_indirect(
     uint32_t drawCount,
     uint32_t stride
 ) {
+    if (vkfix::MultiviewCommands::get().capture(commandBuffer, false, [=] {
+        return [=](VkCommandBuffer cmd, uint32_t) { LayerManager::get().dispatch_cmd_draw_indirect(cmd, buffer, offset, drawCount, stride); return VK_SUCCESS; };
+    })) return;
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer, 0, drawCount);
     VertexStoreEmulator::get().indirect(commandBuffer);
     if (VertexStoreEmulator::get().recording_error(commandBuffer) != VK_SUCCESS) return;
@@ -2275,6 +2423,9 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect(
     uint32_t drawCount,
     uint32_t stride
 ) {
+    if (vkfix::MultiviewCommands::get().capture(commandBuffer, false, [=] {
+        return [=](VkCommandBuffer cmd, uint32_t) { LayerManager::get().dispatch_cmd_draw_indexed_indirect(cmd, buffer, offset, drawCount, stride); return VK_SUCCESS; };
+    })) return;
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer, 0, drawCount);
     VertexStoreEmulator::get().indirect(commandBuffer);
     if (VertexStoreEmulator::get().recording_error(commandBuffer) != VK_SUCCESS) return;
@@ -2319,6 +2470,7 @@ void LayerManager::dispatch_cmd_begin_render_pass(
     const VkRenderPassBeginInfo* pRenderPassBegin,
     VkSubpassContents contents
 ) {
+    if (vkfix::MultiviewCommands::get().begin_pass(commandBuffer, pRenderPassBegin, contents)) return;
     VertexStoreEmulator::get().legacy_rendering(commandBuffer, true);
 
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
@@ -2347,6 +2499,7 @@ void LayerManager::dispatch_cmd_next_subpass(
     VkCommandBuffer commandBuffer,
     VkSubpassContents contents
 ) {
+    if (vkfix::MultiviewCommands::get().next_subpass(commandBuffer, contents)) return;
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->end_legacy_rendering(commandBuffer);
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
     VkDevice device = get_device_for_cmd(commandBuffer);
@@ -2359,6 +2512,7 @@ void LayerManager::dispatch_cmd_next_subpass(
 void LayerManager::dispatch_cmd_end_render_pass(
     VkCommandBuffer commandBuffer
 ) {
+    if (vkfix::MultiviewCommands::get().end_pass(commandBuffer)) return;
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->end_legacy_rendering(commandBuffer);
     VertexStoreEmulator::get().legacy_rendering(commandBuffer, false);
 
@@ -2456,6 +2610,14 @@ void LayerManager::dispatch_cmd_clear_attachments(
     uint32_t rectCount,
     const VkClearRect* pRects
 ) {
+    if (vkfix::MultiviewCommands::get().capture(commandBuffer, false, [&] {
+        std::vector<VkClearAttachment> attachments; std::vector<VkClearRect> rects;
+        if (attachmentCount) attachments.assign(pAttachments, pAttachments + attachmentCount);
+        if (rectCount) rects.assign(pRects, pRects + rectCount);
+        return [attachments = std::move(attachments), rects = std::move(rects)](VkCommandBuffer cmd, uint32_t) {
+            LayerManager::get().dispatch_cmd_clear_attachments(cmd, uint32_t(attachments.size()), attachments.data(), uint32_t(rects.size()), rects.data()); return VK_SUCCESS;
+        };
+    })) return;
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
@@ -2502,6 +2664,7 @@ void LayerManager::dispatch_cmd_execute_commands(
     uint32_t commandBufferCount,
     const VkCommandBuffer* pCommandBuffers
 ) {
+    if (vkfix::MultiviewCommands::get().execute(commandBuffer, commandBufferCount, pCommandBuffers)) return;
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
@@ -2674,6 +2837,12 @@ void LayerManager::dispatch_cmd_pipeline_barrier(
     uint32_t imageMemoryBarrierCount,
     const VkImageMemoryBarrier* pImageMemoryBarriers
 ) {
+    auto& multiview = vkfix::MultiviewCommands::get();
+    if (multiview.has_active_recordings() && multiview.pipeline_barrier(commandBuffer, srcStageMask, dstStageMask, dependencyFlags,
+        memoryBarrierCount, pMemoryBarriers, bufferMemoryBarrierCount, pBufferMemoryBarriers,
+        imageMemoryBarrierCount, pImageMemoryBarriers,
+        (get_device_spirv_extensions(get_device_for_cmd(commandBuffer)) & vkfix::NativeDeviceGroup) != 0,
+        multiview_barrier_native)) return;
     if (__builtin_expect(TBDRBarrierOptimizer::get().is_enabled(), 0)) {
         static thread_local TBDRBarrierOptimizer::ScratchStorage1 storage;
         if (!TBDRBarrierOptimizer::get().optimize_pipeline_barrier1(
@@ -2720,6 +2889,7 @@ void LayerManager::dispatch_cmd_pipeline_barrier2(
     VkCommandBuffer commandBuffer,
     const VkDependencyInfo* pDependencyInfo
 ) {
+    if (vkfix::MultiviewCommands::get().unsupported(commandBuffer)) return;
     const VkDependencyInfo* pInfoToUse = pDependencyInfo;
     static thread_local TBDRBarrierOptimizer::ScratchStorage2 storage;
     VkDependencyInfo optInfo{};
@@ -3049,9 +3219,26 @@ VkResult LayerManager::dispatch_create_render_pass2(
     const VkAllocationCallbacks* pAllocator,
     VkRenderPass* pRenderPass
 ) {
+    const auto routes = get_device_spirv_extensions(device);
+    if (!(routes & vkfix::NativeMultiview) && get_device_max_spirv_version(device)) {
+        VkResult result = VK_SUCCESS;
+        if (vkfix::MultiviewRenderPasses::get().create_fallback(device, pCreateInfo, pAllocator,
+            pRenderPass, (routes & vkfix::NativeInputAttachmentAspects) != 0, result)) return result;
+    }
     auto tracked = [&](VkResult result) {
-        if (result == VK_SUCCESS && pRenderPass && m_dyn_rendering_mod)
-            m_dyn_rendering_mod->track_render_pass2(device, pCreateInfo, *pRenderPass);
+        if (result != VK_SUCCESS || !pRenderPass || !*pRenderPass) return result;
+        try {
+            vkfix::MultiviewRenderPasses::get().remember(device, *pRenderPass, pCreateInfo);
+            if (m_dyn_rendering_mod) m_dyn_rendering_mod->track_render_pass2(device, pCreateInfo, *pRenderPass);
+            return result;
+        } catch (const std::bad_alloc&) { result = VK_ERROR_OUT_OF_HOST_MEMORY; }
+        catch (const std::invalid_argument&) { result = VK_ERROR_UNKNOWN; }
+        // A bookkeeping allocation can fail after the native object exists.
+        // Roll back both trackers and use the caller's allocator for that object.
+        forget_render_pass(device, *pRenderPass);
+        auto destroy = (PFN_vkDestroyRenderPass)get_real_proc(get_last_instance(), device, "vkDestroyRenderPass");
+        if (destroy) destroy(device, *pRenderPass, pAllocator);
+        *pRenderPass = VK_NULL_HANDLE;
         return result;
     };
     VkResult res = VK_SUCCESS;
@@ -3072,6 +3259,11 @@ void LayerManager::dispatch_cmd_begin_render_pass2(
     const VkRenderPassBeginInfo* pRenderPassBegin,
     const VkSubpassBeginInfo* pSubpassBeginInfo
 ) {
+    if (vkfix::MultiviewCommands::get().begin_pass(commandBuffer, pRenderPassBegin,
+        pSubpassBeginInfo ? pSubpassBeginInfo->contents : VK_SUBPASS_CONTENTS_INLINE)) {
+        if (pSubpassBeginInfo && pSubpassBeginInfo->pNext) vkfix::MultiviewCommands::get().unsupported(commandBuffer);
+        return;
+    }
     VertexStoreEmulator::get().legacy_rendering(commandBuffer, true);
 
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
@@ -3113,6 +3305,12 @@ void LayerManager::dispatch_cmd_next_subpass2(
     const VkSubpassBeginInfo* pSubpassBeginInfo,
     const VkSubpassEndInfo* pSubpassEndInfo
 ) {
+    if (vkfix::MultiviewCommands::get().next_subpass(commandBuffer,
+        pSubpassBeginInfo ? pSubpassBeginInfo->contents : VK_SUBPASS_CONTENTS_INLINE)) {
+        if ((pSubpassBeginInfo && pSubpassBeginInfo->pNext) || (pSubpassEndInfo && pSubpassEndInfo->pNext))
+            vkfix::MultiviewCommands::get().unsupported(commandBuffer);
+        return;
+    }
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->end_legacy_rendering(commandBuffer);
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
 
@@ -3135,6 +3333,8 @@ void LayerManager::dispatch_cmd_end_render_pass2(
     VkCommandBuffer commandBuffer,
     const VkSubpassEndInfo* pSubpassEndInfo
 ) {
+    if (pSubpassEndInfo && pSubpassEndInfo->pNext) vkfix::MultiviewCommands::get().unsupported(commandBuffer);
+    if (vkfix::MultiviewCommands::get().end_pass(commandBuffer)) return;
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->end_legacy_rendering(commandBuffer);
     VertexStoreEmulator::get().legacy_rendering(commandBuffer, false);
 
@@ -3163,6 +3363,7 @@ void LayerManager::dispatch_cmd_draw_indirect_count(
     uint32_t maxDrawCount,
     uint32_t stride
 ) {
+    if (vkfix::MultiviewCommands::get().unsupported(commandBuffer)) return;
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer, 0, maxDrawCount);
     VertexStoreEmulator::get().indirect(commandBuffer);
     if (VertexStoreEmulator::get().recording_error(commandBuffer) != VK_SUCCESS) return;
@@ -3195,6 +3396,7 @@ void LayerManager::dispatch_cmd_draw_indexed_indirect_count(
     uint32_t maxDrawCount,
     uint32_t stride
 ) {
+    if (vkfix::MultiviewCommands::get().unsupported(commandBuffer)) return;
     if (m_dyn_rendering_mod) m_dyn_rendering_mod->before_draw(commandBuffer, 0, maxDrawCount);
     VertexStoreEmulator::get().indirect(commandBuffer);
     if (VertexStoreEmulator::get().recording_error(commandBuffer) != VK_SUCCESS) return;
@@ -3487,6 +3689,7 @@ void LayerManager::dispatch_update_descriptor_set_with_template(
     VkDescriptorUpdateTemplate descriptorUpdateTemplate,
     const void* pData
 ) {
+    vkfix::MultiviewDescriptors::get().update_template(device, descriptorSet, descriptorUpdateTemplate, pData);
     if (m_desc_template_mod && m_desc_template_mod->is_enabled()) {
         if (m_desc_template_mod->on_update_descriptor_set_with_template(
                 device, descriptorSet, descriptorUpdateTemplate, pData)) {
@@ -3672,6 +3875,9 @@ void LayerManager::dispatch_cmd_set_device_mask(
     VkCommandBuffer commandBuffer,
     uint32_t deviceMask
 ) {
+    if (vkfix::MultiviewCommands::get().capture(commandBuffer, true, [=] {
+        return [=](VkCommandBuffer cmd, uint32_t) { LayerManager::get().dispatch_cmd_set_device_mask(cmd, deviceMask); return VK_SUCCESS; };
+    })) return;
     if (m_device_group_mod && m_device_group_mod->is_enabled()) {
         if (m_device_group_mod->on_cmd_set_device_mask(commandBuffer, deviceMask)) return;
     }
@@ -3725,6 +3931,13 @@ VkResult LayerManager::dispatch_create_swapchain(
     if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
         if (m_swapchain_mod->on_create_swapchain(device, pCreateInfo, pAllocator, pSwapchain, res)) {
             if (res == VK_SUCCESS && pSwapchain && *pSwapchain != VK_NULL_HANDLE && pCreateInfo) {
+                if (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+                    try { vkfix::MultiviewAttachments::get().remember_swapchain(device, *pSwapchain, *pCreateInfo); }
+                    catch (const std::bad_alloc&) {
+                        dispatch_destroy_swapchain(device, *pSwapchain, pAllocator);
+                        *pSwapchain = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY;
+                    }
+                }
                 std::lock_guard<std::mutex> lk(m_swapchain_meta_mutex);
                 m_swapchain_meta[(uint64_t)(uintptr_t)*pSwapchain] = {
                     pCreateInfo->imageFormat,
@@ -3764,6 +3977,13 @@ VkResult LayerManager::dispatch_create_swapchain(
         }
     }
     if (res == VK_SUCCESS && pSwapchain && *pSwapchain != VK_NULL_HANDLE && pCreateInfo) {
+        if (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+            try { vkfix::MultiviewAttachments::get().remember_swapchain(device, *pSwapchain, *pCreateInfo); }
+            catch (const std::bad_alloc&) {
+                dispatch_destroy_swapchain(device, *pSwapchain, pAllocator);
+                *pSwapchain = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY;
+            }
+        }
         std::lock_guard<std::mutex> lk(m_swapchain_meta_mutex);
         m_swapchain_meta[(uint64_t)(uintptr_t)*pSwapchain] = {
             pCreateInfo->imageFormat,
@@ -3779,6 +3999,7 @@ void LayerManager::dispatch_destroy_swapchain(
     VkSwapchainKHR swapchain,
     const VkAllocationCallbacks* pAllocator
 ) {
+    vkfix::MultiviewAttachments::get().forget_swapchain(device, swapchain);
     {
         std::lock_guard<std::mutex> lk(m_swapchain_meta_mutex);
         m_swapchain_meta.erase((uint64_t)(uintptr_t)swapchain);
@@ -3839,6 +4060,11 @@ VkResult LayerManager::dispatch_get_swapchain_images(
         }
     }
 
+    if ((res == VK_SUCCESS || res == VK_INCOMPLETE) && pSwapchainImages && pSwapchainImageCount &&
+        !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+        try { vkfix::MultiviewAttachments::get().remember_swapchain_images(device, swapchain, *pSwapchainImageCount, pSwapchainImages); }
+        catch (const std::bad_alloc&) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
+    }
     if (res == VK_SUCCESS && pSwapchainImages && pSwapchainImageCount && *pSwapchainImageCount > 0) {
         SwapchainMetadata meta{};
         bool found = false;

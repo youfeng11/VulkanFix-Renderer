@@ -434,6 +434,29 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_link_libraries(storage_buffer_lowering_test PRIVATE Vulkan::Headers
         ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
     vkfix_sanitize_test(storage_buffer_lowering_test)
+    add_executable(multiview_attachments_test EXCLUDE_FROM_ALL tests/multiview_attachments_test.cpp
+        core/multiview_attachments.cpp core/multiview_render_pass.cpp core/layout_compat.cpp)
+    target_include_directories(multiview_attachments_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(multiview_attachments_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(multiview_attachments_test)
+    add_executable(multiview_descriptors_test EXCLUDE_FROM_ALL tests/multiview_descriptors_test.cpp
+        core/multiview_descriptors.cpp core/multiview_attachments.cpp core/multiview_render_pass.cpp core/layout_compat.cpp
+        core/multiview_commands.cpp core/multiview_pipeline_layouts.cpp)
+    target_include_directories(multiview_descriptors_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(multiview_descriptors_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(multiview_descriptors_test)
+    add_executable(multiview_barrier_gpu_test EXCLUDE_FROM_ALL tests/multiview_barrier_gpu_test.cpp
+        core/multiview_descriptors.cpp core/multiview_attachments.cpp core/multiview_render_pass.cpp core/layout_compat.cpp
+        core/multiview_commands.cpp core/multiview_pipeline_layouts.cpp)
+    target_include_directories(multiview_barrier_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(multiview_barrier_gpu_test PRIVATE Vulkan::Headers ${LOG_LIB} dl)
+    add_executable(multiview_draw_gpu_test EXCLUDE_FROM_ALL tests/multiview_draw_gpu_test.cpp
+        core/multiview_descriptors.cpp core/multiview_attachments.cpp core/multiview_render_pass.cpp core/layout_compat.cpp
+        core/multiview_commands.cpp core/multiview_pipeline_layouts.cpp core/multiview_pipelines.cpp
+        core/specialized_shader_stages.cpp core/shader_module_cache.cpp shader/constant_input_lowering.cpp shader/specialize_constants.cpp)
+    target_include_directories(multiview_draw_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(multiview_draw_gpu_test PRIVATE Vulkan::Headers
+        ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB} dl)
     add_executable(constant_input_test EXCLUDE_FROM_ALL tests/constant_input_test.cpp
         shader/constant_input_lowering.cpp shader/shader_rewriter.cpp shader/storage_buffer_lowering.cpp)
     target_include_directories(constant_input_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
