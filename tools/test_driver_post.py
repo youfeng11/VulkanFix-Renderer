@@ -63,7 +63,9 @@ class InventoryTest(unittest.TestCase):
 
     def test_shader_fixture_source_digest(self):
         directory = ROOT / "layer/src/main/cpp/diagnostics"
-        text = (directory / "driver_post_shaders.h").read_text(encoding="utf-8")
+        text = "\n".join((directory / name).read_text(encoding="utf-8") for name in
+                         ("driver_post_shaders.h", "variable_pointers_shader.h", "variable_pointers_storage_shader.h",
+                          "storage_arrays_shader.h", "storage_arrays_static_shader.h", "subgroup_basic_shader.h"))
         for source in (directory / "shaders").glob("*"):
             digest = hashlib.sha256(source.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
             self.assertIn(f"// {source.name} SHA256 {digest}", text)

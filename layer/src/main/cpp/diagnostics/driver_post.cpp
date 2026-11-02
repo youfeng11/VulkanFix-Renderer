@@ -25,16 +25,19 @@ struct PostWindow;
 #include <string>
 #include <vector>
 #include "../core/native_probe_resources.h"
+#include "../core/storage_buffer_array_probe.h"
+#include "../core/subgroup_basic_probe.h"
 #include "../core/driver_trust.h"
 #include "../core/driver_trust_shaders.h"
 #include "../core/driver_probe_process.h"
 #include "driver_post_shaders.h"
+#include "core11_requirements.h"
 
 namespace {
 thread_local std::string *report_sink = nullptr;
-unsigned core11_passes = 0;
-unsigned core11_skips = 0;
-unsigned core11_failures = 0;
+thread_local unsigned core11_passes = 0;
+thread_local unsigned core11_skips = 0;
+thread_local unsigned core11_failures = 0;
 struct ProbeMismatch : std::runtime_error { using std::runtime_error::runtime_error; };
 std::string quote(const std::string &value) {
     std::string out = "\"";
@@ -129,6 +132,37 @@ struct Probe {
         }
     }
 };
+
+void core11_required_capabilities(Probe& p, VkPhysicalDevice physical,
+    const std::vector<VkQueueFamilyProperties>& families, const std::vector<VkExtensionProperties>& extensions) {
+    vkfix::post::Core11RequiredState state;
+    for (const auto& family : families) if (family.queueCount) {
+        state.graphics |= (family.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+        state.compute |= (family.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
+    }
+    for (const auto& extension : extensions) {
+        state.portability_subset |= !strcmp(extension.extensionName, "VK_KHR_portability_subset");
+        state.draw_extension |= !strcmp(extension.extensionName, VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME);
+    }
+    state.multiview.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES;
+    state.storage.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
+    state.draw.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
+    state.multiview.pNext = &state.storage; state.storage.pNext = &state.draw;
+    VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &state.multiview};
+    p.get<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(physical, &features);
+    state.base = features.features;
+    state.views.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES;
+    state.subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+    state.maintenance.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+    state.views.pNext = &state.subgroup; state.subgroup.pNext = &state.maintenance;
+    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &state.views};
+    p.get<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(physical, &properties);
+    const auto missing = vkfix::post::missing_core11_requirements(state);
+    std::string detail;
+    for (const auto& value : missing) { if (!detail.empty()) detail += "; "; detail += value; }
+    row("core11.requiredCapabilities", missing.empty() ? "PASS" : "FAIL",
+        missing.empty() ? "mandatory feature dependencies and selected 1.1 minimum limits pass; not full conformance" : detail);
+}
 
 void buffer_smoke(Probe &p, VkPhysicalDevice physical, uint32_t family) {
     // All temporary resources belong to this throwaway device. On failure the
@@ -906,7 +940,7 @@ void aggregate_repair_smoke(Probe &p, VkPhysicalDevice physical) {
         aggregate_properties.maxMultiviewViewCount != multiview_limits.maxMultiviewViewCount)
         throw ProbeMismatch("corrupted Vulkan11 aggregate was not repaired");
     row("core11.aggregateRepair", "PASS",
-        "corrupted Vulkan11 aggregate values were rebuilt from promoted sub-structures",
+        "aggregate values match sub-structures with wrapper fault injection requested",
         "functional");
 }
 
@@ -1358,6 +1392,7 @@ void device_queue2_smoke(Probe &p, uint32_t family) {
 #include "driver_post_swapchain.inc"
 
 int run(const char *library, PostWindow *window = nullptr) {
+    core11_passes = core11_skips = core11_failures = 0;
     // Intentionally keep the loader resident until process exit: ICD threads
     // may retain code pointers even after all Vulkan objects are destroyed.
 #ifdef _WIN32
@@ -1511,6 +1546,7 @@ int run(const char *library, PostWindow *window = nullptr) {
         if (!count || count > 65536) throw std::runtime_error("invalid queue family count");
         std::vector<VkQueueFamilyProperties> families(count);
         qfp(physical, &count, families.data());
+        if (api >= VK_API_VERSION_1_1) core11_required_capabilities(probe, physical, families, extensions);
         uint32_t family = 0;
         // Prefer graphics so a leading compute-only family does not hide the
         // drawing probes on devices with multiple queues.
@@ -1543,6 +1579,10 @@ int run(const char *library, PostWindow *window = nullptr) {
         enabled_features.fillModeNonSolid = features.features.fillModeNonSolid;
         enabled_features.vertexPipelineStoresAndAtomics = features.features.vertexPipelineStoresAndAtomics;
         enabled_features.samplerAnisotropy = features.features.samplerAnisotropy;
+        enabled_features.geometryShader = features.features.geometryShader;
+        enabled_features.tessellationShader = features.features.tessellationShader;
+        enabled_features.multiViewport = features.features.multiViewport;
+        enabled_features.shaderStorageBufferArrayDynamicIndexing = features.features.shaderStorageBufferArrayDynamicIndexing;
         dci.pEnabledFeatures = &enabled_features;
         if (timeline.timelineSemaphore) {
             enable_timeline.timelineSemaphore = VK_TRUE;
@@ -1618,16 +1658,24 @@ int run(const char *library, PostWindow *window = nullptr) {
             run_case("core11.queryChain", [&] { core11_query_chain(probe, physical); });
             run_case("core11.externalProperties",
                      [&] { external_properties_smoke(probe, physical); });
-            run_case("core11.propertiesAggregate",
-                     [&] { core11_properties_consistency(probe, physical); });
+            // Vulkan11 aggregate structures were introduced by Vulkan 1.2.
+            // A native 1.1 implementation only owes the individual structures.
+            if (api>=VK_API_VERSION_1_2) {
+                run_case("core11.propertiesAggregate",
+                         [&] { core11_properties_consistency(probe, physical); });
+                run_case("core11.featureAggregate",
+                         [&] { core11_feature_consistency(probe, physical); });
+            } else {
+                row("core11.propertiesAggregate","SKIP","aggregate structure requires Vulkan 1.2","functional");
+                row("core11.featureAggregate","SKIP","aggregate structure requires Vulkan 1.2","functional");
+            }
             run_case("core11.multiviewRenderPass",
                      [&] { multiview_render_pass_smoke(probe, physical, family); });
-            run_case("core11.featureAggregate",
-                     [&] { core11_feature_consistency(probe, physical); });
             run_case("core11.sparseMemoryRequirements2",
                      [&] { sparse_memory_requirements2_smoke(probe, physical); });
-            run_case("core11.aggregateRepair",
-                     [&] { aggregate_repair_smoke(probe, physical); });
+            if (api>=VK_API_VERSION_1_2 && getenv("VULKAN_FIX_POST_TEST_AGGREGATE_REPAIR"))
+                run_case("core11.aggregateRepair",[&] { aggregate_repair_smoke(probe,physical); });
+            else row("core11.aggregateRepair","SKIP","synthetic fault-injection probe not requested or API below 1.2","functional");
             if ((families[family].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0) {
                 run_case("core11.dispatchBase",
                          [&] { dispatch_base_smoke(probe, physical, family, 0, 0, 0, 4,
@@ -1656,6 +1704,21 @@ int run(const char *library, PostWindow *window = nullptr) {
                          [&] { variable_pointers_storage_smoke(probe, physical, family); });
                 run_case("core11.spirv13Downgrade",
                          [&] { spirv13_downgrade_smoke(probe, physical, family); });
+                run_case("core11.subgroupBasic",
+                         [&] { subgroup_basic_smoke(probe,physical,family); });
+                if (enabled_features.shaderStorageBufferArrayDynamicIndexing &&
+                    properties.limits.maxPerStageDescriptorStorageBuffers>=5 &&
+                    properties.limits.maxDescriptorSetStorageBuffers>=5)
+                    run_case("core11.storageBufferArrays",
+                             [&] { storage_buffer_array_smoke(probe,physical,family); });
+                else row("core11.storageBufferArrays","SKIP",
+                    "storage-buffer dynamic indexing or five descriptors unavailable","functional");
+                if (properties.limits.maxPerStageDescriptorStorageBuffers>=5 &&
+                    properties.limits.maxDescriptorSetStorageBuffers>=5)
+                    run_case("core11.storageBufferArraysStatic",
+                             [&] { storage_buffer_array_smoke(probe,physical,family,true); });
+                else row("core11.storageBufferArraysStatic","SKIP",
+                    "five storage-buffer descriptors unavailable","functional");
             } else {
                 row("core11.dispatchBase", "SKIP", "no compute queue", "functional");
                 row("core11.dispatchBaseNonZero", "SKIP", "no compute queue", "functional");
@@ -1668,6 +1731,9 @@ int run(const char *library, PostWindow *window = nullptr) {
                 row("core11.variablePointersStorageBuffer", "SKIP", "no compute queue",
                     "functional");
                 row("core11.spirv13Downgrade", "SKIP", "no compute queue", "functional");
+                row("core11.storageBufferArrays", "SKIP", "no compute queue", "functional");
+                row("core11.storageBufferArraysStatic", "SKIP", "no compute queue", "functional");
+                row("core11.subgroupBasic", "SKIP", "no compute queue", "functional");
             }
             if ((families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
                 run_case("core11.negativeViewport",
@@ -1678,6 +1744,22 @@ int run(const char *library, PostWindow *window = nullptr) {
                          [&] { negative_viewport_smoke(probe, physical, family, true, false,
                                                        false, false, false, false,
                                                        "core11.dynamicNegativeViewport"); });
+                for (unsigned stage = 1; stage <= 3; ++stage) {
+                    const char* names[3][2] = {
+                        {"core11.staticViewportPositionRead", "core11.dynamicViewportPositionRead"},
+                        {"core11.staticViewportGeometry", "core11.dynamicViewportGeometry"},
+                        {"core11.staticViewportTessellation", "core11.dynamicViewportTessellation"}};
+                    for (unsigned dynamic = 0; dynamic < 2; ++dynamic) {
+                        const auto name = names[stage - 1][dynamic];
+                        if ((stage == 2 && !enabled_features.geometryShader) ||
+                            (stage == 3 && !enabled_features.tessellationShader)) {
+                            row(name, "SKIP", "optional shader stage unavailable", "functional");
+                            continue;
+                        }
+                        run_case(name, [&] { negative_viewport_smoke(probe, physical, family,
+                            dynamic, false, false, false, false, false, name, stage); });
+                    }
+                }
                 run_case("core11.dynamicNegativeViewportIndirect",
                          [&] { negative_viewport_smoke(probe, physical, family, true, true,
                                                        false, false, false, false,
@@ -1694,30 +1776,41 @@ int run(const char *library, PostWindow *window = nullptr) {
                          [&] { negative_viewport_smoke(probe, physical, family, true, false,
                                                        false, true, false, false,
                                                        "core11.dynamicPositiveViewport"); });
-                run_case("core11.staticMixedViewport",
-                         [&] { negative_viewport_smoke(probe, physical, family, false, false,
+                if (enabled_features.multiViewport) {
+                    run_case("core11.staticMixedViewport",
+                             [&] { negative_viewport_smoke(probe, physical, family, false, false,
                                                        false, true, true, false,
                                                        "core11.staticMixedViewport"); });
-                run_case("core11.dynamicMixedViewport",
-                         [&] { negative_viewport_smoke(probe, physical, family, true, false,
+                    run_case("core11.dynamicMixedViewport",
+                             [&] { negative_viewport_smoke(probe, physical, family, true, false,
                                                        false, true, true, false,
                                                        "core11.dynamicMixedViewport"); });
-                run_case("core11.staticMixedNegativeViewport",
-                         [&] { negative_viewport_smoke(probe, physical, family, false, false,
+                    run_case("core11.staticMixedNegativeViewport",
+                             [&] { negative_viewport_smoke(probe, physical, family, false, false,
                                                        false, false, true, false,
                                                        "core11.staticMixedNegativeViewport"); });
-                run_case("core11.dynamicMixedNegativeViewport",
-                         [&] { negative_viewport_smoke(probe, physical, family, true, false,
+                    run_case("core11.dynamicMixedNegativeViewport",
+                             [&] { negative_viewport_smoke(probe, physical, family, true, false,
                                                        false, false, true, false,
                                                        "core11.dynamicMixedNegativeViewport"); });
-                run_case("core11.staticConstantViewportIndex",
-                         [&] { negative_viewport_smoke(probe, physical, family, false, false,
+                } else {
+                    for (const auto name : {"core11.staticMixedViewport", "core11.dynamicMixedViewport",
+                                           "core11.staticMixedNegativeViewport", "core11.dynamicMixedNegativeViewport"})
+                        row(name, "SKIP", "optional multiViewport feature unavailable", "functional");
+                }
+                if (enabled_features.multiViewport && enabled_features.geometryShader) {
+                    run_case("core11.staticConstantViewportIndex",
+                             [&] { negative_viewport_smoke(probe, physical, family, false, false,
                                                        false, true, true, true,
                                                        "core11.staticConstantViewportIndex"); });
-                run_case("core11.dynamicConstantViewportIndex",
-                         [&] { negative_viewport_smoke(probe, physical, family, true, false,
+                    run_case("core11.dynamicConstantViewportIndex",
+                             [&] { negative_viewport_smoke(probe, physical, family, true, false,
                                                        false, true, true, true,
                                                        "core11.dynamicConstantViewportIndex"); });
+                } else {
+                    row("core11.staticConstantViewportIndex", "SKIP", "multiViewport or geometryShader unavailable", "functional");
+                    row("core11.dynamicConstantViewportIndex", "SKIP", "multiViewport or geometryShader unavailable", "functional");
+                }
             } else {
                 row("core11.negativeViewport", "SKIP", "no graphics queue", "functional");
                 row("core11.dynamicNegativeViewport", "SKIP", "no graphics queue", "functional");
@@ -1757,6 +1850,9 @@ int run(const char *library, PostWindow *window = nullptr) {
         } else {
             row("core11.queryChain", "SKIP", "Vulkan 1.1 query chain unavailable",
                 "functional");
+            row("core11.storageBufferArrays", "SKIP", "Vulkan 1.1 unavailable", "functional");
+            row("core11.storageBufferArraysStatic", "SKIP", "Vulkan 1.1 unavailable", "functional");
+            row("core11.subgroupBasic", "SKIP", "Vulkan 1.1 unavailable", "functional");
             row("core11.externalProperties", "SKIP", "Vulkan 1.1 external queries unavailable",
                 "functional");
             row("core11.propertiesAggregate", "SKIP", "Vulkan 1.1 properties query unavailable",

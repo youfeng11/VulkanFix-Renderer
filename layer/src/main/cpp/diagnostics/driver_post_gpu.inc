@@ -3,7 +3,36 @@
 #include "driver_post_shaders.h"
 #include "variable_pointers_shader.h"
 #include "variable_pointers_storage_shader.h"
+#include "storage_arrays_shader.h"
+#include "storage_arrays_static_shader.h"
+#include "subgroup_basic_shader.h"
 using GpuProbe = vkfix::nativeprobe::Resources<Probe>;
+
+void subgroup_basic_smoke(Probe& p,VkPhysicalDevice physical,uint32_t family) {
+    VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,&subgroup};
+    p.get<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(physical,&properties);
+    if (!(subgroup.supportedStages&VK_SHADER_STAGE_COMPUTE_BIT) ||
+        !(subgroup.supportedOperations&VK_SUBGROUP_FEATURE_BASIC_BIT) || !subgroup.subgroupSize)
+        throw ProbeMismatch("mandatory compute subgroup BASIC properties unavailable");
+    const auto error=vkfix::nativeprobe::subgroup_basic(p,physical,family,
+        post_subgroup_basic_comp,sizeof post_subgroup_basic_comp/sizeof(uint32_t),subgroup,false);
+    if (!error.empty()) throw ProbeMismatch(error);
+    row("core11.subgroupBasic","PASS",
+        "two 3D workgroups matched subgroup properties, unique IDs, lowest-active-lane election, scoped barriers and atomics",
+        "functional");
+}
+
+void storage_buffer_array_smoke(Probe& p,VkPhysicalDevice physical,uint32_t family,bool static_indexing=false) {
+    const auto error=vkfix::nativeprobe::storage_buffer_array(p,physical,family,
+        static_indexing?post_storage_arrays_static_comp:post_storage_arrays_comp,
+        static_indexing?sizeof post_storage_arrays_static_comp/sizeof(uint32_t):sizeof post_storage_arrays_comp/sizeof(uint32_t),true);
+    if (!error.empty()) throw ProbeMismatch(error);
+    row(static_indexing?"core11.storageBufferArraysStatic":"core11.storageBufferArrays","PASS",
+        static_indexing?"array length specialized from 2 to 3 without dynamic-indexing capability; third-buffer restore matched":
+            "array length specialized from 2 to 3; shared UBO, SSBO copies, atomics and third-buffer restore matched",
+        "functional");
+}
 
 void synchronization_smoke(Probe &p, VkPhysicalDevice physical, uint32_t family) {
     GpuProbe gpu(p, physical, family);
@@ -100,7 +129,8 @@ void dynamic_rendering_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
 
 void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t family,
                              bool dynamic, bool indirect, bool indexed, bool positive,
-                             bool mixed, bool constant_viewport, const char *row_name) {
+                             bool mixed, bool constant_viewport, const char *row_name,
+                             unsigned final_stage = 0) {
     GpuProbe gpu(p, physical, family);
     VkAttachmentDescription attachment{};
     attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -143,9 +173,12 @@ void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
     VkShaderModule vertex = VK_NULL_HANDLE;
     VkShaderModule fragment = VK_NULL_HANDLE;
     VkShaderModuleCreateInfo shader_ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    shader_ci.codeSize = constant_viewport ? sizeof post_viewport_index_vert
-                                           : sizeof post_draw_vert;
-    shader_ci.pCode = constant_viewport ? post_viewport_index_vert : post_draw_vert;
+    shader_ci.codeSize = sizeof post_draw_vert;
+    shader_ci.pCode = post_draw_vert;
+    if (final_stage == 1) {
+        shader_ci.codeSize = sizeof post_viewport_stage_vert;
+        shader_ci.pCode = post_viewport_stage_vert;
+    }
     result = p.dev<PFN_vkCreateShaderModule>("vkCreateShaderModule")(
         p.device, &shader_ci, nullptr, &vertex);
     if (result == VK_SUCCESS) {
@@ -161,7 +194,7 @@ void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
         throw ProbeMismatch("could not create negative-viewport shader modules");
     }
 
-    VkPipelineShaderStageCreateInfo stages[2]{};
+    VkPipelineShaderStageCreateInfo stages[4]{};
     stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = vertex;
@@ -170,6 +203,28 @@ void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = fragment;
     stages[1].pName = "main";
+    uint32_t stage_count = 2;
+    auto add_stage = [&](VkShaderStageFlagBits stage, const uint32_t* words, size_t size) {
+        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        ci.codeSize = size; ci.pCode = words;
+        VkShaderModule module{};
+        require(p.dev<PFN_vkCreateShaderModule>("vkCreateShaderModule")(
+            p.device, &ci, nullptr, &module), "create final viewport stage");
+        gpu.objects.push_back([=, &p] { destroy_shader(p.device, module, nullptr); });
+        auto& out = stages[stage_count++];
+        out = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        out.stage = stage; out.module = module; out.pName = "main";
+    };
+    if (final_stage == 2) add_stage(VK_SHADER_STAGE_GEOMETRY_BIT,
+        post_viewport_stage_geom, sizeof post_viewport_stage_geom);
+    if (constant_viewport) add_stage(VK_SHADER_STAGE_GEOMETRY_BIT,
+        post_viewport_index_geom, sizeof post_viewport_index_geom);
+    if (final_stage == 3) {
+        add_stage(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
+            post_viewport_stage_tesc, sizeof post_viewport_stage_tesc);
+        add_stage(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+            post_viewport_stage_tese, sizeof post_viewport_stage_tese);
+    }
     VkVertexInputBindingDescription vertex_binding{0, 4, VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription vertex_attribute{0, 0, VK_FORMAT_R32_SFLOAT, 0};
     VkPipelineVertexInputStateCreateInfo vertex_input{
@@ -181,6 +236,9 @@ void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
     VkPipelineInputAssemblyStateCreateInfo input_assembly{
         VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    if (final_stage == 3) input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    VkPipelineTessellationStateCreateInfo tessellation{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};
+    tessellation.patchControlPoints = 3;
     VkViewport viewports[2] = {
         {0, positive ? 0.0f : 16.0f, 16, positive ? 16.0f : -16.0f, 0, 1},
         {0, positive ? 16.0f : 0.0f, 16, positive ? -16.0f : 16.0f, 0, 1}};
@@ -211,7 +269,8 @@ void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
     blend.attachmentCount = 1;
     blend.pAttachments = &blend_attachment;
     VkGraphicsPipelineCreateInfo pipeline_ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    pipeline_ci.stageCount = 2;
+    pipeline_ci.stageCount = stage_count;
+    pipeline_ci.pTessellationState = final_stage == 3 ? &tessellation : nullptr;
     pipeline_ci.pStages = stages;
     pipeline_ci.pVertexInputState = &vertex_input;
     pipeline_ci.pInputAssemblyState = &input_assembly;
