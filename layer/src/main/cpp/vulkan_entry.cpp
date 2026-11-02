@@ -19,6 +19,7 @@
 #include "core/extension_dependencies.h"
 #include "core/native_instance_state.h"
 #include "core/shader_module_cache.h"
+#include "core/created_shader_module.h"
 #include "core/specialized_shader_stages.h"
 #include "core/multiview_pipelines.h"
 #include "core/multiview_render_pass.h"
@@ -1394,14 +1395,15 @@ FORWARD_DEV(VkResult, vkMapMemory, device,
 FORWARD_DEV_VOID(vkUnmapMemory, device, (VkDevice device, VkDeviceMemory memory), (device, memory))
 static VKAPI_ATTR VkResult VKAPI_CALL
 create_layer_shader_impl(VkDevice device, const VkShaderModuleCreateInfo *pCreateInfo,
-                     const VkAllocationCallbacks *pAllocator, VkShaderModule *pShaderModule) {
+                     VkShaderModule *pShaderModule, vkfix::CreatedShaderModule& owned) {
     auto real_fn = (PFN_vkCreateShaderModule)get_real_proc(get_last_instance(), device, "vkCreateShaderModule");
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
-    auto create = [&](VkDevice d, const VkShaderModuleCreateInfo* ci, const VkAllocationCallbacks* allocator, VkShaderModule* out) {
-        VkResult result = real_fn(d, ci, allocator, out);
-        if (result == VK_SUCCESS && out && *out) {
-            VertexStoreEmulator::get().shader(d, *out, ci);
-            vkfix::ShaderModuleCache::get().remember(d, *out, ci);
+    auto create = [&](const VkShaderModuleCreateInfo* ci) {
+        const auto result = owned.create(real_fn,ci);
+        if (result == VK_SUCCESS) {
+            *pShaderModule = owned.get();
+            VertexStoreEmulator::get().shader(device, owned.get(), ci);
+            vkfix::ShaderModuleCache::get().remember(device, owned.get(), ci);
         }
         return result;
     };
@@ -1409,13 +1411,13 @@ create_layer_shader_impl(VkDevice device, const VkShaderModuleCreateInfo *pCreat
     if (!pCreateInfo || !pCreateInfo->pCode ||
         pCreateInfo->codeSize < 5 * sizeof(uint32_t) ||
         (pCreateInfo->codeSize % sizeof(uint32_t)) != 0) {
-        return create(device, pCreateInfo, pAllocator, pShaderModule);
+        return create(pCreateInfo);
     }
 
     const uint32_t targetVersion = LayerManager::get().get_device_max_spirv_version(device);
     const uint32_t native_extensions = LayerManager::get().get_device_spirv_extensions(device);
     if (targetVersion == 0) {
-        return create(device, pCreateInfo, pAllocator, pShaderModule);
+        return create(pCreateInfo);
     }
 
     // Fast path: on a modern driver there is nothing to lower. Checking the
@@ -1440,7 +1442,7 @@ create_layer_shader_impl(VkDevice device, const VkShaderModuleCreateInfo *pCreat
     if (code_words[0] != 0x07230203u ||
         (code_words[1] <= targetVersion && !broadcast_support && !prune_uniforms && !dedup_samplers &&
          !legacy_storage && !aggregate_storage && !basic_subgroups && !singleton_index && !deferred_view)) {
-        return create(device, pCreateInfo, pAllocator, pShaderModule);
+        return create(pCreateInfo);
     }
 
     std::vector<uint32_t> code(pCreateInfo->codeSize / sizeof(uint32_t));
@@ -1543,13 +1545,13 @@ create_layer_shader_impl(VkDevice device, const VkShaderModuleCreateInfo *pCreat
             LOGI("Measured sampler repair: deduplicated shader sampler aliases");
     }
     if (!version_changed && !broadcast_changed && !uniforms_changed && !samplers_changed && !aggregates_changed && !arrays_changed && !basic_changed && !index_changed && !view_changed) {
-        return create(device, pCreateInfo, pAllocator, pShaderModule);
+        return create(pCreateInfo);
     }
 
     VkShaderModuleCreateInfo modified = *pCreateInfo;
     modified.codeSize = code.size() * sizeof(uint32_t);
     modified.pCode = code.data();
-    const auto result=create(device, &modified, pAllocator, pShaderModule);
+    const auto result=create(&modified);
     if (result==VK_SUCCESS && !deferred_source.empty() && pShaderModule && *pShaderModule) {
         auto source=*pCreateInfo;
         source.pCode=deferred_source.data(); source.codeSize=deferred_source.size()*sizeof(uint32_t);
@@ -1559,12 +1561,18 @@ create_layer_shader_impl(VkDevice device, const VkShaderModuleCreateInfo *pCreat
 }
 static VKAPI_ATTR VkResult VKAPI_CALL create_layer_shader(VkDevice device,const VkShaderModuleCreateInfo* ci,
     const VkAllocationCallbacks* allocator,VkShaderModule* out) {
-    if (out) *out=VK_NULL_HANDLE;
+    if (!out) return VK_ERROR_INITIALIZATION_FAILED;
+    *out=VK_NULL_HANDLE;
+    vkfix::CreatedShaderModule owned(device,destroy_layer_shader,allocator);
     try {
-        return create_layer_shader_impl(device,ci,allocator,out);
+        const auto result = create_layer_shader_impl(device,ci,out,owned);
+        if (result == VK_SUCCESS) owned.release();
+        else *out = VK_NULL_HANDLE;
+        return result;
     } catch (const std::bad_alloc&) {
-        // Registration can allocate after the native object was created.
-        if (out && *out) { destroy_layer_shader(device,*out,allocator); *out=VK_NULL_HANDLE; }
+        // Registration can allocate after native success. The guard retires
+        // both metadata and the known-successful handle with its allocator.
+        *out=VK_NULL_HANDLE;
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
 }

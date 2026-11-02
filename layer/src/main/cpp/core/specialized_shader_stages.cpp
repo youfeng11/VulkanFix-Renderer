@@ -1,5 +1,6 @@
 #include "specialized_shader_stages.h"
 #include "shader_module_cache.h"
+#include "created_shader_module.h"
 #include "shader/specialize_constants.h"
 #include "shader/constant_input_lowering.h"
 #include "vk_common.h"
@@ -34,10 +35,11 @@ VkResult SpecializedShaderStages::stage(VkPipelineShaderStageCreateInfo& stage, 
     }
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize=code.size()*sizeof(uint32_t); ci.pCode=code.data();
-    modules_.push_back(VK_NULL_HANDLE);
-    auto result=create_(device_,&ci,nullptr,&modules_.back());
+    CreatedShaderModule module(device_,destroy_);
+    auto result=module.create(create_,&ci);
     if (result!=VK_SUCCESS) return result;
-    stage.module=modules_.back();
+    modules_.push_back(module.get());
+    stage.module=module.release();
     stage.pSpecializationInfo=nullptr;
     return VK_SUCCESS;
 }
