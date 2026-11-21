@@ -15,9 +15,14 @@ import androidx.annotation.Keep
 import org.json.JSONObject
 
 @Keep
+internal fun interface DriverPostProgress {
+    fun onRow(row: String)
+}
+
+@Keep
 internal object DriverPostNative {
     init { System.loadLibrary("vulkanfix_post") }
-    external fun run(library: String, surface: Surface?): String
+    external fun run(library: String, surface: Surface?, progress: DriverPostProgress): String
 }
 
 // Private, disposable process: never load a probed ICD into the UI or game.
@@ -27,6 +32,7 @@ class DriverPostService : Service() {
         const val HELLO = 2
         const val RESULT = 3
         const val STOP = 4
+        const val PROGRESS = 5
     }
 
     private var started = false
@@ -37,17 +43,36 @@ class DriverPostService : Service() {
                 started = true
                 val receiver = message.replyTo
                 val wrapped = message.arg1 == 1
+                val runId = message.arg2
                 @Suppress("DEPRECATION")
                 val surface = message.data.getParcelable<Surface>("surface")
                 try {
-                    receiver.send(Message.obtain(null, HELLO).apply { arg1 = Process.myPid() })
+                    receiver.send(Message.obtain(null, HELLO).apply {
+                        arg1 = Process.myPid()
+                        arg2 = runId
+                    })
                 } catch (_: RemoteException) {
                     Process.killProcess(Process.myPid())
                 }
                 Thread({
+                    var failed = false
                     val report = try {
-                        DriverPostNative.run(if (wrapped) "${applicationInfo.nativeLibraryDir}/libvulkanfix.so" else "libvulkan.so", surface)
+                        DriverPostNative.run(
+                            if (wrapped) "${applicationInfo.nativeLibraryDir}/libvulkanfix.so" else "libvulkan.so",
+                            surface,
+                            DriverPostProgress { row ->
+                                try {
+                                    receiver.send(Message.obtain(null, PROGRESS).apply {
+                                        arg2 = runId
+                                        data = Bundle().apply { putString("row", row) }
+                                    })
+                                } catch (_: RemoteException) {
+                                    Process.killProcess(Process.myPid())
+                                }
+                            }
+                        )
                     } catch (error: Throwable) {
+                        failed = true
                         JSONObject().put("name", "probe").put("status", "FAIL")
                             .put("evidence", "error").put("detail", error.toString()).toString() + "\n"
                     } finally {
@@ -55,6 +80,8 @@ class DriverPostService : Service() {
                     }
                     try {
                         receiver.send(Message.obtain(null, RESULT).apply {
+                            arg1 = if (failed) 1 else 0
+                            arg2 = runId
                             data = Bundle().apply { putString("report", report) }
                         })
                     } catch (_: RemoteException) {
