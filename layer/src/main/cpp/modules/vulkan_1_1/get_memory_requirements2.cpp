@@ -2,9 +2,6 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
-#include "legacy_query_array.h"
-#include "memory_requirements_repair.h"
-#include <vector>
 
 REGISTER_LAYER_MODULE(GetMemoryRequirements2Module);
 
@@ -30,113 +27,11 @@ void GetMemoryRequirements2Module::on_enumerate_device_extensions(
     }
 }
 
+// Native command authorization and legacy output initialization belong to the
+// central dispatcher, independently of the module's physical capability cache.
 bool GetMemoryRequirements2Module::on_get_buffer_memory_requirements2(
-    VkDevice device,
-    const VkBufferMemoryRequirementsInfo2* pInfo,
-    VkMemoryRequirements2* pMemoryRequirements
-) {
-    if (is_device_native(device)) return false;
-
-    PFN_vkGetBufferMemoryRequirements2 real_fn =
-        (PFN_vkGetBufferMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetBufferMemoryRequirements2");
-    if (!real_fn) {
-        real_fn = (PFN_vkGetBufferMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetBufferMemoryRequirements2KHR");
-    }
-    if (real_fn) {
-        real_fn(device, pInfo, pMemoryRequirements);
-        if (pInfo && pInfo->pNext == nullptr)
-            vkfix::repair_buffer_memory_requirements(device, pInfo->buffer, pMemoryRequirements);
-        return true;
-    }
-
-    if (!pInfo || !pMemoryRequirements) return true;
-
-    PFN_vkGetBufferMemoryRequirements real_gmr =
-        (PFN_vkGetBufferMemoryRequirements) get_real_proc(get_last_instance(), device, "vkGetBufferMemoryRequirements");
-    if (real_gmr) {
-        real_gmr(device, pInfo->buffer, &pMemoryRequirements->memoryRequirements);
-    }
-
-    auto* dedicated = vku::find_pnext_mut<VkMemoryDedicatedRequirements>(
-        pMemoryRequirements->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS);
-    if (dedicated) {
-        dedicated->prefersDedicatedAllocation = VK_FALSE;
-        dedicated->requiresDedicatedAllocation = VK_FALSE;
-    }
-    return true;
-}
-
+    VkDevice, const VkBufferMemoryRequirementsInfo2*, VkMemoryRequirements2*) { return false; }
 bool GetMemoryRequirements2Module::on_get_image_memory_requirements2(
-    VkDevice device,
-    const VkImageMemoryRequirementsInfo2* pInfo,
-    VkMemoryRequirements2* pMemoryRequirements
-) {
-    if (is_device_native(device)) return false;
-
-    PFN_vkGetImageMemoryRequirements2 real_fn =
-        (PFN_vkGetImageMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetImageMemoryRequirements2");
-    if (!real_fn) {
-        real_fn = (PFN_vkGetImageMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetImageMemoryRequirements2KHR");
-    }
-    if (real_fn) {
-        real_fn(device, pInfo, pMemoryRequirements);
-        if (pInfo && pInfo->pNext == nullptr)
-            vkfix::repair_image_memory_requirements(device, pInfo->image, pMemoryRequirements);
-        return true;
-    }
-
-    if (!pInfo || !pMemoryRequirements) return true;
-
-    PFN_vkGetImageMemoryRequirements real_gmr =
-        (PFN_vkGetImageMemoryRequirements) get_real_proc(get_last_instance(), device, "vkGetImageMemoryRequirements");
-    if (real_gmr) {
-        real_gmr(device, pInfo->image, &pMemoryRequirements->memoryRequirements);
-    }
-
-    auto* dedicated = vku::find_pnext_mut<VkMemoryDedicatedRequirements>(
-        pMemoryRequirements->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS);
-    if (dedicated) {
-        dedicated->prefersDedicatedAllocation = VK_FALSE;
-        dedicated->requiresDedicatedAllocation = VK_FALSE;
-    }
-    return true;
-}
-
+    VkDevice, const VkImageMemoryRequirementsInfo2*, VkMemoryRequirements2*) { return false; }
 bool GetMemoryRequirements2Module::on_get_image_sparse_memory_requirements2(
-    VkDevice device,
-    const VkImageSparseMemoryRequirementsInfo2* pInfo,
-    uint32_t* pSparseMemoryRequirementCount,
-    VkSparseImageMemoryRequirements2* pSparseMemoryRequirements
-) {
-    if (is_device_native(device)) return false;
-
-    PFN_vkGetImageSparseMemoryRequirements2 real_fn =
-        (PFN_vkGetImageSparseMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetImageSparseMemoryRequirements2");
-    if (!real_fn) {
-        real_fn = (PFN_vkGetImageSparseMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetImageSparseMemoryRequirements2KHR");
-    }
-    if (real_fn) {
-        real_fn(device, pInfo, pSparseMemoryRequirementCount, pSparseMemoryRequirements);
-        return true;
-    }
-
-    if (!pInfo || !pSparseMemoryRequirementCount) return true;
-
-    PFN_vkGetImageSparseMemoryRequirements real_smr =
-        (PFN_vkGetImageSparseMemoryRequirements) get_real_proc(get_last_instance(), device, "vkGetImageSparseMemoryRequirements");
-    if (real_smr) {
-        vkfix::query_legacy_array<VkSparseImageMemoryRequirements>(
-            pSparseMemoryRequirementCount, pSparseMemoryRequirements,
-            [&](uint32_t* count, VkSparseImageMemoryRequirements* values) {
-                real_smr(device, pInfo->image, count, values);
-            },
-            [](VkSparseImageMemoryRequirements2& output,
-               const VkSparseImageMemoryRequirements& payload) {
-                output.memoryRequirements = payload;
-            });
-        return true;
-    }
-
-    *pSparseMemoryRequirementCount = 0;
-    return true;
-}
+    VkDevice, const VkImageSparseMemoryRequirementsInfo2*, uint32_t*, VkSparseImageMemoryRequirements2*) { return false; }

@@ -14,6 +14,8 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from generate_driver_post_commands import ROOT, OUTPUT, generate
+from generate_vulkan10_forwarders import generate as generate_base_forwarders
+from verify_core11_post import report_errors
 
 BINARY = None
 ADB = None
@@ -23,15 +25,19 @@ FAULT_DRIVER = None
 BASE_DRIVER = None
 
 
-def execute(arguments, environment=None):
+def execute(arguments, environment=None, timeout=20):
     command = [BINARY, *arguments]
     if ADB:
         prefix = ["env", *[f"{key}={value}" for key, value in (environment or {}).items()]]
-        command = [ADB, "-s", SERIAL, "shell", "timeout 15 " + shlex.join([*prefix, *command])]
-    return subprocess.run(command, capture_output=True, text=True, timeout=20)
+        command = [ADB, "-s", SERIAL, "shell", f"timeout {timeout - 5} " + shlex.join([*prefix, *command])]
+    return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
 
 
 class InventoryTest(unittest.TestCase):
+    def test_base_forwarders_match_generator(self):
+        source = ROOT / "layer/src/main/cpp/core/vulkan10_forwarders.inc"
+        self.assertEqual(source.read_text(encoding="utf-8"), generate_base_forwarders(ROOT))
+
     def test_generated_matches_pinned_registry(self):
         self.assertEqual(OUTPUT.read_text(encoding="utf-8"), generate())
 
@@ -65,7 +71,8 @@ class InventoryTest(unittest.TestCase):
         directory = ROOT / "layer/src/main/cpp/diagnostics"
         text = "\n".join((directory / name).read_text(encoding="utf-8") for name in
                          ("driver_post_shaders.h", "variable_pointers_shader.h", "variable_pointers_storage_shader.h",
-                          "storage_arrays_shader.h", "storage_arrays_static_shader.h", "subgroup_basic_shader.h"))
+                          "storage_arrays_shader.h", "storage_arrays_static_shader.h", "subgroup_basic_shader.h",
+                          "relaxed_layout_shader.h"))
         for source in (directory / "shaders").glob("*"):
             digest = hashlib.sha256(source.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
             self.assertIn(f"// {source.name} SHA256 {digest}", text)
@@ -109,6 +116,15 @@ class ReportTest(unittest.TestCase):
             "vertexAttributeInstanceRateDivisor.draw", "fillModeNonSolid.line", "shaderDrawParameters.draw",
             "vertexPipelineStoresAndAtomics.draw", "samplerAnisotropy.sample",
             "VK_KHR_swapchain.present",
+            "driverTrust.samplerAliases", "driverTrust.largeUniform", "driverTrust.pushDescriptor",
+            "driverTrust.tilerPressure", "driverTrust.msaaArrayResolve", "driverTrust.workerControl",
+            "driverTrust.timelineQueue", "driverTrust.sync2Events", "driverTrust.sync2Submit",
+            "driverTrust.timestampQueries", "driverTrust.hostQueryReset",
+            "driverTrust.crossFormatImageSlices", "driverTrust.rasterizerDiscardState",
+            "driverTrust.storageArrayStatic", "driverTrust.storageArrayDynamic",
+            "driverTrust.depthStencilResolve",
+            "driverTrust.rgb9e5TransferBuffer", "driverTrust.rgb9e5TransferImage",
+            "driverTrust.queue2", "deviceQueue2.sameQueue",
         }
         for path in REPORTS:
             with self.subTest(report=str(path)):
@@ -127,16 +143,31 @@ class ReportTest(unittest.TestCase):
                     for name in expected:
                         matches = [r for r in device if r["name"] == name]
                         self.assertEqual(len(matches), 1, name)
-                        self.assertEqual(matches[0]["evidence"], "functional" if name in {
+                        self.assertEqual(matches[0]["evidence"], "functional" if name.startswith("driverTrust.") or name in {
                             "bufferTransfer", "timelineSemaphore.hostSignalWait", "hostQueryReset.reset",
                             "synchronization2.transfer", "dynamicRendering.clear", "pushDescriptor.compute",
                             "graphics.draw", "multiDrawIndirect.draw", "drawIndirectFirstInstance.draw",
                             "vertexAttributeInstanceRateDivisor.draw", "fillModeNonSolid.line", "shaderDrawParameters.draw",
-                            "vertexPipelineStoresAndAtomics.draw", "samplerAnisotropy.sample", "VK_KHR_swapchain.present"
+                            "vertexPipelineStoresAndAtomics.draw", "samplerAnisotropy.sample", "VK_KHR_swapchain.present",
+                            "deviceQueue2.sameQueue",
                         } else "query")
 
 
 class ReadbackNegativeTest(unittest.TestCase):
+    def test_compute_only_queue_profile(self):
+        if not (ADB and BINARY and FAULT_DRIVER and BASE_DRIVER):
+            self.skipTest("supply --adb, --binary, --fault-driver and --base-driver")
+        result = execute([FAULT_DRIVER], {"VKFIX_POST_TEST_DRIVER": BASE_DRIVER,
+                                         "VKFIX_POST_TEST_DROP": "compute-only"}, timeout=90)
+        rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(report_errors(result.returncode, rows), [], result.stdout + result.stderr)
+        by_name = {row["name"]: row for row in rows}
+        for name in ("core11.multiviewRenderPass", "core11.staticViewportPositionRead",
+                     "core11.dynamicViewportPositionRead", "dynamicRendering.clear"):
+            self.assertEqual(by_name[name]["status"], "SKIP", name)
+            self.assertEqual(by_name[name]["detail"], "no graphics queue", name)
+        self.assertEqual(by_name["core11.subgroupBasic"]["status"], "PASS")
+
     def test_vulkan10_extension_dispatch(self):
         if not (ADB and BINARY and FAULT_DRIVER):
             self.skipTest("supply --adb, --binary and --fault-driver")
@@ -159,6 +190,7 @@ class ReadbackNegativeTest(unittest.TestCase):
             self.skipTest("supply --adb, --binary, --fault-driver and --base-driver")
         cases = (("fill", "bufferTransfer", "GPU fill readback mismatch"),
                  ("reset", "hostQueryReset.reset", "reset queries did not return unavailable/NOT_READY"),
+                 ("reset-range", "hostQueryReset.reset", "partial reset changed a neighboring query"),
                  ("copy", "synchronization2.transfer", "synchronization2 transfer readback mismatch"),
                  ("render", "dynamicRendering.clear", "dynamic rendering clear/readback mismatch"),
                  ("push", "pushDescriptor.compute", "push descriptor compute readback mismatch"),

@@ -24,6 +24,8 @@ std::map<std::pair<VkCommandBuffer, VkPipelineBindPoint>, VkDescriptorSet> bound
 uint64_t next_handle = 0x100000000ULL;
 unsigned copies = 0, invalid_copies = 0, pool_destroys = 0;
 bool allocation_layout_alive = true, template_layout_valid = true;
+VkShaderStageFlags last_layout_stages = 0;
+VkDescriptorSetLayoutCreateFlags last_layout_flags = 0;
 
 VKAPI_ATTR VkResult VKAPI_CALL allocate_commands(VkDevice, const VkCommandBufferAllocateInfo* info,
                                                  VkCommandBuffer* out) {
@@ -34,11 +36,13 @@ VKAPI_ATTR VkResult VKAPI_CALL allocate_commands(VkDevice, const VkCommandBuffer
 VKAPI_ATTR void VKAPI_CALL free_commands(VkDevice, VkCommandPool, uint32_t,
                                          const VkCommandBuffer*) {}
 
-VKAPI_ATTR VkResult VKAPI_CALL create_layout(VkDevice d, const VkDescriptorSetLayoutCreateInfo *,
+VKAPI_ATTR VkResult VKAPI_CALL create_layout(VkDevice d, const VkDescriptorSetLayoutCreateInfo *info,
                                              const VkAllocationCallbacks *,
                                              VkDescriptorSetLayout *out) {
     if (fail_layout)
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    last_layout_stages = info->bindingCount ? info->pBindings[0].stageFlags : 0;
+    last_layout_flags = info->flags;
     *out = (VkDescriptorSetLayout)next_handle++;
     live_layouts.insert(key(d, (uint64_t)*out));
     return VK_SUCCESS;
@@ -185,8 +189,8 @@ void run_push_descriptor_regressions(void (*check)(bool, const char *)) {
     manager.register_module(std::move(owned));
     const auto device = (VkDevice)(uintptr_t)0xd000;
     const auto other_device = (VkDevice)(uintptr_t)0xe000;
-    manager.init_device_dispatch_table(device);
-    manager.init_device_dispatch_table(other_device);
+    manager.init_device_dispatch_table(device, VK_API_VERSION_1_1);
+    manager.init_device_dispatch_table(other_device, VK_API_VERSION_1_1);
     auto cmd = (VkCommandBuffer)(uintptr_t)0xd123;
     const auto pool = (VkCommandPool)0xd456;
     VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -200,17 +204,24 @@ void run_push_descriptor_regressions(void (*check)(bool, const char *)) {
                                                   VK_SHADER_STAGE_ALL, nullptr};
     VkSampler immutable = (VkSampler)0x8888;
     std::array<VkDescriptorSetLayoutBinding, 3> bindings{
-        {{3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2, VK_SHADER_STAGE_ALL, nullptr},
+        {{3, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
          {7, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr},
          {11, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL, &immutable}}};
     VkDescriptorSetLayoutCreateInfo sci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     sci.bindingCount = 1;
     sci.pBindings = &ordinary_binding;
-    module.on_post_create_descriptor_set_layout(device, &sci, VK_SUCCESS, ordinary);
+    module.on_post_create_descriptor_set_layout(device, &sci, sci, VK_SUCCESS, ordinary);
     sci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
     sci.bindingCount = uint32_t(bindings.size());
     sci.pBindings = bindings.data();
-    module.on_post_create_descriptor_set_layout(device, &sci, VK_SUCCESS, push);
+    auto native_bindings = bindings;
+    native_bindings[0].stageFlags |= VK_SHADER_STAGE_COMPUTE_BIT;
+    auto native_sci = sci;
+    native_sci.flags &= ~VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    native_sci.pBindings = native_bindings.data();
+    module.on_post_create_descriptor_set_layout(device, &sci, native_sci, VK_SUCCESS, push);
+    check(last_layout_flags == native_sci.flags && last_layout_stages == native_bindings[0].stageFlags,
+          "push snapshot allocation layout preserves native compute visibility added to vertex bindings");
     auto layout = (VkPipelineLayout)0x200000001ULL;
     std::array<VkDescriptorSetLayout, 3> layouts{ordinary, push, ordinary};
     VkPushConstantRange range{VK_SHADER_STAGE_ALL, 0, 16};
@@ -222,7 +233,7 @@ void run_push_descriptor_regressions(void (*check)(bool, const char *)) {
     module.on_post_create_pipeline_layout(device, &pci, VK_SUCCESS, layout);
     auto compatible_layout = (VkPipelineLayout)0x300000001ULL;
     auto equivalent_push = (VkDescriptorSetLayout)0x300001234ULL;
-    module.on_post_create_descriptor_set_layout(device, &sci, VK_SUCCESS, equivalent_push);
+    module.on_post_create_descriptor_set_layout(device, &sci, native_sci, VK_SUCCESS, equivalent_push);
     layouts[1] = equivalent_push;
     module.on_post_create_pipeline_layout(device, &pci, VK_SUCCESS, compatible_layout);
     auto incompatible_layout = (VkPipelineLayout)0x400000001ULL;
@@ -373,7 +384,7 @@ void run_push_descriptor_regressions(void (*check)(bool, const char *)) {
     check(value(current(), 3) == 0, "reused command handles cannot access freed TLS state");
     // Reuse all application handles on a second logical device with a different definition.
     sci.pBindings = bindings.data();
-    module.on_post_create_descriptor_set_layout(other_device, &sci, VK_SUCCESS, equivalent_push);
+    module.on_post_create_descriptor_set_layout(other_device, &sci, native_sci, VK_SUCCESS, equivalent_push);
     module.on_post_create_pipeline_layout(other_device, &pci, VK_SUCCESS, compatible_layout);
     module.on_destroy_device(other_device);
     push_writes(VK_PIPELINE_BIND_POINT_GRAPHICS, compatible_layout, 2, writes);
@@ -381,7 +392,7 @@ void run_push_descriptor_regressions(void (*check)(bool, const char *)) {
           "destroying another device preserves this device's pipeline metadata");
     fail_layout = true;
     auto failed_push = (VkDescriptorSetLayout)0x400001234ULL;
-    module.on_post_create_descriptor_set_layout(device, &sci, VK_SUCCESS, failed_push);
+    module.on_post_create_descriptor_set_layout(device, &sci, native_sci, VK_SUCCESS, failed_push);
     fail_layout = false;
     layouts[1] = failed_push;
     auto failed_layout = (VkPipelineLayout)0x500000001ULL;

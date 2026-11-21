@@ -17,6 +17,9 @@ public:
         VkPhysicalDeviceProperties2* pProperties,
         void*& pUserData) override;
 
+    void on_pre_create_device(VkPhysicalDevice, VkDeviceCreateInfo*, VkPhysicalDeviceFeatures*,
+                              std::vector<const char*>&, void*&) override;
+
     void on_post_get_properties2(
         VkPhysicalDevice physicalDevice,
         VkPhysicalDeviceProperties2* pProperties,

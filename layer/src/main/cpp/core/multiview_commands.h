@@ -11,9 +11,15 @@ public:
         PFN_vkCmdBeginRenderPass begin;
         PFN_vkCmdEndRenderPass end;
         PFN_vkCmdPipelineBarrier barrier = nullptr;
+        // Non-null only after a native STORE/array resolve defect and its
+        // source-preserving transfer repair have both been measured.
+        PFN_vkCmdResolveImage repair_resolve = nullptr;
+        VkPhysicalDevice physical = VK_NULL_HANDLE;
+        PFN_vkGetImageMemoryRequirements2 requirements2 = nullptr;
     };
     static MultiviewCommands& get();
     static bool replaying();
+    static bool replaying_multiview();
     bool has_active_recordings() const { return !replaying() && active_.load(std::memory_order_acquire) != 0; }
     VkResult begin(VkDevice, VkCommandBuffer, VkCommandPool, const VkCommandBufferBeginInfo&, bool native_aspects, Callbacks);
     bool begin_pass(VkCommandBuffer, const VkRenderPassBeginInfo*, VkSubpassContents);
@@ -21,6 +27,7 @@ public:
     bool end_pass(VkCommandBuffer);
     bool execute(VkCommandBuffer, uint32_t, const VkCommandBuffer*);
     VkResult error(VkCommandBuffer);
+    bool record_error(VkCommandBuffer, VkResult);
     void forget(VkCommandBuffer);
     void forget_pool(VkDevice, VkCommandPool);
     void forget_device(VkDevice);
@@ -55,5 +62,6 @@ private:
     std::unordered_map<VkCommandBuffer, std::shared_ptr<Recording>> recordings_;
     std::map<VkDevice, std::vector<std::weak_ptr<Recording>>> live_;
     std::atomic<uint32_t> active_{0};
+    std::atomic<uint32_t> tracked_{0};
 };
 }

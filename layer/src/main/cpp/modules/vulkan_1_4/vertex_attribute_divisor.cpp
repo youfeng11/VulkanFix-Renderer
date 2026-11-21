@@ -1,6 +1,7 @@
 ﻿#include "vertex_attribute_divisor.h"
 #include "driver_loader.h"
 #include "layer_manager.h"
+#include "core/native_instance_state.h"
 #include "vk_pnext.h"
 #include "vk_debug_utils.h"
 #include <string.h>
@@ -26,6 +27,8 @@ VertexAttributeDivisorModule::~VertexAttributeDivisorModule() {
 
 VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe_phys_device(VkPhysicalDevice physDev) {
     PhysDeviceInfo info{};
+    auto owner = vkfix::native_instance_for_physical(physDev);
+    if (!owner) owner = get_last_instance();
     {
         std::shared_lock<std::shared_mutex> lock(m_rw_mutex);
         auto it = m_phys_devices.find((uint64_t)(uintptr_t)physDev);
@@ -40,7 +43,7 @@ VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe
     // 1. Probe native device extensions if not already known
     if (!info.probed) {
         PFN_vkEnumerateDeviceExtensionProperties real_ext_fn =
-            (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+            (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(owner, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
         if (real_ext_fn) {
             uint32_t count = 0;
             if (real_ext_fn(physDev, NULL, &count, NULL) == VK_SUCCESS && count > 0) {
@@ -69,10 +72,10 @@ VertexAttributeDivisorModule::PhysDeviceInfo VertexAttributeDivisorModule::probe
         info.native_has_zero_divisor = true;
     } else if (!forced && (info.native_has_ext || info.native_has_khr)) {
         PFN_vkGetPhysicalDeviceFeatures2 real_gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)
-            get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2");
+            get_real_proc(owner, VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2");
         if (!real_gpf2) {
             real_gpf2 = (PFN_vkGetPhysicalDeviceFeatures2)
-                get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2KHR");
+                get_real_proc(owner, VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2KHR");
         }
 
         if (real_gpf2) {
@@ -279,7 +282,10 @@ void VertexAttributeDivisorModule::on_post_get_properties2(
             pProperties->pNext, pUserData);
         props->maxVertexAttribDivisor = UINT32_MAX;
         LOG_OPT_DEBUG("Supplied maxVertexAttribDivisor = UINT32_MAX");
-    } else {
+    }
+    // EXT and KHR properties have distinct sTypes and may coexist. Relinking
+    // one removed node must not skip the other node left in the query chain.
+    {
         auto* extProps = vku::find_pnext_mut<VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT>(
             pProperties->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT);
         if (extProps && extProps->maxVertexAttribDivisor == 0) {

@@ -32,6 +32,10 @@ ProbeProcessResult run_driver_probe_process(const char *mode,const std::string &
 #ifdef _WIN32
     return {ProbeProcessStatus::Unavailable,"isolated probe worker requires Android"};
 #else
+    // A worker can load a forwarding driver during tests. Its instance and
+    // device setup must never launch another worker.
+    if (std::getenv("VKFIX_PROBE_CHILD"))
+        return {ProbeProcessStatus::Unavailable, "nested isolated probe suppressed"};
     std::string path;
     if (auto override_path=std::getenv("VULKAN_FIX_DRIVER_PROBE_WORKER")) path=override_path;
     else {
@@ -114,44 +118,70 @@ ProbeProcessResult run_driver_probe_process(const char *mode,const std::string &
     // READY is emitted only after identity, legal resources and pipeline setup.
     // A loader/setup crash is inconclusive, rather than a subject failure.
     const bool ready=output.find("VKFIX_PROBE_READY\n")!=std::string::npos;
+    auto detail=[&](const char *fallback) {
+        const std::string marker="VKFIX_PROBE_DETAIL:";
+        const auto begin=output.find(marker);
+        if (begin==std::string::npos) return std::string(fallback);
+        const auto value=begin+marker.size();
+        return output.substr(value,std::min<size_t>(512,output.find('\n',value)-value));
+    };
     if (WIFSIGNALED(status))
         return {ready ? ProbeProcessStatus::Crashed : ProbeProcessStatus::Unavailable,
                 "isolated probe signal "+std::to_string(WTERMSIG(status))};
-    if (WIFEXITED(status) && WEXITSTATUS(status)==0 && output.find("VKFIX_PROBE_PASS\n")!=std::string::npos)
-        return {ProbeProcessStatus::Passed,"isolated GPU readback matched"};
+    if (ready && WIFEXITED(status) && WEXITSTATUS(status)==0 && output.find("VKFIX_PROBE_PASS\n")!=std::string::npos)
+        return {ProbeProcessStatus::Passed,detail("isolated GPU readback matched")};
+    if (ready && WIFEXITED(status) && WEXITSTATUS(status)==4 && output.find("VKFIX_PROBE_REPAIR\n")!=std::string::npos)
+        return {ProbeProcessStatus::RepairConfirmed,detail("isolated differential controls established repair")};
+    if (ready && WIFEXITED(status) && WEXITSTATUS(status)==3 && output.find("VKFIX_PROBE_KNOWN_MISMATCH\n")!=std::string::npos)
+        return {ProbeProcessStatus::KnownMismatch,detail("isolated GPU readback matched a known failure")};
     if (ready && WIFEXITED(status) && WEXITSTATUS(status)==3 && output.find("VKFIX_PROBE_MISMATCH\n")!=std::string::npos)
-        return {ProbeProcessStatus::Mismatch,"isolated GPU readback mismatched"};
+        return {ProbeProcessStatus::Mismatch,detail("isolated GPU readback mismatched")};
     return {ProbeProcessStatus::Unavailable,"isolated probe returned no valid measurement: "+output.substr(0,512)};
 #endif
 }
 
+DriverProbeAssessment isolated_driver_assessment(const char *mode,const VkPhysicalDeviceProperties &p,uint64_t revision) {
+    const auto result=run_driver_probe_process(mode,driver_probe_identity(p,revision));
+    if (result.status==ProbeProcessStatus::Passed) return {DriverProbeVerdict::Healthy,result.detail};
+    if (result.status==ProbeProcessStatus::RepairConfirmed) return {DriverProbeVerdict::RepairConfirmed,result.detail};
+    return {DriverProbeVerdict::Inconclusive,std::string(mode)+": "+result.detail};
+}
+
+ProbeProcessResult run_controlled_driver_probe(const char *subject, const char *control,
+                                               const char *control_name, const std::string &identity,
+                                               unsigned timeout_ms) {
+    const auto before = run_driver_probe_process(control, identity, timeout_ms);
+    if (before.status != ProbeProcessStatus::Passed)
+        return {ProbeProcessStatus::Unavailable, std::string(control_name) + " control before subject: " + before.detail};
+    auto result = run_driver_probe_process(subject, identity, timeout_ms);
+    if (result.status == ProbeProcessStatus::Unavailable) return result;
+    const auto after = run_driver_probe_process(control, identity, timeout_ms);
+    if (after.status != ProbeProcessStatus::Passed)
+        return {ProbeProcessStatus::Unavailable, std::string(control_name) + " control after subject: " + after.detail};
+    result.detail += std::string("; ") + control_name + " controls passed before and after";
+    return result;
+}
+
 DriverProbeAssessment isolated_push_descriptor_probe(const VkPhysicalDeviceProperties &p,uint64_t revision) {
     auto identity=driver_probe_identity(p,revision);
-    auto before=run_driver_probe_process("push-control",identity);
-    if (before.status!=ProbeProcessStatus::Passed)
-        return {DriverProbeVerdict::Inconclusive,"push control before subject: "+before.detail};
-    auto subject=run_driver_probe_process("push-subject",identity);
-    auto after=run_driver_probe_process("push-control",identity);
-    if (after.status!=ProbeProcessStatus::Passed)
-        return {DriverProbeVerdict::Inconclusive,"push control after subject: "+after.detail};
-    if (subject.status==ProbeProcessStatus::Passed) return assess_driver_probe(true,true,true);
-    if (subject.status==ProbeProcessStatus::Mismatch || subject.status==ProbeProcessStatus::Crashed)
-        return {DriverProbeVerdict::RepairConfirmed,subject.detail+"; equivalent descriptor-set controls passed before and after"};
-    return {DriverProbeVerdict::Inconclusive,"push subject: "+subject.detail};
+    for (const char *name:{"push","push-graphics","push-vertex","push-vertex-compute"}) {
+        const std::string prefix=name;
+        auto subject=run_controlled_driver_probe((prefix+"-subject").c_str(), (prefix+"-control").c_str(),
+                                                 "equivalent descriptor-set", identity);
+        if (subject.status==ProbeProcessStatus::Passed) continue;
+        if (subject.status==ProbeProcessStatus::Mismatch || subject.status==ProbeProcessStatus::Crashed)
+            return {DriverProbeVerdict::RepairConfirmed,prefix+": "+subject.detail};
+        return {DriverProbeVerdict::Inconclusive,prefix+" subject: "+subject.detail};
+    }
+    return {DriverProbeVerdict::Healthy,"compute, fragment and vertex mixed-image/buffer/texel/array readbacks matched descriptor-set controls"};
 }
 DriverProbeAssessment isolated_tiler_probe(const VkPhysicalDeviceProperties &p,uint64_t revision) {
     auto identity=driver_probe_identity(p,revision);
-    auto before=run_driver_probe_process("tiler-control",identity,15000);
-    if (before.status!=ProbeProcessStatus::Passed)
-        return {DriverProbeVerdict::Inconclusive,"tiler control before subject: "+before.detail};
-    auto subject=run_driver_probe_process("tiler-subject",identity,15000);
-    auto after=run_driver_probe_process("tiler-control",identity,15000);
-    if (after.status!=ProbeProcessStatus::Passed)
-        return {DriverProbeVerdict::Inconclusive,"tiler control after subject: "+after.detail};
+    auto subject=run_controlled_driver_probe("tiler-subject", "tiler-control", "bounded LOAD", identity, 15000);
     if (subject.status==ProbeProcessStatus::Passed)
         return {DriverProbeVerdict::Healthy,"direct, single indirect and available multi-indirect pressure matched bounded LOAD controls (4 patterns each)"};
     if (subject.status==ProbeProcessStatus::Mismatch || subject.status==ProbeProcessStatus::Crashed)
-        return {DriverProbeVerdict::RepairConfirmed,subject.detail+"; bounded LOAD controls passed before and after"};
+        return {DriverProbeVerdict::RepairConfirmed,subject.detail};
     return {DriverProbeVerdict::Inconclusive,"tiler subject: "+subject.detail};
 }
 } // namespace vkfix

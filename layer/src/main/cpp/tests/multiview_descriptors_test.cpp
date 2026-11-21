@@ -1,5 +1,6 @@
 #include "core/multiview_descriptors.h"
 #include "core/multiview_commands.h"
+#include <array>
 #include "core/multiview_pipeline_layouts.h"
 #include "core/driver_loader.h"
 #include <cstdio>
@@ -44,6 +45,7 @@ std::map<Key, VkAttachmentDescription> pass_attachment;
 std::map<Key, std::vector<VkImageView>> framebuffers;
 VkDevice command_device{};
 bool in_pass = false;
+bool queries_outside = false;
 unsigned physical_begins = 0, physical_ends = 0, descriptor_binds = 0, pushes = 0;
 std::vector<uint32_t> replayed_views, begin_layers, clear_values;
 std::vector<VkAttachmentLoadOp> load_ops;
@@ -59,13 +61,16 @@ std::vector<std::pair<VkQueryPool,uint32_t>> active_queries;
 std::vector<uint32_t> query_begins, query_ends, timestamps;
 std::map<std::pair<VkQueryPool,uint32_t>,uint64_t> query_values;
 unsigned query_local_barriers = 0;
+bool check_group_begin = false, expect_native_group = false;
+uint32_t expected_group_area_count = 0;
+const VkRect2D group_area{{3,4},{5,6}};
 VKAPI_ATTR void VKAPI_CALL begin_query(VkCommandBuffer, VkQueryPool pool, uint32_t query, VkQueryControlFlags) {
-    check(in_pass, "native query begins inside its physical pass");
+    check(in_pass != queries_outside, "native query begins in the selected physical scope");
     active_queries.emplace_back(pool,query); query_begins.push_back(query); query_values[{pool,query}] = 0;
 }
 VKAPI_ATTR void VKAPI_CALL end_query(VkCommandBuffer, VkQueryPool pool, uint32_t query) {
     const auto found = std::find(active_queries.begin(), active_queries.end(), std::make_pair(pool,query));
-    check(in_pass && found != active_queries.end(), "native query ends in the same physical pass");
+    check(in_pass != queries_outside && found != active_queries.end(), "native query ends in the same selected scope");
     if (found != active_queries.end()) active_queries.erase(found);
     query_ends.push_back(query);
 }
@@ -135,6 +140,20 @@ VKAPI_ATTR VkResult VKAPI_CALL create_framebuffer(VkDevice device, const VkFrame
 VKAPI_ATTR void VKAPI_CALL destroy_framebuffer(VkDevice device, VkFramebuffer fb, const VkAllocationCallbacks*) { framebuffers.erase(key(device, fb)); }
 VKAPI_ATTR void VKAPI_CALL begin_pass(VkCommandBuffer cmd, const VkRenderPassBeginInfo* info, VkSubpassContents contents) {
     check(!in_pass && contents == VK_SUBPASS_CONTENTS_INLINE, "native replay opens one inline pass per view");
+    if (check_group_begin) {
+        const auto* group = static_cast<const VkDeviceGroupRenderPassBeginInfo*>(info->pNext);
+        if (expect_native_group) {
+            check(group && group->sType == VK_STRUCTURE_TYPE_DEVICE_GROUP_RENDER_PASS_BEGIN_INFO && group->deviceMask == 1 &&
+                group->deviceRenderAreaCount == expected_group_area_count &&
+                (!expected_group_area_count || std::memcmp(group->pDeviceRenderAreas,&group_area,sizeof(group_area)) == 0),
+                "native device-group replay preserves the owned mask and per-device render area");
+        } else {
+            const VkRect2D ordinary{{0,0},{16,16}};
+            const auto& expected = expected_group_area_count ? group_area : ordinary;
+            check(!group && std::memcmp(&info->renderArea,&expected,sizeof(expected)) == 0,
+                "singleton replay removes the native group node and honors the selected render area");
+        }
+    }
     check(!MultiviewCommands::get().capture(cmd, true, []() -> MultiviewCommands::Replay { throw std::runtime_error("recursive replay"); }),
         "replay guard prevents command recapture");
     in_pass = true; ++physical_begins;
@@ -151,7 +170,7 @@ VKAPI_ATTR void VKAPI_CALL begin_pass(VkCommandBuffer cmd, const VkRenderPassBeg
     replay_state = 0xffffffffu;
 }
 VKAPI_ATTR void VKAPI_CALL end_pass(VkCommandBuffer) {
-    check(in_pass && active_queries.empty(), "native replay closes an open pass with no active query"); in_pass = false; ++physical_ends;
+    check(in_pass && (active_queries.empty() || queries_outside), "native replay closes a pass without any query begun inside it"); in_pass = false; ++physical_ends;
 }
 VKAPI_ATTR void VKAPI_CALL bind_sets(VkCommandBuffer, VkPipelineBindPoint, VkPipelineLayout layout, uint32_t first,
     uint32_t count, const VkDescriptorSet* bound, uint32_t dynamic_count, const uint32_t* offsets) {
@@ -163,6 +182,23 @@ VKAPI_ATTR void VKAPI_CALL push_constants(VkCommandBuffer, VkPipelineLayout layo
     uint32_t value{}; if (size == 4) std::memcpy(&value, data, 4);
     check(in_pass && pipeline_layouts.count(key(command_device, layout)) && stages == VK_SHADER_STAGE_VERTEX_BIT &&
         !offset && size == 4 && value == 17, "push-constant replay owns bytes and equivalent private layout"); ++pushes;
+}
+std::vector<VkImageResolve> repaired_regions;
+std::vector<std::array<VkImageMemoryBarrier, 2>> repair_barriers;
+VkImage repair_source{}, repair_target{};
+VKAPI_ATTR void VKAPI_CALL repair_barrier(VkCommandBuffer, VkPipelineStageFlags src, VkPipelineStageFlags dst,
+    VkDependencyFlags flags, uint32_t mc, const VkMemoryBarrier*, uint32_t bc, const VkBufferMemoryBarrier*,
+    uint32_t ic, const VkImageMemoryBarrier* images) {
+    check(!in_pass && src == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT && dst == src && !flags && !mc && !bc && ic == 2,
+        "resolve repair synchronizes images outside physical passes with complete producer/consumer scopes");
+    if (ic == 2) repair_barriers.push_back({images[0],images[1]});
+}
+VKAPI_ATTR void VKAPI_CALL repair_resolve(VkCommandBuffer, VkImage source, VkImageLayout source_layout,
+    VkImage target, VkImageLayout target_layout, uint32_t count, const VkImageResolve* regions) {
+    check(!in_pass && source == repair_source && target == repair_target && count == 1 &&
+        source_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && target_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        "resolve repair uses the original images and legal transfer layouts after the physical pass");
+    if (count == 1) repaired_regions.push_back(regions[0]);
 }
 VKAPI_ATTR void VKAPI_CALL pipeline_barrier(VkCommandBuffer, VkPipelineStageFlags src, VkPipelineStageFlags dst,
     VkDependencyFlags flags, uint32_t count, const VkMemoryBarrier* memory, uint32_t bc, const VkBufferMemoryBarrier*, uint32_t ic, const VkImageMemoryBarrier*) {
@@ -326,6 +362,58 @@ int main() {
     check(allocations > before + 1 && pool_destroys >= 2, "YCbCr-style combined descriptor capacity grows without leaking failed pools");
     auto old_shadow = shadow;
     check(arena.select(device, b, 4, {{1, 0}, {5, 0}, {1, 1}}, shadow) == VK_SUCCESS && shadow == old_shadow, "cache by source identity, revision, view and selected elements");
+    VkDescriptorSet whole_shadow{}, whole_again{};
+    check(arena.select_all(device,b,0,whole_shadow,true) == VK_SUCCESS &&
+        arena.select_all(device,b,0,whole_again,true) == VK_SUCCESS && whole_again == whole_shadow &&
+        views.at(key(device,sets.at(key(device,whole_shadow)).elements.at(5)[0].image.imageView)).subresourceRange.baseArrayLayer == 1 &&
+        views.at(key(device,sets.at(key(device,whole_shadow)).elements.at(5)[0].image.imageView)).subresourceRange.layerCount == 9 &&
+        views.at(key(device,sets.at(key(device,whole_shadow)).elements.at(5)[0].image.imageView)).viewType == VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+        "ordinary layered input selection preserves the complete native view instead of slicing layer zero");
+    VkDescriptorSet sliced_zero{};
+    check(arena.select_all(device,b,0,sliced_zero) == VK_SUCCESS && sliced_zero != whole_shadow &&
+        views.at(key(device,sets.at(key(device,sliced_zero)).elements.at(5)[0].image.imageView)).subresourceRange.layerCount == 1,
+        "ordinary and multiview descriptor snapshots cannot reuse each other's cache entry");
+    {
+        const auto volume = handle<VkImage>(0x100000091ull);
+        const auto volume_view = handle<VkImageView>(0x100000092ull);
+        auto volume_info = ici; volume_info.imageType = VK_IMAGE_TYPE_3D; volume_info.arrayLayers = 1; volume_info.extent.depth = 8;
+        attachments.remember_image(device,volume,volume_info,true);
+        auto volume_view_info = vci; volume_view_info.image = volume; volume_view_info.viewType = VK_IMAGE_VIEW_TYPE_3D;
+        volume_view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        attachments.remember_view(device,volume_view,volume_view_info);
+        const auto equivalent_view = handle<VkImageView>(0x100000093ull);
+        attachments.remember_view(device,equivalent_view,volume_view_info);
+        auto original = attachments.acquire_view(device,volume_view), equivalent = attachments.acquire_view(device,equivalent_view);
+        auto backing_image = std::make_shared<MultiviewImage>(); backing_image->handle = handle<VkImage>(0x100000094ull);
+        auto backing_info = volume_view_info; backing_info.image = backing_image->handle; backing_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        auto backing = std::make_shared<MultiviewViewResources>(device,backing_info,backing_image,nullptr);
+        AttachmentReplayScope::Bindings scope_bindings{{original,backing}};
+        {
+            AttachmentReplayScope scope(&scope_bindings); VkImageView mapped{};
+            check(AttachmentReplayScope::lookup(equivalent.get()) == backing.get() && equivalent->whole(0,mapped) == VK_SUCCESS &&
+                views.at(key(device,mapped)).image == backing_image->handle && views.at(key(device,mapped)).viewType == VK_IMAGE_VIEW_TYPE_2D,
+                "equivalent input view handles map to the current recording's native backing image before descriptor updates");
+        }
+        check(!AttachmentReplayScope::lookup(equivalent.get()),"attachment replay mapping does not escape its physical pass scope");
+        VkDescriptorImageInfo sampled[] = {{handle<VkSampler>(0x101),volume_view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+            {handle<VkSampler>(0x102),first_view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+        VkWriteDescriptorSet sample_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; sample_write.dstSet = b;
+        sample_write.dstBinding = 10; sample_write.descriptorCount = 2; sample_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sample_write.pImageInfo = sampled;
+        fail_new = true;
+        const auto translated = registry.update_native_layouts(device,1,&sample_write,0,nullptr,update);
+        const auto no_allocation = fail_new.exchange(false);
+        check(translated && no_allocation && sampled[0].imageLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+            sets.at(key(device,b)).elements.at(10)[0].image.imageLayout == VK_IMAGE_LAYOUT_GENERAL &&
+            sets.at(key(device,b)).elements.at(10)[1].image.imageLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            "volume descriptor translation uses preallocated scratch, leaves application memory intact and preserves native-image layouts");
+        VkCopyDescriptorSet copy{VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET}; copy.srcSet = b; copy.dstSet = a;
+        copy.srcBinding = copy.dstBinding = 10; copy.descriptorCount = 2;
+        check(registry.update_native_layouts(device,1,&sample_write,1,&copy,update) &&
+            sets.at(key(device,a)).elements.at(10)[0].image.imageLayout == VK_IMAGE_LAYOUT_GENERAL,
+            "all translated writes complete before native descriptor copies consume their layout values");
+        attachments.forget_view(device,equivalent_view); attachments.forget_view(device,volume_view); attachments.forget_image(device,volume);
+    }
     buffer.buffer = handle<VkBuffer>(0x801); write(device, 1, &buffer_write);
     check(arena.select(device, b, 4, {{1, 0}, {5, 0}, {1, 1}}, shadow) == VK_SUCCESS && shadow != old_shadow &&
         sets.at(key(device, old_shadow)).elements.at(7)[0].buffer.buffer == handle<VkBuffer>(0x800), "non-input update creates a new snapshot without rewriting an existing recording");
@@ -408,8 +496,30 @@ int main() {
     VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     check(commands.begin(device, primary, command_pool, cbi, true, {begin_pass, end_pass}) == VK_SUCCESS, "begin primary command recording");
     bool factory_called = false;
-    check(!commands.capture(primary, true, [&] { factory_called = true; return MultiviewCommands::Replay{}; }) && !factory_called,
-        "ordinary command path does not evaluate replay factories");
+    check(!commands.capture(primary, false, [&] { factory_called = true; return MultiviewCommands::Replay{}; }) && !factory_called,
+        "work outside a multiview pass does not evaluate replay factories");
+    std::array<uint32_t, 3> restored{};
+    std::array<uint32_t, 2> partial{11, 22};
+    const bool first_state = commands.capture(primary, true, [&] {
+        factory_called = true;
+        return [values = partial, &restored](VkCommandBuffer, uint32_t) {
+            restored[0] = values[0]; restored[1] = values[1]; return VK_SUCCESS;
+        };
+    });
+    partial = {33, 44};
+    const bool overlapping_state = commands.capture(primary, true, [&] {
+        return [values = partial, &restored](VkCommandBuffer, uint32_t) {
+            restored[1] = values[0]; restored[2] = values[1]; return VK_SUCCESS;
+        };
+    });
+    partial = {0, 0};
+    check(!first_state && !overlapping_state && factory_called && restored == std::array<uint32_t, 3>{},
+        "state before a pass owns overlapping inputs while allowing the ordinary native command through");
+    auto verify_restored = [&] {
+        check(restored == std::array<uint32_t, 3>{11, 33, 44},
+            "each view restores ordered partial state set before the logical pass");
+        restored = {}; // A preceding view must not supply the next view's state.
+    };
     VkClearValue clear{}; clear.color.uint32[0] = 7;
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO}; rp.renderPass = pass; rp.framebuffer = framebuffer; rp.renderArea.extent = {16, 16}; rp.clearValueCount = 1; rp.pClearValues = &clear;
     check(commands.begin_pass(primary, &rp, VK_SUBPASS_CONTENTS_INLINE), "capture logical render pass before any native begin");
@@ -418,14 +528,19 @@ int main() {
         commands.push_constants(primary, public_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 4, &push_value, push_constants), "capture descriptor and push-constant state");
     set_array[0] = VK_NULL_HANDLE; dynamic[0] = 0; push_value = 0; clear.color.uint32[0] = 999;
     MultiviewPipelineLayouts::get().forget(device, public_layout);
-    commands.capture(primary, false, [] { return [](VkCommandBuffer, uint32_t view) { replayed_views.push_back(view); return VK_SUCCESS; }; });
+    commands.capture(primary, false, [&] { return [verify_restored](VkCommandBuffer, uint32_t view) { verify_restored(); replayed_views.push_back(view); return VK_SUCCESS; }; });
     check(!physical_begins && commands.next_subpass(primary, VK_SUBPASS_CONTENTS_INLINE), "defer native work until logical subpass completion");
-    commands.capture(primary, false, [] { return [](VkCommandBuffer, uint32_t view) { replayed_views.push_back(100 + view); return VK_SUCCESS; }; });
+    commands.capture(primary, false, [&] { return [verify_restored](VkCommandBuffer, uint32_t view) { verify_restored(); replayed_views.push_back(100 + view); return VK_SUCCESS; }; });
     commands.end_pass(primary);
     check(commands.error(primary) == VK_SUCCESS && replayed_views == std::vector<uint32_t>{2, 4, 100, 103} &&
-        begin_layers == std::vector<uint32_t>{3, 5, 1, 4} && clear_values == std::vector<uint32_t>{7, 7, 7, 7} && descriptor_binds == 2 && pushes == 2,
+        begin_layers == std::vector<uint32_t>{3, 5, 1, 4} && clear_values == std::vector<uint32_t>{7, 7, 7, 7} && descriptor_binds == 4 && pushes == 4,
         "subpasses replay active views with original layer offset and owned clear/state values");
-    check(pipeline_layouts.empty(), "private binding layout retires after its recorded actions are consumed");
+    check(!pipeline_layouts.empty(), "state retains its private binding layout until command-buffer reset");
+    commands.begin_pass(primary, &rp, VK_SUBPASS_CONTENTS_INLINE);
+    commands.capture(primary, false, [&] { return [verify_restored](VkCommandBuffer, uint32_t) { verify_restored(); return VK_SUCCESS; }; });
+    commands.next_subpass(primary, VK_SUBPASS_CONTENTS_INLINE); commands.end_pass(primary);
+    check(commands.error(primary) == VK_SUCCESS && descriptor_binds == 8 && pushes == 8,
+        "a later logical pass inherits descriptor and push-constant state without rebinding");
 
     VkCommandBufferInheritanceInfo inheritance{VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO}; inheritance.renderPass = pass;
     cbi.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT; cbi.pInheritanceInfo = &inheritance;
@@ -433,6 +548,7 @@ int main() {
     commands.capture(secondary, false, [] { return [](VkCommandBuffer, uint32_t view) { replayed_views.push_back(200 + view); return VK_SUCCESS; }; });
     cbi.flags = 0; cbi.pInheritanceInfo = nullptr;
     commands.begin(device, primary, command_pool, cbi, true, {begin_pass, end_pass});
+    check(pipeline_layouts.empty(), "command-buffer reset releases retained state layouts");
     commands.begin_pass(primary, &rp, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
     check(commands.execute(primary, 1, &secondary), "capture secondary record identity");
     commands.next_subpass(primary, VK_SUBPASS_CONTENTS_INLINE); commands.end_pass(primary);
@@ -531,6 +647,40 @@ int main() {
         query_values[{query_pool,5}] == 15 && query_values[{query_pool,6}] == 19 && query_local_barriers == 2 &&
         timestamps == std::vector<uint32_t>{20,22,21,23},
         "sparse views map to consecutive query slots; query results and timestamps survive an internal barrier without restarting queries");
+
+    {
+        auto ordinary_ci = brci; ordinary_ci.pNext = nullptr; ordinary_ci.dependencyCount = 0;
+        VkRenderPass ordinary_pass{};
+        check(MultiviewRenderPasses::get().create_fallback(device,&ordinary_ci,nullptr,&ordinary_pass,true,status,false,true) && status == VK_SUCCESS,
+            "capture ordinary query replay pass");
+        const auto ordinary_fb = handle<VkFramebuffer>(0x3310);
+        auto ordinary_fb_ci = fci; ordinary_fb_ci.renderPass = ordinary_pass;
+        attachments.remember_framebuffer(device,ordinary_fb,ordinary_fb_ci);
+        auto ordinary_rp = brp; ordinary_rp.renderPass = ordinary_pass; ordinary_rp.framebuffer = ordinary_fb;
+        clear_query_trace(); queries_outside = true;
+        const auto began = physical_begins;
+        commands.begin(device,primary,command_pool,cbi,true,{begin_pass,end_pass});
+        commands.begin_pass(primary,&ordinary_rp,VK_SUBPASS_CONTENTS_INLINE);
+        commands.begin_query(primary,query_pool,5,0,begin_query,end_query);
+        query_work(primary,1); query_memory_barrier(primary); query_work(primary,10);
+        commands.end_query(primary,query_pool,5,end_query);
+        commands.next_subpass(primary,VK_SUBPASS_CONTENTS_INLINE); commands.end_pass(primary);
+        check(commands.error(primary) == VK_SUCCESS && physical_begins > began + 2 && query_begins == std::vector<uint32_t>{5} &&
+            query_ends == query_begins && query_values[{query_pool,5}] == 11 && !query_local_barriers && active_queries.empty(),
+            "one ordinary query spans physical pass splits and outside barriers without restarting or changing its slot");
+        clear_query_trace();
+        commands.begin(device,primary,command_pool,cbi,true,{begin_pass,end_pass});
+        commands.begin_pass(primary,&ordinary_rp,VK_SUBPASS_CONTENTS_INLINE);
+        commands.begin_query(primary,query_pool,5,0,begin_query,end_query);
+        commands.capture(primary,false,[] { return [](VkCommandBuffer,uint32_t) { return VK_ERROR_OUT_OF_DEVICE_MEMORY; }; });
+        commands.end_query(primary,query_pool,5,end_query); commands.end_pass(primary);
+        check(commands.error(primary) == VK_ERROR_OUT_OF_DEVICE_MEMORY && query_begins == query_ends &&
+            active_queries.empty() && !in_pass && physical_begins == physical_ends,
+            "replay failure ends its outside query after closing the native pass, allowing safe command-buffer cleanup");
+        queries_outside = false;
+        commands.forget(primary); attachments.forget_framebuffer(device,ordinary_fb);
+        MultiviewRenderPasses::get().forget(device,ordinary_pass); destroy_render_pass(device,ordinary_pass,nullptr);
+    }
 
     // A secondary recorded without a local query can inherit a query from the
     // primary. Barrier selection must inspect the expanded primary stream.
@@ -664,6 +814,97 @@ int main() {
         layout_batches[2][0].oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && layout_batches[2][0].newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL &&
         layout_batches[3][0].oldLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && layout_batches[3][0].newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         "later 3D aliases discard once and end with their own layout without stale transitions from earlier aliases");
+    check_group_begin = true;
+    for (bool native_group : {false,true}) for (uint32_t area_count : {0u,1u}) {
+        VkRenderPass group_pass{};
+        check(MultiviewRenderPasses::get().create_fallback(device,&rci,nullptr,&group_pass,true,status,native_group) && status == VK_SUCCESS,
+            "create a pass with an immutable native device-group route");
+        auto group_fci = fci; group_fci.renderPass = group_pass;
+        const auto group_fb = handle<VkFramebuffer>(0x4900); attachments.remember_framebuffer(device,group_fb,group_fci);
+        VkRect2D area = group_area;
+        VkDeviceGroupRenderPassBeginInfo group{VK_STRUCTURE_TYPE_DEVICE_GROUP_RENDER_PASS_BEGIN_INFO};
+        group.deviceMask = 1; group.deviceRenderAreaCount = area_count; group.pDeviceRenderAreas = &area;
+        auto group_rp = rp; group_rp.renderPass = group_pass; group_rp.framebuffer = group_fb; group_rp.pNext = &group;
+        expect_native_group = native_group; expected_group_area_count = area_count;
+        commands.begin(device,primary,command_pool,cbi,true,{begin_pass,end_pass});
+        commands.begin_pass(primary,&group_rp,VK_SUBPASS_CONTENTS_INLINE);
+        group.deviceMask = 0; area = {{9,9},{1,1}};
+        commands.next_subpass(primary,VK_SUBPASS_CONTENTS_INLINE); commands.end_pass(primary);
+        check(commands.error(primary) == VK_SUCCESS,"device-group render areas remain valid across every replayed view/subpass");
+        attachments.forget_framebuffer(device,group_fb); MultiviewRenderPasses::get().forget(device,group_pass);
+        destroy_render_pass(device,group_pass,nullptr);
+    }
+    check_group_begin = false;
+    const auto run_resolve_case = [&](VkImageUsageFlags source_usage, VkImageUsageFlags target_usage,
+        VkSampleCountFlagBits samples, VkFormat format, VkAttachmentStoreOp store, bool measured, unsigned expected) {
+        VkImageCreateInfo source_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        source_info.imageType = VK_IMAGE_TYPE_2D; source_info.format = format; source_info.extent = {64,64,1};
+        source_info.mipLevels = 1; source_info.arrayLayers = 10; source_info.samples = samples; source_info.usage = source_usage;
+        auto target_info = source_info; target_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        target_info.arrayLayers = 12; target_info.mipLevels = 2; target_info.usage = target_usage;
+        repair_source = handle<VkImage>(++serial); repair_target = handle<VkImage>(++serial);
+        attachments.remember_image(device,repair_source,source_info); attachments.remember_image(device,repair_target,target_info);
+        VkImageViewCreateInfo source_view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        source_view_info.image = repair_source; source_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        source_view_info.format = format; source_view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,0,1,2,4};
+        auto target_view_info = source_view_info; target_view_info.image = repair_target;
+        target_view_info.subresourceRange.baseMipLevel = 1; target_view_info.subresourceRange.baseArrayLayer = 4;
+        const auto source_view = handle<VkImageView>(++serial), target_view = handle<VkImageView>(++serial);
+        attachments.remember_view(device,source_view,source_view_info); attachments.remember_view(device,target_view,target_view_info);
+        VkAttachmentDescription descriptions[2]{};
+        for (auto& a : descriptions) {
+            a.format = format; a.samples = VK_SAMPLE_COUNT_1_BIT; a.loadOp = a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            a.storeOp = VK_ATTACHMENT_STORE_OP_STORE; a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            a.initialLayout = a.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        descriptions[0].samples = samples; descriptions[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; descriptions[0].storeOp = store;
+        descriptions[0].initialLayout = descriptions[0].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkAttachmentReference color{0,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, resolve{1,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1; subpass.pColorAttachments = &color; subpass.pResolveAttachments = &resolve;
+        const uint32_t mask = 5;
+        VkRenderPassMultiviewCreateInfo mv{VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO}; mv.subpassCount = 1; mv.pViewMasks = &mask;
+        VkRenderPassCreateInfo ci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO}; ci.pNext = &mv;
+        ci.attachmentCount = 2; ci.pAttachments = descriptions; ci.subpassCount = 1; ci.pSubpasses = &subpass;
+        VkRenderPass resolve_pass{}; VkResult status{};
+        check(MultiviewRenderPasses::get().create_fallback(device,&ci,nullptr,&resolve_pass,true,status) && status == VK_SUCCESS,
+            "create independently owned multiview resolve pass");
+        const VkImageView bound[]{source_view,target_view}; auto fb_info = fci;
+        fb_info.renderPass = resolve_pass; fb_info.attachmentCount = 2; fb_info.pAttachments = bound;
+        const auto resolve_fb = handle<VkFramebuffer>(++serial); attachments.remember_framebuffer(device,resolve_fb,fb_info);
+        auto begin = rp; begin.renderPass = resolve_pass; begin.framebuffer = resolve_fb; begin.renderArea = {{3,5},{7,9}};
+        repaired_regions.clear(); repair_barriers.clear();
+        commands.begin(device,primary,command_pool,cbi,true,{begin_pass,end_pass,repair_barrier,measured ? repair_resolve : nullptr});
+        commands.begin_pass(primary,&begin,VK_SUBPASS_CONTENTS_INLINE); commands.end_pass(primary);
+        check(commands.error(primary) == VK_SUCCESS && repaired_regions.size() == expected && repair_barriers.size() == expected * 2,
+            "resolve repair respects measured support, image transfer usages, sample format and source preservation");
+        for (uint32_t i = 0; i < repaired_regions.size(); ++i) {
+            const auto& region = repaired_regions[i]; const auto& before = repair_barriers[i*2]; const auto& after = repair_barriers[i*2+1];
+            check(region.srcSubresource.mipLevel == 0 && region.dstSubresource.mipLevel == 1 &&
+                region.srcSubresource.baseArrayLayer == 2 + 2*i && region.dstSubresource.baseArrayLayer == 4 + 2*i &&
+                region.srcSubresource.layerCount == 1 && region.dstSubresource.layerCount == 1 &&
+                region.srcOffset.x == 3 && region.srcOffset.y == 5 && region.dstOffset.x == 3 && region.dstOffset.y == 5 &&
+                region.extent.width == 7 && region.extent.height == 9 && region.extent.depth == 1 &&
+                before[0].oldLayout == VK_IMAGE_LAYOUT_GENERAL && before[1].oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+                after[0].newLayout == before[0].oldLayout && after[1].newLayout == before[1].oldLayout &&
+                before[0].subresourceRange.baseArrayLayer == region.srcSubresource.baseArrayLayer &&
+                before[1].subresourceRange.baseMipLevel == 1 && before[1].subresourceRange.baseArrayLayer == region.dstSubresource.baseArrayLayer,
+                "resolve repair preserves nonzero render areas, distinct source/target mip-layer offsets and final layouts");
+        }
+        commands.forget(primary); attachments.forget_framebuffer(device,resolve_fb);
+        attachments.forget_view(device,source_view); attachments.forget_view(device,target_view);
+        attachments.forget_image(device,repair_source); attachments.forget_image(device,repair_target);
+        MultiviewRenderPasses::get().forget(device,resolve_pass); destroy_render_pass(device,resolve_pass,nullptr);
+    };
+    const VkImageUsageFlags color_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+    const auto source_usage = color_usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, target_usage = color_usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    run_resolve_case(source_usage,target_usage,VK_SAMPLE_COUNT_4_BIT,VK_FORMAT_R32G32B32A32_SFLOAT,VK_ATTACHMENT_STORE_OP_STORE,true,2);
+    run_resolve_case(color_usage,target_usage,VK_SAMPLE_COUNT_4_BIT,VK_FORMAT_R32G32B32A32_SFLOAT,VK_ATTACHMENT_STORE_OP_STORE,true,0);
+    run_resolve_case(source_usage,color_usage,VK_SAMPLE_COUNT_4_BIT,VK_FORMAT_R32G32B32A32_SFLOAT,VK_ATTACHMENT_STORE_OP_STORE,true,0);
+    run_resolve_case(source_usage,target_usage,VK_SAMPLE_COUNT_4_BIT,VK_FORMAT_R32G32B32A32_SFLOAT,VK_ATTACHMENT_STORE_OP_DONT_CARE,true,0);
+    run_resolve_case(source_usage,target_usage,VK_SAMPLE_COUNT_2_BIT,VK_FORMAT_R32G32B32A32_SFLOAT,VK_ATTACHMENT_STORE_OP_STORE,true,0);
+    run_resolve_case(source_usage,target_usage,VK_SAMPLE_COUNT_4_BIT,VK_FORMAT_R8G8B8A8_UNORM,VK_ATTACHMENT_STORE_OP_STORE,true,0);
+    run_resolve_case(source_usage,target_usage,VK_SAMPLE_COUNT_4_BIT,VK_FORMAT_R32G32B32A32_SFLOAT,VK_ATTACHMENT_STORE_OP_STORE,false,0);
     commands.forget_pool(device, command_pool);
     check(commands.error(primary) == VK_SUCCESS, "command pool retirement removes captured streams and their errors");
     commands.forget_device(device);

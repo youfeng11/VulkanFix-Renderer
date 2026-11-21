@@ -129,7 +129,14 @@ def generate():
     for name, node in sorted(types.items()):
         parents = node.get("structextends", "").split(",")
         mask = sum(bit for parent, bit in (("VkSubmitInfo", 1), ("VkSemaphoreCreateInfo", 2),
-                                           ("VkBindSparseInfo", 4)) if parent in parents)
+                                           ("VkBindSparseInfo", 4), ("VkCommandBufferBeginInfo", 8),
+                                           ("VkRenderPassBeginInfo", 16), ("VkMemoryAllocateInfo", 32),
+                                           ("VkBindBufferMemoryInfo", 64), ("VkBindImageMemoryInfo", 128),
+                                           ("VkGraphicsPipelineCreateInfo", 256),
+                                           ("VkCommandBufferInheritanceInfo", 512),
+                                           ("VkPipelineTessellationStateCreateInfo", 1024),
+                                           ("VkRenderPassCreateInfo", 2048),
+                                           ("VkImageViewCreateInfo", 4096)) if parent in parents)
         if not mask or node.get("alias") or name not in owners:
             continue
         if node.get("api") and "vulkan" not in node.get("api").split(","):
@@ -147,6 +154,9 @@ def generate():
         for member in node.findall("member"):
             field = member.findtext("name")
             if field == "pNext" or "*" not in "".join(member.itertext()):
+                continue
+            if not mask & 7:
+                input_lines.append(f"            if (original->{field}) return {{}}; // This input kind only supports immediate calls.")
                 continue
             length = member.get("len", "")
             if length.isidentifier():
@@ -180,7 +190,7 @@ def generate():
             "promoted_extensions": sorted(e.get("name") for e in registry.findall("./extensions/extension")
                                           if e.get("promotedto") == f"VK_VERSION_1_{version - 10}"),
         }
-    path = ROOT / "docs/vulkan_core_inventory.json"
+    path = ROOT / "layer/build/reports/core-inventory/vulkan_core_inventory.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
     total = sum(len(members(f"VkPhysicalDeviceVulkan{v}Features")) for v in (11, 12))

@@ -25,30 +25,17 @@ bool probe_tiler_pressure(NativeContext &p,VkPhysicalDevice physical,uint32_t fa
         nativeprobe::check(p.dev<PFN_vkCreateRenderPass>("vkCreateRenderPass")(p.device,&ri,nullptr,&passes[i]),"tiler probe pass");
         const auto pass=passes[i]; gpu.objects.push_back([=,&p]{ destroy_pass(p.device,pass,nullptr); });
     }
-    auto destroy_framebuffer=p.dev<PFN_vkDestroyFramebuffer>("vkDestroyFramebuffer");
-    VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-    fi.renderPass=passes[0]; fi.attachmentCount=1; fi.pAttachments=&image.view; fi.width=fi.height=16; fi.layers=1;
-    VkFramebuffer framebuffer{};
-    nativeprobe::check(p.dev<PFN_vkCreateFramebuffer>("vkCreateFramebuffer")(p.device,&fi,nullptr,&framebuffer),"tiler probe framebuffer");
-    gpu.objects.push_back([=,&p]{ destroy_framebuffer(p.device,framebuffer,nullptr); });
+    const auto framebuffer = gpu.framebuffer(passes[0], image.view);
     auto destroy_layout=p.dev<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout");
     VkPushConstantRange color{VK_SHADER_STAGE_FRAGMENT_BIT,0,16};
     VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO}; li.pushConstantRangeCount=1; li.pPushConstantRanges=&color;
     VkPipelineLayout layout{};
     nativeprobe::check(p.dev<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(p.device,&li,nullptr,&layout),"tiler probe layout");
     gpu.objects.push_back([=,&p]{ destroy_layout(p.device,layout,nullptr); });
-    VkPipelineShaderStageCreateInfo stages[2]{};
-    for (unsigned i=0;i<2;++i) {
-        auto destroy_shader=p.dev<PFN_vkDestroyShaderModule>("vkDestroyShaderModule");
-        VkShaderModuleCreateInfo sm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        sm.pCode=i ? nativeprobe::tiler_frag : nativeprobe::tiler_vert;
-        sm.codeSize=i ? sizeof nativeprobe::tiler_frag : sizeof nativeprobe::tiler_vert;
-        VkShaderModule module{};
-        nativeprobe::check(p.dev<PFN_vkCreateShaderModule>("vkCreateShaderModule")(p.device,&sm,nullptr,&module),"tiler probe shader");
-        gpu.objects.push_back([=,&p]{ destroy_shader(p.device,module,nullptr); });
-        stages[i]={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-        stages[i].stage=i ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT; stages[i].module=module; stages[i].pName="main";
-    }
+    const VkPipelineShaderStageCreateInfo stages[]{
+        gpu.shader_stage(VK_SHADER_STAGE_VERTEX_BIT, nativeprobe::tiler_vert, sizeof nativeprobe::tiler_vert),
+        gpu.shader_stage(VK_SHADER_STAGE_FRAGMENT_BIT, nativeprobe::tiler_frag, sizeof nativeprobe::tiler_frag)
+    };
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO}; ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkViewport viewport{0,0,16,16,0,1}; VkRect2D scissor{{0,0},{16,16}};

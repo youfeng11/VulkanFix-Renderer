@@ -4,6 +4,7 @@
 #include "device_native_cache.h"
 #include "layer_module.h"
 #include "driver_loader.h"
+#include "native_instance_state.h"
 #include "vk_pnext.h"
 #include <string>
 #include <unordered_map>
@@ -122,9 +123,11 @@ public:
 
 protected:
     virtual bool query_native_support(VkPhysicalDevice physDev) {
+        auto owner = vkfix::native_instance_for_physical(physDev);
+        if (!owner) owner = get_last_instance();
         if (m_promoted_version > 0) {
             PFN_vkGetPhysicalDeviceProperties real_props =
-                (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+                (PFN_vkGetPhysicalDeviceProperties) get_real_proc(owner, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
             if (real_props) {
                 VkPhysicalDeviceProperties props{};
                 real_props(physDev, &props);
@@ -135,7 +138,7 @@ protected:
         }
 
         PFN_vkEnumerateDeviceExtensionProperties real_fn =
-            (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+            (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(owner, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
         if (!real_fn) return false;
 
         uint32_t count = 0;

@@ -18,16 +18,6 @@ bool BindMemory2Module::on_bind_buffer_memory2(
 ) {
     if (is_device_native(device)) return false;
 
-    PFN_vkBindBufferMemory2 real_fn =
-        (PFN_vkBindBufferMemory2) get_real_proc(get_last_instance(), device, "vkBindBufferMemory2");
-    if (!real_fn) {
-        real_fn = (PFN_vkBindBufferMemory2) get_real_proc(get_last_instance(), device, "vkBindBufferMemory2KHR");
-    }
-    if (real_fn) {
-        outResult = real_fn(device, bindInfoCount, pBindInfos);
-        return true;
-    }
-
     if (bindInfoCount == 0 || !pBindInfos) {
         outResult = VK_SUCCESS;
         return true;
@@ -72,16 +62,6 @@ bool BindMemory2Module::on_bind_image_memory2(
 ) {
     if (is_device_native(device)) return false;
 
-    PFN_vkBindImageMemory2 real_fn =
-        (PFN_vkBindImageMemory2) get_real_proc(get_last_instance(), device, "vkBindImageMemory2");
-    if (!real_fn) {
-        real_fn = (PFN_vkBindImageMemory2) get_real_proc(get_last_instance(), device, "vkBindImageMemory2KHR");
-    }
-    if (real_fn) {
-        outResult = real_fn(device, bindInfoCount, pBindInfos);
-        return true;
-    }
-
     if (bindInfoCount == 0 || !pBindInfos) {
         outResult = VK_SUCCESS;
         return true;
@@ -99,7 +79,7 @@ bool BindMemory2Module::on_bind_image_memory2(
         const auto* group = vku::find_pnext<VkBindImageMemoryDeviceGroupInfo>(
             pBindInfos[i].pNext, VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_DEVICE_GROUP_INFO);
         if (group != nullptr &&
-            (group->deviceIndexCount > 1 || group->splitInstanceBindRegionCount > 0 ||
+            (group->deviceIndexCount > 1 || group->splitInstanceBindRegionCount > 1 ||
              (group->deviceIndexCount == 1 && group->pDeviceIndices != nullptr &&
               group->pDeviceIndices[0] != 0))) {
             outResult = VK_ERROR_FEATURE_NOT_PRESENT;

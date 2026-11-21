@@ -3,6 +3,7 @@
 #include "driver_loader.h"
 #include "vk_pnext.h"
 #include "native_instance_state.h"
+#include "core/software_multiview.h"
 #include <cstring>
 #include <algorithm>
 #include <inttypes.h>
@@ -89,7 +90,7 @@ void Vulkan11CoreModule::on_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
     std::vector<VkExtensionProperties>& extensions
 ) {
-    if (is_phys_device_native(physicalDevice)) return;
+    if (vkfix::limit_native_device_api(physicalDevice, get_phys_real_api_version(physicalDevice)) >= VK_API_VERSION_1_1) return;
 
     for (const char* extName : s_vulkan_1_1_core_extensions) {
         if (!vku::has_extension(extensions, extName)) {
@@ -100,6 +101,12 @@ void Vulkan11CoreModule::on_enumerate_device_extensions(
             extensions.push_back(prop);
             LOG_OPT_DEBUG("Vulkan11Core: injected extension %s", extName);
         }
+    }
+    if (vkfix::software_multiview_enabled() && !vku::has_extension(extensions, VK_KHR_MULTIVIEW_EXTENSION_NAME)) {
+        VkExtensionProperties extension{};
+        std::strcpy(extension.extensionName, VK_KHR_MULTIVIEW_EXTENSION_NAME);
+        extension.specVersion = VK_KHR_MULTIVIEW_SPEC_VERSION;
+        extensions.push_back(extension);
     }
 }
 
@@ -120,7 +127,18 @@ void Vulkan11CoreModule::on_pre_get_properties2(VkPhysicalDevice, VkPhysicalDevi
 void Vulkan11CoreModule::on_post_get_properties2(VkPhysicalDevice physical, VkPhysicalDeviceProperties2* properties, void*) {
     if (properties && claim_vulkan_1_2() && properties->properties.apiVersion < VK_API_VERSION_1_1)
         properties->properties.apiVersion = VK_API_VERSION_1_1;
-    if (!properties || get_phys_real_api_version(physical)>=VK_API_VERSION_1_1) return;
+    if (!properties || vkfix::limit_native_device_api(physical,get_phys_real_api_version(physical))>=VK_API_VERSION_1_1) return;
+    if (vkfix::software_multiview_enabled()) {
+        if (auto* multiview = vku::find_pnext_mut<VkPhysicalDeviceMultiviewProperties>(properties->pNext,
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES)) {
+            // A native KHR route keeps its own limits. The software backend
+            // selects one of 32 mask bits without expanding instance indices.
+            if (!multiview->maxMultiviewViewCount) {
+                multiview->maxMultiviewViewCount = vkfix::software_multiview_view_count;
+                multiview->maxMultiviewInstanceIndex = vkfix::software_multiview_instance_index;
+            }
+        }
+    }
     auto subgroup=vku::find_pnext_mut<VkPhysicalDeviceSubgroupProperties>(properties->pNext,
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES);
     if (!subgroup) return;
@@ -146,7 +164,16 @@ void Vulkan11CoreModule::on_post_get_properties2(VkPhysicalDevice physical, VkPh
 // actual individual feature structures, never from an extension name.
 void Vulkan11CoreModule::on_get_features(VkPhysicalDevice, VkPhysicalDeviceFeatures*) {}
 void Vulkan11CoreModule::on_pre_get_features2(VkPhysicalDevice, VkPhysicalDeviceFeatures2*, void*& data) { data = nullptr; }
-void Vulkan11CoreModule::on_post_get_features2(VkPhysicalDevice, VkPhysicalDeviceFeatures2*, void*) {}
+void Vulkan11CoreModule::on_post_get_features2(VkPhysicalDevice physical, VkPhysicalDeviceFeatures2* features, void*) {
+    if (!features || !vkfix::software_multiview_enabled() ||
+        vkfix::limit_native_device_api(physical, get_phys_real_api_version(physical)) >= VK_API_VERSION_1_1) return;
+    if (auto* multiview = vku::find_pnext_mut<VkPhysicalDeviceMultiviewFeatures>(features->pNext,
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES)) {
+        // Optional geometry/tessellation combinations retain their queried
+        // native values; software replay supplies the basic multiview feature.
+        multiview->multiview = VK_TRUE;
+    }
+}
 
 void Vulkan11CoreModule::on_pre_create_device(
     VkPhysicalDevice physicalDevice,
@@ -156,12 +183,15 @@ void Vulkan11CoreModule::on_pre_create_device(
     void*& pUserData
 ) {
     pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pCreateInfo) return;
+    if (!pCreateInfo || vkfix::limit_native_device_api(physicalDevice,
+            get_phys_real_api_version(physicalDevice)) >= VK_API_VERSION_1_1) return;
 
     // Filter out core 1.1 extensions if not supported natively
     std::vector<VkExtensionProperties> nativeExts;
+    auto instance = vkfix::native_instance_for_physical(physicalDevice);
+    if (!instance) instance = get_last_instance();
     PFN_vkEnumerateDeviceExtensionProperties real_enum =
-        (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+        (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(instance, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
     if (real_enum) {
         uint32_t count = 0;
         real_enum(physicalDevice, nullptr, &count, nullptr);
@@ -169,6 +199,11 @@ void Vulkan11CoreModule::on_pre_create_device(
             nativeExts.resize(count);
             real_enum(physicalDevice, nullptr, &count, nativeExts.data());
         }
+    }
+
+    if (vkfix::software_multiview_enabled() && !vku::has_extension(nativeExts, VK_KHR_MULTIVIEW_EXTENSION_NAME)) {
+        vku::strip_extension(enabledExtensions, VK_KHR_MULTIVIEW_EXTENSION_NAME);
+        vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES);
     }
 
     for (auto it = enabledExtensions.begin(); it != enabledExtensions.end();) {

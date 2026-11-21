@@ -6,7 +6,141 @@
 #include "storage_arrays_shader.h"
 #include "storage_arrays_static_shader.h"
 #include "subgroup_basic_shader.h"
+#include "relaxed_layout_shader.h"
 using GpuProbe = vkfix::nativeprobe::Resources<Probe>;
+
+void image_type_copy_smoke(Probe& p, VkPhysicalDevice physical, uint32_t family) {
+    GpuProbe gpu(p,physical,family);
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D; info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    info.extent = {8,6,1}; info.arrayLayers = 5; info.mipLevels = 2; info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL; info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    const auto source = gpu.create_image(info);
+    info.imageType = VK_IMAGE_TYPE_3D; info.extent = {9,8,8}; info.arrayLayers = 1; info.mipLevels = 1;
+    const auto volume = gpu.create_image(info);
+    info.imageType = VK_IMAGE_TYPE_2D; info.extent = {8,6,1}; info.arrayLayers = 6; info.mipLevels = 2;
+    const auto target = gpu.create_image(info);
+    constexpr uint32_t copied_words = 4 * 3 * 3, volume_words = 9 * 8 * 8, target_words = 4 * 3 * 6;
+    const auto upload = gpu.buffer(copied_words * 4,VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    const auto output = gpu.buffer((volume_words + target_words) * 4,VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    auto pattern = [](uint32_t index) { return 0x31415926u ^ (index * 0x01020304u); };
+    for (uint32_t i = 0; i < copied_words; ++i) static_cast<uint32_t*>(upload.mapped)[i] = pattern(i);
+    VkMappedMemoryRange flush{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE}; flush.memory = upload.memory; flush.size = VK_WHOLE_SIZE;
+    require(p.dev<PFN_vkFlushMappedMemoryRanges>("vkFlushMappedMemoryRanges")(p.device,1,&flush),"flush array/volume source");
+    const auto cb = gpu.begin();
+    auto barrier = p.dev<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    auto transition = [&](VkImage image, uint32_t mips, uint32_t layers, VkImageLayout from, VkImageLayout to, VkAccessFlags access) {
+        VkImageMemoryBarrier memory{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        memory.srcAccessMask = from == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_TRANSFER_WRITE_BIT;
+        memory.dstAccessMask = access; memory.oldLayout = from; memory.newLayout = to;
+        memory.srcQueueFamilyIndex = memory.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memory.image = image; memory.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,0,mips,0,layers};
+        barrier(cb,from == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&memory);
+    };
+    constexpr auto dst = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, src = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    transition(source,2,5,VK_IMAGE_LAYOUT_UNDEFINED,dst,VK_ACCESS_TRANSFER_WRITE_BIT);
+    transition(volume,1,1,VK_IMAGE_LAYOUT_UNDEFINED,dst,VK_ACCESS_TRANSFER_WRITE_BIT);
+    transition(target,2,6,VK_IMAGE_LAYOUT_UNDEFINED,dst,VK_ACCESS_TRANSFER_WRITE_BIT);
+    VkClearColorValue zero{};
+    VkImageSubresourceRange volume_range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}, target_range{VK_IMAGE_ASPECT_COLOR_BIT,0,2,0,6};
+    auto clear = p.dev<PFN_vkCmdClearColorImage>("vkCmdClearColorImage");
+    clear(cb,volume,dst,&zero,1,&volume_range); clear(cb,target,dst,&zero,1,&target_range);
+    VkBufferImageCopy input{}; input.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,1,1,3}; input.imageExtent = {4,3,1};
+    p.dev<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(cb,upload.handle,source,dst,1,&input);
+    transition(source,2,5,dst,src,VK_ACCESS_TRANSFER_READ_BIT);
+    transition(volume,1,1,dst,dst,VK_ACCESS_TRANSFER_WRITE_BIT);
+    transition(target,2,6,dst,dst,VK_ACCESS_TRANSFER_WRITE_BIT);
+    VkImageCopy into{}; into.srcSubresource = input.imageSubresource;
+    into.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; into.dstOffset = {2,3,2}; into.extent = {4,3,3};
+    auto copy = p.dev<PFN_vkCmdCopyImage>("vkCmdCopyImage");
+    copy(cb,source,src,volume,dst,1,&into);
+    transition(volume,1,1,dst,src,VK_ACCESS_TRANSFER_READ_BIT);
+    VkImageCopy back{}; back.srcSubresource = into.dstSubresource; back.srcOffset = into.dstOffset;
+    back.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,1,2,3}; back.extent = into.extent;
+    copy(cb,volume,src,target,dst,1,&back);
+    transition(target,2,6,dst,src,VK_ACCESS_TRANSFER_READ_BIT);
+    auto read = p.dev<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer");
+    VkBufferImageCopy read_volume{}; read_volume.imageSubresource = into.dstSubresource; read_volume.imageExtent = {9,8,8};
+    read(cb,volume,src,output.handle,1,&read_volume);
+    VkBufferImageCopy read_array{}; read_array.bufferOffset = volume_words * 4;
+    read_array.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,1,0,6}; read_array.imageExtent = {4,3,1};
+    read(cb,target,src,output.handle,1,&read_array);
+    gpu.host_barrier(cb,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT); gpu.submit(cb); gpu.invalidate(output);
+    const auto* words = static_cast<const uint32_t*>(output.mapped);
+    for (uint32_t z = 0; z < 8; ++z) for (uint32_t y = 0; y < 8; ++y) for (uint32_t x = 0; x < 9; ++x) {
+        const bool inside = z >= 2 && z < 5 && y >= 3 && y < 6 && x >= 2 && x < 6;
+        const auto expected = inside ? pattern(((z - 2) * 3 + y - 3) * 4 + x - 2) : 0;
+        if (words[(z * 8 + y) * 9 + x] != expected) throw ProbeMismatch("array-to-volume copy lost a slice or changed a surrounding texel");
+    }
+    for (uint32_t layer = 0; layer < 6; ++layer) for (uint32_t pixel = 0; pixel < 12; ++pixel) {
+        const auto expected = layer >= 2 && layer < 5 ? pattern((layer - 2) * 12 + pixel) : 0;
+        if (words[volume_words + layer * 12 + pixel] != expected) throw ProbeMismatch("volume-to-array copy changed mip/layer mapping or an untouched layer");
+    }
+    row("core11.imageTypeCopy","PASS","array/3D round trip matched all texels, nonzero mip/layer/xyz offsets and untouched surrounding regions","functional");
+}
+
+void relaxed_layout_smoke(Probe& p, VkPhysicalDevice physical, uint32_t family) {
+    GpuProbe gpu(p, physical, family);
+    auto input = gpu.buffer(32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    auto output = gpu.buffer(32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    const uint32_t initial[]{0x11223344, 7, 19, 31, 0x55667788, 0xabcdef01, 0xabcdef02, 0xabcdef03};
+    std::memcpy(input.mapped, initial, sizeof initial);
+    VkMappedMemoryRange flush{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE}; flush.memory = input.memory; flush.size = VK_WHOLE_SIZE;
+    require(p.dev<PFN_vkFlushMappedMemoryRanges>("vkFlushMappedMemoryRanges")(p.device, 1, &flush), "flush relaxed-layout input");
+    VkDescriptorSetLayoutBinding bindings[2]{{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
+                                            {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT}};
+    VkDescriptorSetLayoutCreateInfo set_ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    set_ci.bindingCount = 2; set_ci.pBindings = bindings;
+    VkDescriptorSetLayout set_layout{};
+    require(p.dev<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(p.device, &set_ci, nullptr, &set_layout), "create relaxed-layout descriptors");
+    auto destroy_set = p.dev<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout");
+    gpu.objects.push_back([=, &p] { destroy_set(p.device, set_layout, nullptr); });
+    VkPipelineLayoutCreateInfo layout_ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO}; layout_ci.setLayoutCount = 1; layout_ci.pSetLayouts = &set_layout;
+    VkPipelineLayout layout{};
+    require(p.dev<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(p.device, &layout_ci, nullptr, &layout), "create relaxed-layout pipeline layout");
+    auto destroy_layout = p.dev<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout");
+    gpu.objects.push_back([=, &p] { destroy_layout(p.device, layout, nullptr); });
+    VkShaderModuleCreateInfo shader_ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    shader_ci.codeSize = sizeof post_relaxed_layout_comp; shader_ci.pCode = post_relaxed_layout_comp;
+    VkShaderModule shader{};
+    require(p.dev<PFN_vkCreateShaderModule>("vkCreateShaderModule")(p.device, &shader_ci, nullptr, &shader), "create relaxed-layout shader");
+    auto destroy_shader = p.dev<PFN_vkDestroyShaderModule>("vkDestroyShaderModule");
+    gpu.objects.push_back([=, &p] { destroy_shader(p.device, shader, nullptr); });
+    VkComputePipelineCreateInfo pipeline_ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO}; pipeline_ci.layout = layout;
+    pipeline_ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    pipeline_ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; pipeline_ci.stage.module = shader; pipeline_ci.stage.pName = "main";
+    VkPipeline pipeline{};
+    require(p.dev<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(p.device, {}, 1, &pipeline_ci, nullptr, &pipeline), "create relaxed-layout pipeline");
+    auto destroy_pipeline = p.dev<PFN_vkDestroyPipeline>("vkDestroyPipeline");
+    gpu.objects.push_back([=, &p] { destroy_pipeline(p.device, pipeline, nullptr); });
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
+    VkDescriptorPoolCreateInfo pool_ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; pool_ci.maxSets = 1; pool_ci.poolSizeCount = 1; pool_ci.pPoolSizes = &pool_size;
+    VkDescriptorPool pool{};
+    require(p.dev<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(p.device, &pool_ci, nullptr, &pool), "create relaxed-layout pool");
+    auto destroy_pool = p.dev<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool");
+    gpu.objects.push_back([=, &p] { destroy_pool(p.device, pool, nullptr); });
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO}; allocate.descriptorPool = pool; allocate.descriptorSetCount = 1; allocate.pSetLayouts = &set_layout;
+    VkDescriptorSet set{};
+    require(p.dev<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(p.device, &allocate, &set), "allocate relaxed-layout set");
+    VkDescriptorBufferInfo buffers[]{{input.handle, 0, 32}, {output.handle, 0, 32}};
+    VkWriteDescriptorSet writes[2]{};
+    for (uint32_t i = 0; i < 2; ++i) {
+        writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; writes[i].dstSet = set; writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1; writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[i].pBufferInfo = &buffers[i];
+    }
+    p.dev<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets")(p.device, 2, writes, 0, nullptr);
+    auto cb = gpu.begin();
+    p.dev<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    p.dev<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, nullptr);
+    p.dev<PFN_vkCmdDispatch>("vkCmdDispatch")(cb, 1, 1, 1);
+    gpu.host_barrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT); gpu.submit(cb);
+    gpu.invalidate(input); gpu.invalidate(output);
+    const uint32_t expected[]{0xa5a5a5a5, 8, 20, 32, 31, 0xa5a5a5a5, 0xa5a5a5a5, 0xa5a5a5a5};
+    if (std::memcmp(input.mapped, initial, sizeof initial) || std::memcmp(output.mapped, expected, sizeof expected))
+        throw ProbeMismatch("relaxed vector offset/dynamic component/atomic readback mismatch or neighboring word overwritten");
+    row("core11.relaxedBlockLayout", "PASS", "vec3 at offset 4: vector loads, dynamic component stores/atomics and all guard words matched", "functional");
+}
 
 void subgroup_basic_smoke(Probe& p,VkPhysicalDevice physical,uint32_t family) {
     VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
@@ -24,10 +158,10 @@ void subgroup_basic_smoke(Probe& p,VkPhysicalDevice physical,uint32_t family) {
 }
 
 void storage_buffer_array_smoke(Probe& p,VkPhysicalDevice physical,uint32_t family,bool static_indexing=false) {
-    const auto error=vkfix::nativeprobe::storage_buffer_array(p,physical,family,
+    const auto result=vkfix::nativeprobe::storage_buffer_array(p,physical,family,
         static_indexing?post_storage_arrays_static_comp:post_storage_arrays_comp,
         static_indexing?sizeof post_storage_arrays_static_comp/sizeof(uint32_t):sizeof post_storage_arrays_comp/sizeof(uint32_t),true);
-    if (!error.empty()) throw ProbeMismatch(error);
+    if (!result.error.empty()) throw ProbeMismatch(result.error);
     row(static_indexing?"core11.storageBufferArraysStatic":"core11.storageBufferArrays","PASS",
         static_indexing?"array length specialized from 2 to 3 without dynamic-indexing capability; third-buffer restore matched":
             "array length specialized from 2 to 3; shared UBO, SSBO copies, atomics and third-buffer restore matched",
@@ -64,29 +198,10 @@ void query_reset_smoke(Probe &p, VkPhysicalDevice physical, uint32_t family, boo
         return;
     }
     GpuProbe gpu(p,physical,family);
-    auto reset=p.dev<PFN_vkResetQueryPool>(core ? "vkResetQueryPool" : "vkResetQueryPoolEXT");
-    auto destroy=p.dev<PFN_vkDestroyQueryPool>("vkDestroyQueryPool");
-    auto results=p.dev<PFN_vkGetQueryPoolResults>("vkGetQueryPoolResults");
-    VkQueryPoolCreateInfo ci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO}; ci.queryType=VK_QUERY_TYPE_TIMESTAMP; ci.queryCount=2;
-    VkQueryPool pool{};
-    require(p.dev<PFN_vkCreateQueryPool>("vkCreateQueryPool")(p.device,&ci,nullptr,&pool), "create timestamp pool");
-    gpu.objects.push_back([=,&p]{ destroy(p.device,pool,nullptr); });
-    auto cb=gpu.begin();
-    p.dev<PFN_vkCmdResetQueryPool>("vkCmdResetQueryPool")(cb,pool,0,2);
-    auto write=p.dev<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp");
-    write(cb,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,pool,0);
-    write(cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,pool,1);
-    gpu.submit(cb);
-    uint64_t data[4]{0,UINT64_MAX,0,UINT64_MAX};
-    auto flags=VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT;
-    require(results(p.device,pool,0,2,sizeof data,data,2*sizeof(uint64_t),flags), "read written timestamp queries");
-    if (!data[1] || !data[3]) throw ProbeMismatch("written queries did not become available");
-    reset(p.device,pool,0,2);
-    data[1]=data[3]=UINT64_MAX;
-    const auto result=results(p.device,pool,0,2,sizeof data,data,2*sizeof(uint64_t),flags);
-    if (result!=VK_NOT_READY || data[1] || data[3])
-        throw ProbeMismatch("reset queries did not return unavailable/NOT_READY");
-    row("hostQueryReset.reset", "PASS", "GPU-written queries were available, then host reset returned NOT_READY with zero availability", "functional");
+    const auto error = vkfix::nativeprobe::probe_host_query_reset(
+        p, gpu, core ? "vkResetQueryPool" : "vkResetQueryPoolEXT", [] {});
+    if (!error.empty()) throw ProbeMismatch(error);
+    row("hostQueryReset.reset", "PASS", "two partial resets and rewrites preserved neighboring timestamp queries", "functional");
 }
 
 void dynamic_rendering_smoke(Probe &p, VkPhysicalDevice physical, uint32_t family) {
@@ -130,7 +245,7 @@ void dynamic_rendering_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
 void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t family,
                              bool dynamic, bool indirect, bool indexed, bool positive,
                              bool mixed, bool constant_viewport, const char *row_name,
-                             unsigned final_stage = 0) {
+                             unsigned final_stage = 0, int domain_origin = -1) {
     GpuProbe gpu(p, physical, family);
     VkAttachmentDescription attachment{};
     attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -238,6 +353,11 @@ void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
     input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     if (final_stage == 3) input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
     VkPipelineTessellationStateCreateInfo tessellation{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};
+    VkPipelineTessellationDomainOriginStateCreateInfo origin{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO};
+    if (domain_origin >= 0) {
+        origin.domainOrigin = static_cast<VkTessellationDomainOrigin>(domain_origin);
+        tessellation.pNext = &origin;
+    }
     tessellation.patchControlPoints = 3;
     VkViewport viewports[2] = {
         {0, positive ? 0.0f : 16.0f, 16, positive ? 16.0f : -16.0f, 0, 1},
@@ -259,6 +379,11 @@ void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
         VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rasterization.polygonMode = VK_POLYGON_MODE_FILL;
     rasterization.lineWidth = 1.0f;
+    if (domain_origin >= 0) {
+        rasterization.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterization.frontFace = domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT ?
+            VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    }
     VkPipelineMultisampleStateCreateInfo multisample{
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -290,7 +415,8 @@ void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
         destroy_shader(p.device, vertex, nullptr);
         destroy_layout(p.device, layout, nullptr);
         destroy_render_pass(p.device, render_pass, nullptr);
-        throw ProbeMismatch("negative viewport height was rejected (maintenance1 is not usable)");
+        throw ProbeMismatch(domain_origin >= 0 ? "tessellation domain origin was rejected" :
+            "negative viewport height was rejected (maintenance1 is not usable)");
     }
 
     auto image = gpu.image();
@@ -414,7 +540,7 @@ void negative_viewport_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
         throw ProbeMismatch(detail);
     }
     row(row_name, "PASS",
-        expected_positive
+        domain_origin >= 0 ? "tessellation domain winding and back-face culling preserved the expected triangle pixels" : expected_positive
             ? "positive viewport kept the triangle unflipped (top/bottom pixel counts)"
             : "negative viewport height inverted the rendered triangle (top/bottom pixel counts)",
         "functional");
@@ -964,7 +1090,7 @@ void variable_pointers_smoke(Probe &p, VkPhysicalDevice physical, uint32_t famil
     if (value != 4)
         throw ProbeMismatch("variable-pointers compute output mismatch");
     row("core11.variablePointers", "PASS",
-        "a compute shader wrote through a pointer loaded from a Function pointer-to-pointer",
+        "a compute shader wrote Workgroup memory through a pointer loaded from a Function pointer-to-pointer",
         "functional");
 }
 

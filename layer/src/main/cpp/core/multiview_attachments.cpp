@@ -1,10 +1,12 @@
 #include "multiview_attachments.h"
 #include "driver_loader.h"
+#include "volume_attachment.h"
 #include <algorithm>
 #include <stdexcept>
 
 namespace vkfix {
 namespace {
+thread_local const AttachmentReplayScope::Bindings* replay_bindings = nullptr;
 template<class T> T proc(VkDevice device, const char* name) {
     return reinterpret_cast<T>(get_real_proc(get_last_instance(), device, name));
 }
@@ -35,8 +37,10 @@ void append_transition(std::vector<VkImageMemoryBarrier>& result, VkImageMemoryB
 }
 }
 MultiviewViewResources::MultiviewViewResources(VkDevice device, const VkImageViewCreateInfo& info,
-    std::shared_ptr<MultiviewImage> image, std::shared_ptr<const MultiviewConversion> conversion)
+    std::shared_ptr<MultiviewImage> image, std::shared_ptr<const MultiviewConversion> conversion,
+    std::shared_ptr<VolumeAttachment> placeholder)
     : device_(device), info_(info), image_(std::move(image)), conversion_(std::move(conversion)),
+      placeholder_(std::move(placeholder)),
       create_(proc<PFN_vkCreateImageView>(device, "vkCreateImageView")),
       destroy_(proc<PFN_vkDestroyImageView>(device, "vkDestroyImageView")) {
     info_.pNext = nullptr;
@@ -64,8 +68,8 @@ MultiviewViewResources::MultiviewViewResources(VkDevice device, const VkImageVie
 }
 MultiviewViewResources::~MultiviewViewResources() { release(); }
 VkResult MultiviewViewResources::layout_barriers(uint32_t mask, bool used_elsewhere,
-    VkImageLayout initial, VkImageLayout final, std::vector<VkImageMemoryBarrier>& result) {
-    if (!mask || initial == final) return VK_SUCCESS;
+    VkImageLayout initial, VkImageLayout final, std::vector<VkImageMemoryBarrier>& result, uint32_t ordinary_layers) {
+    if ((!mask && !ordinary_layers) || initial == final) return VK_SUCCESS;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!device_ || !image_ || !core_only_) return VK_ERROR_FEATURE_NOT_PRESENT;
     auto range = info_.subresourceRange;
@@ -81,7 +85,9 @@ VkResult MultiviewViewResources::layout_barriers(uint32_t mask, bool used_elsewh
     // writes or layout transitions. Include availability even for UNDEFINED.
     barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    barrier.oldLayout = initial; barrier.newLayout = final; barrier.image = image_->handle;
+    barrier.oldLayout = image_->emulated_attachment ? volume_native_layout(initial) : initial;
+    barrier.newLayout = image_->emulated_attachment ? volume_native_layout(final) : final;
+    barrier.image = image_->handle;
     barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.subresourceRange = range;
     if (image_->type == VK_IMAGE_TYPE_3D) {
@@ -93,6 +99,11 @@ VkResult MultiviewViewResources::layout_barriers(uint32_t mask, bool used_elsewh
     }
     if (info_.viewType != VK_IMAGE_VIEW_TYPE_2D && info_.viewType != VK_IMAGE_VIEW_TYPE_2D_ARRAY)
         return VK_ERROR_FEATURE_NOT_PRESENT;
+    if (ordinary_layers) {
+        if (ordinary_layers > range.layerCount) return VK_ERROR_FEATURE_NOT_PRESENT;
+        barrier.subresourceRange.layerCount = ordinary_layers;
+        append_transition(result,barrier); return VK_SUCCESS;
+    }
     for (uint32_t view = 0; view < 32;) {
         if (!(mask & (uint32_t(1) << view))) { ++view; continue; }
         const auto first = view++;
@@ -110,21 +121,31 @@ void MultiviewViewResources::release() {
     slices_.clear(); slice_count_.store(0, std::memory_order_relaxed); device_ = VK_NULL_HANDLE;
 }
 VkResult MultiviewViewResources::slice(uint32_t view, VkImageAspectFlags aspects, VkImageView& result) {
+    if (auto* selected = AttachmentReplayScope::lookup(this)) return selected->slice(view,aspects,result);
+    return make_view(view,aspects,result);
+}
+VkResult MultiviewViewResources::whole(VkImageAspectFlags aspects, VkImageView& result) {
+    if (auto* selected = AttachmentReplayScope::lookup(this)) return selected->whole(aspects,result);
+    return make_view({},aspects,result);
+}
+VkResult MultiviewViewResources::make_view(std::optional<uint32_t> view, VkImageAspectFlags aspects, VkImageView& result) {
     result = VK_NULL_HANDLE;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!device_ || !create_ || !destroy_ || !core_only_ || view >= 32 ||
-        view >= info_.subresourceRange.layerCount ||
+    if (!device_ || !create_ || !destroy_ || !core_only_ || (view && (*view >= 32 ||
+        *view >= info_.subresourceRange.layerCount)) ||
         (info_.viewType != VK_IMAGE_VIEW_TYPE_2D && info_.viewType != VK_IMAGE_VIEW_TYPE_2D_ARRAY))
         return VK_ERROR_FEATURE_NOT_PRESENT;
     if (!aspects) aspects = info_.subresourceRange.aspectMask;
     if (aspects & ~info_.subresourceRange.aspectMask) return VK_ERROR_FEATURE_NOT_PRESENT;
-    const auto key = std::make_pair(view, aspects);
+    const auto key = std::make_pair(view.value_or(UINT32_MAX), aspects);
     const auto found = slices_.find(key);
     if (found != slices_.end()) { result = found->second; return VK_SUCCESS; }
     VkImageViewCreateInfo ci = info_;
-    ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ci.subresourceRange.baseArrayLayer += view;
-    ci.subresourceRange.layerCount = 1;
+    if (view) {
+        ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ci.subresourceRange.baseArrayLayer += *view;
+        ci.subresourceRange.layerCount = 1;
+    }
     ci.subresourceRange.aspectMask = aspects;
     VkImageViewUsageCreateInfo usage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
     if (usage_) { usage.usage = *usage_; ci.pNext = &usage; }
@@ -154,7 +175,7 @@ VkResult MultiviewViewResources::slice(uint32_t view, VkImageAspectFlags aspects
 
 MultiviewFramebufferResources::MultiviewFramebufferResources(VkDevice device,
     const VkFramebufferCreateInfo& info, Views attachments)
-    : device_(device), width_(info.width), height_(info.height), count_(info.attachmentCount),
+    : device_(device), width_(info.width), height_(info.height), count_(info.attachmentCount), layers_(info.layers),
       imageless_(bool(info.flags & VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT)),
       core_only_(!(info.flags & ~VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT)), attachments_(std::move(attachments)),
       create_(proc<PFN_vkCreateFramebuffer>(device, "vkCreateFramebuffer")),
@@ -179,13 +200,14 @@ void MultiviewFramebufferResources::invalidate(const std::shared_ptr<MultiviewVi
 }
 VkResult MultiviewFramebufferResources::native_framebuffer(
     const std::shared_ptr<MultiviewPassResources>& pass, uint32_t subpass, uint32_t view,
-    bool first, bool last, bool aspects, const Views& bound, VkFramebuffer& result, const std::vector<uint32_t>& manual_layouts) {
+    bool first, bool last, bool aspects, const Views& bound, VkFramebuffer& result, const std::vector<uint32_t>& manual_layouts,
+    const std::vector<uint32_t>& general_attachments) {
     result = VK_NULL_HANDLE;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!device_ || !create_ || !destroy_ || !core_only_ || !pass || !pass->emulated() || bound.size() != count_)
         return VK_ERROR_FEATURE_NOT_PRESENT;
     try {
-        const auto chunk = pass->plan()->chunk(subpass, view, first, last, manual_layouts);
+        const auto chunk = pass->plan()->chunk(subpass, view, first, last, manual_layouts,general_attachments);
         Views sources;
         for (auto original : chunk.original_attachments) {
             if (original >= bound.size() || !bound[original]) return VK_ERROR_FEATURE_NOT_PRESENT;
@@ -193,26 +215,27 @@ VkResult MultiviewFramebufferResources::native_framebuffer(
         }
         for (const auto& fb : native_)
             if (fb.pass == pass && fb.subpass == subpass && fb.view == view && fb.first == first &&
-                fb.last == last && fb.aspects == aspects && fb.attachments == sources && fb.manual_layouts == manual_layouts) {
+                fb.last == last && fb.aspects == aspects && fb.attachments == sources && fb.manual_layouts == manual_layouts &&
+                fb.general_attachments == general_attachments) {
                 result = fb.handle; return VK_SUCCESS;
             }
         VkRenderPass native_pass{};
-        auto status = pass->native_pass(subpass, view, first, last, aspects, native_pass, manual_layouts);
+        auto status = pass->native_pass(subpass, view, first, last, aspects, native_pass, manual_layouts,general_attachments);
         if (status != VK_SUCCESS) return status;
         std::vector<VkImageView> handles;
         for (const auto& source : sources) {
             VkImageView handle{};
-            status = source->slice(view, 0, handle);
+            status = pass->plan()->multiview ? source->slice(view, 0, handle) : source->whole(0,handle);
             if (status != VK_SUCCESS) return status;
             handles.push_back(handle);
         }
         VkFramebufferCreateInfo ci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        ci.renderPass = native_pass; ci.width = width_; ci.height = height_; ci.layers = 1;
+        ci.renderPass = native_pass; ci.width = width_; ci.height = height_; ci.layers = pass->plan()->multiview ? 1 : layers_;
         ci.attachmentCount = uint32_t(handles.size()); ci.pAttachments = handles.data();
         VkFramebuffer native{};
         status = create_(device_, &ci, nullptr, &native);
         if (status != VK_SUCCESS) return status;
-        try { native_.push_back({pass, subpass, view, first, last, aspects, manual_layouts, std::move(sources), native}); }
+        try { native_.push_back({pass, subpass, view, first, last, aspects, manual_layouts,general_attachments, std::move(sources), native}); }
         catch (...) { destroy_(device_, native, nullptr); throw; }
         result = native; return VK_SUCCESS;
     } catch (const std::bad_alloc&) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
@@ -221,8 +244,11 @@ VkResult MultiviewFramebufferResources::native_framebuffer(
 }
 
 MultiviewAttachments& MultiviewAttachments::get() { static MultiviewAttachments registry; return registry; }
-void MultiviewAttachments::remember_image(VkDevice device, VkImage image, const VkImageCreateInfo& info) {
+void MultiviewAttachments::remember_image(VkDevice device, VkImage image, const VkImageCreateInfo& info, bool emulated_attachment) {
     auto record = std::make_shared<MultiviewImage>(MultiviewImage{image, info.imageType, info.mipLevels, info.arrayLayers, info.extent.depth});
+    record->format = info.format; record->samples = info.samples; record->native_usage = info.usage;
+    record->width = info.extent.width; record->height = info.extent.height;
+    record->emulated_attachment = emulated_attachment;
     std::lock_guard<std::mutex> lock(mutex_);
     images_[DeviceObjectKey::make(device, image)] = std::move(record);
 }
@@ -233,7 +259,8 @@ void MultiviewAttachments::remember_conversion(VkDevice device, VkSamplerYcbcrCo
     std::lock_guard<std::mutex> lock(mutex_);
     conversions_[DeviceObjectKey::make(device, conversion)] = std::move(record);
 }
-void MultiviewAttachments::remember_view(VkDevice device, VkImageView view, const VkImageViewCreateInfo& info) {
+void MultiviewAttachments::remember_view(VkDevice device, VkImageView view, const VkImageViewCreateInfo& info,
+    std::shared_ptr<VolumeAttachment> placeholder) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto image = images_.find(DeviceObjectKey::make(device, info.image));
     std::shared_ptr<const MultiviewConversion> conversion;
@@ -244,7 +271,7 @@ void MultiviewAttachments::remember_view(VkDevice device, VkImageView view, cons
             if (found != conversions_.end()) conversion = found->second;
         }
     auto record = std::make_shared<MultiviewViewResources>(device, info,
-        image == images_.end() ? nullptr : image->second, std::move(conversion));
+        image == images_.end() ? nullptr : image->second, std::move(conversion),std::move(placeholder));
     auto& live = live_views_[device]; prune(live); live.push_back(record);
     views_[DeviceObjectKey::make(device, view)] = std::move(record);
 }
@@ -262,7 +289,7 @@ void MultiviewAttachments::remember_framebuffer(VkDevice device, VkFramebuffer f
 }
 void MultiviewAttachments::remember_swapchain(VkDevice device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR& info) {
     std::lock_guard<std::mutex> lock(mutex_);
-    swapchains_[DeviceObjectKey::make(device, swapchain)] = {info.imageArrayLayers, {}};
+    swapchains_[DeviceObjectKey::make(device, swapchain)] = {info.imageArrayLayers, {}, info.imageFormat, info.imageExtent};
 }
 void MultiviewAttachments::remember_swapchain_images(VkDevice device, VkSwapchainKHR swapchain, uint32_t count, const VkImage* images) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -272,6 +299,7 @@ void MultiviewAttachments::remember_swapchain_images(VkDevice device, VkSwapchai
     for (uint32_t i = 0; i < count; ++i) {
         if (std::any_of(chain.images.begin(), chain.images.end(), [&](const auto& image) { return image->handle == images[i]; })) continue;
         auto record = std::make_shared<MultiviewImage>(MultiviewImage{images[i], VK_IMAGE_TYPE_2D, 1, chain.layers, 1});
+        record->format = chain.format; record->width = chain.extent.width; record->height = chain.extent.height;
         chain.images.push_back(record);
         try { images_[DeviceObjectKey::make(device, images[i])] = std::move(record); }
         catch (...) { chain.images.pop_back(); throw; }
@@ -281,6 +309,11 @@ std::shared_ptr<MultiviewViewResources> MultiviewAttachments::acquire_view(VkDev
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = views_.find(DeviceObjectKey::make(device, view));
     return found == views_.end() ? nullptr : found->second;
+}
+std::shared_ptr<const MultiviewImage> MultiviewAttachments::acquire_image(VkDevice device, VkImage image) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = images_.find(DeviceObjectKey::make(device, image));
+    return found == images_.end() ? nullptr : found->second;
 }
 std::shared_ptr<MultiviewFramebufferResources> MultiviewAttachments::acquire_framebuffer(VkDevice device, VkFramebuffer fb) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -385,5 +418,24 @@ void MultiviewAttachments::forget_device(VkDevice device) {
         for (auto it = map.begin(); it != map.end();) if (it->first.device == device) it = map.erase(it); else ++it;
     };
     erase(framebuffers_); erase(views_); erase(images_); erase(conversions_); erase(swapchains_);
+}
+AttachmentReplayScope::AttachmentReplayScope(const Bindings* bindings) : previous_(replay_bindings) { replay_bindings = bindings; }
+AttachmentReplayScope::~AttachmentReplayScope() { replay_bindings = previous_; }
+const AttachmentReplayScope::Bindings* AttachmentReplayScope::current() { return replay_bindings; }
+MultiviewViewResources* AttachmentReplayScope::lookup(const MultiviewViewResources* source) {
+    if (!replay_bindings || !source->image() || !source->image()->emulated_attachment) return nullptr;
+    const auto& view = source->info(); const auto& range = view.subresourceRange;
+    for (const auto& binding : *replay_bindings) {
+        const auto& match = binding.first->info(); const auto& selected = match.subresourceRange;
+        if (source->image() == binding.first->image() && view.format == match.format &&
+            range.baseMipLevel == selected.baseMipLevel && range.levelCount == selected.levelCount &&
+            range.baseArrayLayer == selected.baseArrayLayer && range.layerCount == selected.layerCount &&
+            !(range.aspectMask & ~selected.aspectMask)) return binding.second.get();
+    }
+    return nullptr;
+}
+VkImageLayout attachment_descriptor_layout(VkDevice device, VkImageView view, VkImageLayout layout) {
+    const auto source = MultiviewAttachments::get().acquire_view(device,view);
+    return source && source->image() && source->image()->emulated_attachment ? volume_native_layout(layout) : layout;
 }
 }

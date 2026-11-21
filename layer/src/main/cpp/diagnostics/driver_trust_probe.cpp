@@ -1,7 +1,21 @@
-#include "driver_trust.h"
-#include "driver_trust_shaders.h"
-#include "native_probe_resources.h"
-#include "driver_probe_process.h"
+#include "../core/driver_trust.h"
+#include "../core/driver_trust_shaders.h"
+#include "../core/native_probe_resources.h"
+#include "../core/native_msaa_resolve_probe.h"
+#include "../core/native_image_slice_probe.h"
+#include "../core/native_sync2_event_probe.h"
+#include "../core/native_timeline_queue_probe.h"
+#include "../core/driver_probe_process.h"
+#include "native_discard_state_probe.h"
+#include "native_depth_resolve_probe.h"
+#include "native_e5_transfer_probe.h"
+#include "native_probe_session.h"
+#include "native_queue2_probe.h"
+#include "native_timestamp_probe.h"
+#include "query_reset_probe.h"
+#include "../core/storage_buffer_array_probe.h"
+#include "storage_arrays_shader.h"
+#include "storage_arrays_static_shader.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -11,35 +25,24 @@
 
 namespace vkfix {
 namespace {
-struct NativeContext {
-    VkInstance instance;
-    VkDevice device{};
-    PFN_vkGetInstanceProcAddr gipa;
-    PFN_vkGetDeviceProcAddr gdpa{};
-    bool pending=false, retain_device=false;
-    template<class T> T get(const char *name) const {
-        auto fn=gipa(instance,name);
-        if (!fn) throw std::runtime_error(std::string("native probe missing ")+name);
-        return reinterpret_cast<T>(fn);
-    }
-    template<class T> T dev(const char *name) const {
-        auto fn=gdpa ? gdpa(device,name) : nullptr;
-        if (!fn) throw std::runtime_error(std::string("native probe missing ")+name);
-        return reinterpret_cast<T>(fn);
-    }
-    ~NativeContext() {
-        // A timed-out native submission may still access all of this device's
-        // resources. No idle wait or destruction is safe then. Memoization
-        // prevents repeating the probe on this identity in the process.
-        if (device && !pending) {
-            auto destroy=reinterpret_cast<PFN_vkDestroyDevice>(gdpa(device,"vkDestroyDevice"));
-            if (destroy) destroy(device,nullptr);
-        }
-    }
-};
+using nativeprobe::NativeContext;
 using Resources=nativeprobe::Resources<NativeContext>;
+// The generated revision hashes shaders, native probes and process protocol.
+constexpr uint64_t probe_revision = nativeprobe::revision;
 
 DriverProbeAssessment probe_sampler_aliases(NativeContext &p,VkPhysicalDevice physical,uint32_t family) {
+    VkPhysicalDeviceProperties properties{};
+    p.get<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties")(physical,&properties);
+    const auto &limits=properties.limits;
+    if (limits.maxPerStageDescriptorSamplers<128 || limits.maxDescriptorSetSamplers<128 ||
+        limits.maxPerStageDescriptorSampledImages<2 || limits.maxDescriptorSetSampledImages<2 || limits.maxPerStageResources<3)
+        return {DriverProbeVerdict::Inconclusive,"probe requires 128 samplers, two sampled images and one SSBO"};
+    VkImageFormatProperties format{};
+    if (p.get<PFN_vkGetPhysicalDeviceImageFormatProperties>("vkGetPhysicalDeviceImageFormatProperties")(
+        physical,VK_FORMAT_D32_SFLOAT,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,0,&format)!=VK_SUCCESS ||
+        format.maxExtent.width<4 || format.maxExtent.height<4)
+        return {DriverProbeVerdict::Inconclusive,"D32 sampled/transfer control is unsupported"};
     Resources gpu(p,physical,family);
     auto output=gpu.buffer(16,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     VkImage images[2]{}; VkImageView views[2]{}; VkSampler samplers[2]{};
@@ -330,7 +333,19 @@ bool probe_push_transition(NativeContext &p,VkPhysicalDevice physical,uint32_t f
     }
     return matched;
 }
-#include "driver_tiler_probe.inc"
+#include "../core/driver_tiler_probe.inc"
+#include "../core/driver_push_graphics_probe.inc"
+
+void worker_ready() {
+    std::puts("VKFIX_PROBE_READY");
+    std::fflush(stdout);
+}
+
+int worker_readback(const std::string &error) {
+    if (!error.empty()) std::printf("VKFIX_PROBE_DETAIL:%.512s\n",error.c_str());
+    std::puts(error.empty() ? "VKFIX_PROBE_PASS" : "VKFIX_PROBE_MISMATCH");
+    return error.empty() ? 0 : 3;
+}
 } // namespace
 
 int driver_trust_worker(const char *mode,const std::string &identity) {
@@ -339,50 +354,176 @@ int driver_trust_worker(const char *mode,const std::string &identity) {
 #else
     try {
         const bool tiler=std::strcmp(mode,"tiler-subject")==0 || std::strcmp(mode,"tiler-control")==0;
-        const bool subject=std::strcmp(mode,"push-subject")==0 || std::strcmp(mode,"tiler-subject")==0;
-        if (!tiler && !subject && std::strcmp(mode,"push-control")) return 2;
+        const bool vertex_compute=std::strcmp(mode,"push-vertex-compute-subject")==0 || std::strcmp(mode,"push-vertex-compute-control")==0;
+        const bool vertex=vertex_compute || std::strcmp(mode,"push-vertex-subject")==0 || std::strcmp(mode,"push-vertex-control")==0;
+        const bool graphics=vertex || std::strcmp(mode,"push-graphics-subject")==0 || std::strcmp(mode,"push-graphics-control")==0;
+        const bool sampler=std::strcmp(mode,"sampler")==0;
+        const bool uniform=std::strcmp(mode,"uniform")==0;
+        const bool msaa=std::strcmp(mode,"msaa")==0;
+        const bool slice_subject=std::strcmp(mode,"image-slices-subject")==0;
+        const bool image_slices=slice_subject || std::strcmp(mode,"image-slices-control")==0;
+        const bool discard_subject=std::strcmp(mode,"discard-state-subject")==0;
+        const bool discard_reissue=std::strcmp(mode,"discard-state-reemit")==0;
+        const bool discard_state=discard_subject || discard_reissue || std::strcmp(mode,"discard-state-rasterized")==0;
+        const bool storage_static_subject = !std::strcmp(mode, "storage-array-static-subject");
+        const bool storage_static = storage_static_subject || !std::strcmp(mode, "storage-array-static-control");
+        const bool storage_dynamic_subject = !std::strcmp(mode, "storage-array-dynamic-subject");
+        const bool storage_dynamic = storage_dynamic_subject || !std::strcmp(mode, "storage-array-dynamic-control");
+        const bool storage_array = storage_static || storage_dynamic;
+        const bool depth_resolve_subject = !std::strcmp(mode, "depth-resolve-subject");
+        const bool depth_resolve = depth_resolve_subject || !std::strcmp(mode, "depth-resolve-control");
+        const bool e5_buffer = !std::strcmp(mode, "e5-buffer-subject");
+        const bool e5_image = !std::strcmp(mode, "e5-image-subject");
+        const bool e5_transfer = e5_buffer || e5_image || !std::strcmp(mode, "e5-control");
+        const bool queue2_subject = !std::strcmp(mode, "queue2-subject");
+        const bool queue2 = queue2_subject || !std::strcmp(mode, "queue2-control");
+        const bool timeline=std::strcmp(mode,"timeline-subject")==0;
+        const bool timeline_queue=timeline || std::strcmp(mode,"timeline-control")==0;
+        const bool sync2_event=std::strcmp(mode,"sync2-events-subject")==0;
+        const bool sync2_reset_control=std::strcmp(mode,"sync2-events-reset-control")==0;
+        const bool sync2_events=sync2_event || sync2_reset_control || std::strcmp(mode,"sync2-events-control")==0;
+        const bool sync2_submit=std::strcmp(mode,"sync2-submit-subject")==0;
+        const bool timestamps=std::strcmp(mode,"timestamps")==0;
+        const bool host_query_reset=std::strcmp(mode,"host-query-reset-subject")==0;
+        const bool query_reset=host_query_reset || std::strcmp(mode,"host-query-reset-control")==0;
+        const bool sync2=sync2_event || sync2_reset_control || sync2_submit;
+        const bool subject=std::strcmp(mode,"push-subject")==0 || std::strcmp(mode,"tiler-subject")==0 ||
+                           std::strcmp(mode,"push-graphics-subject")==0 || std::strcmp(mode,"push-vertex-subject")==0 ||
+                           std::strcmp(mode,"push-vertex-compute-subject")==0;
+        if (!tiler && !graphics && !sampler && !uniform && !msaa && !image_slices && !discard_state && !storage_array &&
+            !depth_resolve && !e5_transfer && !queue2 && !timeline_queue &&
+            !sync2_events && !sync2_submit && !timestamps && !query_reset &&
+            !subject && std::strcmp(mode,"push-control")) return 2;
         const char *backend="libvulkan.so";
 #ifdef VKFIX_DRIVER_TRUST_TESTING
         // Only a separately built test executable can load the forwarding
         // fixture. The production APK worker always uses the system loader.
+#ifdef VKFIX_PROBE_TEST_CLIENT
+        if (const char *test = std::getenv("VKFIX_TRUST_TEST_CLIENT_DRIVER")) backend = test;
+#else
         if (const char *test=std::getenv("VKFIX_TRUST_TEST_DRIVER")) backend=test;
+#endif
         setenv("VKFIX_TEST_PROBE_PHASE",mode,1);
 #endif
         auto library=dlopen(backend,RTLD_NOW|RTLD_LOCAL);
         if (!library) return 2;
         auto gipa=reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(library,"vkGetInstanceProcAddr"));
         if (!gipa) return 2;
-        NativeContext p{VK_NULL_HANDLE,{},gipa};
-        VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO}; app.apiVersion=VK_API_VERSION_1_0;
-        VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO}; ici.pApplicationInfo=&app;
-        nativeprobe::check(p.get<PFN_vkCreateInstance>("vkCreateInstance")(&ici,nullptr,&p.instance),"worker instance");
-        uint32_t count=0;
-        auto enumerate=p.get<PFN_vkEnumeratePhysicalDevices>("vkEnumeratePhysicalDevices");
-        nativeprobe::check(enumerate(p.instance,&count,nullptr),"worker devices");
-        if (!count || count>256) return 2;
-        std::vector<VkPhysicalDevice> physicals(count);
-        nativeprobe::check(enumerate(p.instance,&count,physicals.data()),"worker physicals");
-        VkPhysicalDevice physical{};
-        for (auto candidate:physicals) {
-            VkPhysicalDeviceProperties properties{};
-            p.get<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties")(candidate,&properties);
-            if (driver_probe_identity(properties,nativeprobe::revision)==identity) { physical=candidate; break; }
+        VkQueueFlags queue_flags = VK_QUEUE_COMPUTE_BIT;
+        if (tiler || graphics || msaa || image_slices || discard_state || depth_resolve)
+            queue_flags = VK_QUEUE_GRAPHICS_BIT;
+        if (sync2_events || timeline_queue || sync2_submit || queue2 || timestamps || query_reset)
+            queue_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+        if (timeline_queue || sync2_submit || queue2) queue_flags |= VK_QUEUE_TRANSFER_BIT;
+        NativeContext p(gipa);
+        p.select(identity, probe_revision, queue_flags, sync2 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2,
+                 timestamps || query_reset);
+        const auto physical = p.physical;
+        const auto family = p.family;
+        const auto &properties = p.properties;
+        if (p.api < VK_API_VERSION_1_1 || properties.apiVersion < VK_API_VERSION_1_1) {
+            if (storage_array) { std::puts("aggregate StorageBuffer probe requires Vulkan 1.1"); return 2; }
+            if (image_slices) { std::puts("packed image slice probe requires Vulkan 1.1"); return 2; }
+            if (queue2) { std::puts("queue2 probe requires Vulkan 1.1"); return 2; }
         }
-        if (!physical) { std::puts("worker identity/revision mismatch"); return 2; }
-        auto query=p.get<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
-        count=0; query(physical,&count,nullptr);
-        if (!count || count>65536) return 2;
-        std::vector<VkQueueFamilyProperties> families(count); query(physical,&count,families.data());
-        uint32_t family=0;
-        const auto queue_flags=tiler ? VK_QUEUE_GRAPHICS_BIT : VK_QUEUE_COMPUTE_BIT;
-        while (family<count && (!families[family].queueCount || !(families[family].queueFlags&queue_flags))) ++family;
-        if (family==count) return 2;
         float priority=1;
         VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}; qi.queueFamilyIndex=family; qi.queueCount=1; qi.pQueuePriorities=&priority;
         VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; ci.queueCreateInfoCount=1; ci.pQueueCreateInfos=&qi;
-        const char *extension=VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
-        if (subject && !tiler) { ci.enabledExtensionCount=1; ci.ppEnabledExtensionNames=&extension; }
+        const char *extension=nullptr;
+        if (subject && !tiler) extension=VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+        const bool query_reset_core = p.api >= VK_API_VERSION_1_2 && properties.apiVersion >= VK_API_VERSION_1_2;
+        VkPhysicalDeviceHostQueryResetFeatures query_reset_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES};
+        if (host_query_reset) {
+            if (p.api < VK_API_VERSION_1_1 || (!query_reset_core && !p.has_extension(VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME))) {
+                std::puts("native host query reset unavailable"); return 2;
+            }
+            VkPhysicalDeviceFeatures2 available{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &query_reset_feature};
+            p.get<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(physical, &available);
+            if (!query_reset_feature.hostQueryReset) {
+                std::puts("native hostQueryReset feature unavailable"); return 2;
+            }
+            if (!query_reset_core) extension = VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME;
+            ci.pNext = &query_reset_feature;
+        }
+        const bool timeline_core=p.api>=VK_API_VERSION_1_2 && properties.apiVersion>=VK_API_VERSION_1_2;
+        VkPhysicalDeviceTimelineSemaphoreFeatures timeline_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+        if (timeline) {
+            if (p.api<VK_API_VERSION_1_1) {
+                std::puts("timeline queue probe requires a Vulkan 1.1 instance"); return 2;
+            }
+            if (!timeline_core && !p.has_extension(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)) {
+                std::puts("native timeline extension unavailable"); return 2;
+            }
+            if (!timeline_core) extension=VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME;
+            VkPhysicalDeviceFeatures2 available{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            available.pNext=&timeline_feature;
+            p.get<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(physical,&available);
+            if (!timeline_feature.timelineSemaphore) { std::puts("native timeline feature unavailable"); return 2; }
+            ci.pNext=&timeline_feature;
+        }
+        auto sync2_route=nativeprobe::Sync2Route::Legacy;
+        VkPhysicalDeviceSynchronization2Features sync2_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
+        if (sync2) {
+            if (p.api<VK_API_VERSION_1_1) { std::puts("synchronization2 requires a Vulkan 1.1 instance"); return 2; }
+            const bool sync2_core=p.api>=VK_API_VERSION_1_3 && properties.apiVersion>=VK_API_VERSION_1_3;
+            if (!sync2_core && !p.has_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
+                std::puts("native synchronization2 extension unavailable"); return 2;
+            }
+            if (!sync2_core) extension=VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
+            VkPhysicalDeviceFeatures2 available{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            available.pNext=&sync2_feature;
+            p.get<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(physical,&available);
+            if (!sync2_feature.synchronization2) { std::puts("native synchronization2 feature unavailable"); return 2; }
+            ci.pNext=&sync2_feature;
+            sync2_route=sync2_core ? nativeprobe::Sync2Route::Core : nativeprobe::Sync2Route::KHR;
+        }
+        if (extension) { ci.enabledExtensionCount=1; ci.ppEnabledExtensionNames=&extension; }
+        const char *depth_extensions[]{VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME};
+        const bool depth_resolve_core = p.api >= VK_API_VERSION_1_2 && properties.apiVersion >= VK_API_VERSION_1_2;
+        VkPhysicalDeviceDepthStencilResolveProperties resolve_modes{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES};
+        if (depth_resolve) {
+            if (p.api < VK_API_VERSION_1_1 || properties.apiVersion < VK_API_VERSION_1_1) {
+                std::puts("depth/stencil resolve probe requires Vulkan 1.1");
+                return 2;
+            }
+            if (!depth_resolve_core) {
+                for (const auto *name : depth_extensions) if (!p.has_extension(name)) {
+                    std::printf("native %s unavailable\n", name);
+                    return 2;
+                }
+                ci.enabledExtensionCount = 2;
+                ci.ppEnabledExtensionNames = depth_extensions;
+            }
+            VkPhysicalDeviceProperties2 queried{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &resolve_modes};
+            p.get<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(physical, &queried);
+        }
         VkPhysicalDeviceFeatures requested{};
+        if (storage_dynamic) {
+            VkPhysicalDeviceFeatures supported{};
+            p.get<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures")(physical, &supported);
+            if (!supported.shaderStorageBufferArrayDynamicIndexing) {
+                std::puts("native storage-buffer array dynamic indexing unavailable");
+                return 2;
+            }
+            requested.shaderStorageBufferArrayDynamicIndexing = VK_TRUE;
+            ci.pEnabledFeatures = &requested;
+        }
+        VkPhysicalDeviceDescriptorIndexingFeatures indexed{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+        bool use_indexed_heap=false;
+        if (graphics && p.api>=VK_API_VERSION_1_2) {
+            if (properties.apiVersion>=VK_API_VERSION_1_2) {
+                VkPhysicalDeviceFeatures2 available{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2}; available.pNext=&indexed;
+                p.get<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(physical,&available);
+                use_indexed_heap=indexed.descriptorBindingSampledImageUpdateAfterBind && indexed.descriptorBindingStorageBufferUpdateAfterBind &&
+                    indexed.descriptorBindingPartiallyBound && indexed.descriptorBindingUpdateUnusedWhilePending;
+                indexed={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+                if (use_indexed_heap) {
+                    indexed.descriptorBindingSampledImageUpdateAfterBind=indexed.descriptorBindingStorageBufferUpdateAfterBind=VK_TRUE;
+                    indexed.descriptorBindingPartiallyBound=indexed.descriptorBindingUpdateUnusedWhilePending=VK_TRUE;
+                    ci.pNext=&indexed;
+                }
+            }
+        }
         if (tiler) {
             VkPhysicalDeviceFeatures supported{};
             p.get<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures")(physical,&supported);
@@ -391,9 +532,101 @@ int driver_trust_worker(const char *mode,const std::string &identity) {
             requested.multiDrawIndirect=supported.multiDrawIndirect && properties.limits.maxDrawIndirectCount>=8;
             ci.pEnabledFeatures=&requested;
         }
-        p.gdpa=p.get<PFN_vkGetDeviceProcAddr>("vkGetDeviceProcAddr");
-        nativeprobe::check(p.get<PFN_vkCreateDevice>("vkCreateDevice")(physical,&ci,nullptr,&p.device),"worker device");
-        const bool passed=tiler ? probe_tiler_pressure(p,physical,family,subject,requested.multiDrawIndirect) : probe_push_transition(p,physical,family,subject);
+        p.create_device(ci);
+        if (query_reset) {
+            Resources gpu(p, physical, family);
+            const char *reset = !host_query_reset ? nullptr :
+                query_reset_core ? "vkResetQueryPool" : "vkResetQueryPoolEXT";
+            return worker_readback(nativeprobe::probe_host_query_reset(p, gpu, reset, worker_ready));
+        }
+        if (timestamps) {
+            const auto result = nativeprobe::probe_timestamps(
+                p, physical, family, p.timestamp_valid_bits, properties.limits.timestampPeriod, worker_ready);
+            std::printf("VKFIX_PROBE_DETAIL:%.512s\n", result.detail.c_str());
+            std::puts(result.passed ? "VKFIX_PROBE_PASS" : "VKFIX_PROBE_MISMATCH");
+            return result.passed ? 0 : 3;
+        }
+        if (queue2) {
+            const auto result = nativeprobe::probe_queue2(p, physical, family, queue2_subject, worker_ready);
+            std::printf("VKFIX_PROBE_DETAIL:%.512s\n", result.detail.c_str());
+            std::puts(result.passed ? "VKFIX_PROBE_PASS" :
+                result.null_queue2 ? "VKFIX_PROBE_KNOWN_MISMATCH" : "VKFIX_PROBE_MISMATCH");
+            return result.passed ? 0 : 3;
+        }
+        if (timeline_queue || sync2_submit)
+            return worker_readback(nativeprobe::probe_timeline_queue(p,physical,family,timeline,timeline_core,worker_ready,sync2_route));
+        if (sync2_events) {
+            const auto result = nativeprobe::probe_sync2_events(
+                p, physical, family, sync2_route, sync2_reset_control, worker_ready);
+            if (!sync2_event || !result.reset_left_event_set) return worker_readback(result.error);
+            std::printf("VKFIX_PROBE_DETAIL:%s\n", result.error.c_str());
+            std::puts("VKFIX_PROBE_KNOWN_MISMATCH");
+            return 3;
+        }
+        if (image_slices) {
+            const auto result = nativeprobe::probe_image_slices(p, physical, family, !slice_subject, worker_ready);
+            if (!result.only_first_slice_written) return worker_readback(result.error);
+            std::printf("VKFIX_PROBE_DETAIL:%.512s\n", result.error.c_str());
+            std::puts("VKFIX_PROBE_KNOWN_MISMATCH");
+            return 3;
+        }
+        if (discard_state) {
+            using Mode = nativeprobe::DiscardStateMode;
+            const auto result = nativeprobe::probe_discard_state(p, physical, family,
+                discard_subject ? Mode::Inherited : discard_reissue ? Mode::Reissued : Mode::Rasterized, worker_ready);
+            std::printf("VKFIX_PROBE_DETAIL:%.512s\n", result.detail.c_str());
+            std::puts(result.passed ? "VKFIX_PROBE_PASS" :
+                result.lost_state ? "VKFIX_PROBE_KNOWN_MISMATCH" : "VKFIX_PROBE_MISMATCH");
+            return result.passed ? 0 : 3;
+        }
+        if (e5_transfer) {
+            using Route = nativeprobe::E5ReadRoute;
+            const auto route = e5_buffer ? Route::Buffer : e5_image ? Route::Image : Route::IntegerView;
+            const auto result = nativeprobe::probe_e5_transfer(p, physical, family, route, worker_ready);
+            std::printf("VKFIX_PROBE_DETAIL:%.512s\n", result.detail.c_str());
+            if (!result.ran) return 2;
+            std::puts(result.passed ? "VKFIX_PROBE_PASS" :
+                route != Route::IntegerView && result.canonicalized ? "VKFIX_PROBE_KNOWN_MISMATCH" : "VKFIX_PROBE_MISMATCH");
+            return result.passed ? 0 : 3;
+        }
+        if (storage_array) {
+            using namespace nativeprobe;
+            const auto run = [&](const auto &code) {
+                return storage_buffer_array(p, physical, family, code, sizeof code / sizeof(uint32_t), true,
+                                            false, nullptr, 0, worker_ready);
+            };
+            const auto result = storage_static ?
+                (storage_static_subject ? run(post_storage_arrays_static_comp) : run(storage_array_static_control)) :
+                (storage_dynamic_subject ? run(post_storage_arrays_comp) : run(storage_array_dynamic_control));
+            if (!result.aggregate_store_lost || !(storage_static_subject || storage_dynamic_subject))
+                return worker_readback(result.error);
+            std::printf("VKFIX_PROBE_DETAIL:whole-array store did not restore descriptor 2; %.430s\n", result.error.c_str());
+            std::puts("VKFIX_PROBE_KNOWN_MISMATCH");
+            return 3;
+        }
+        if (depth_resolve) {
+            const auto result = nativeprobe::probe_depth_resolve(p, physical, family, depth_resolve_core,
+                depth_resolve_subject, resolve_modes, worker_ready);
+            if (!result.formats) { std::puts("no 4x sampled depth/stencil format supports sample-zero resolve"); return 2; }
+            std::printf("VKFIX_PROBE_DETAIL:%.512s\n", result.detail.c_str());
+            std::puts(result.passed ? "VKFIX_PROBE_PASS" :
+                depth_resolve_subject && result.target_unwritten ? "VKFIX_PROBE_KNOWN_MISMATCH" : "VKFIX_PROBE_MISMATCH");
+            return result.passed ? 0 : 3;
+        }
+        if (sampler || uniform || msaa) {
+            std::puts("VKFIX_PROBE_READY"); std::fflush(stdout);
+            VkPhysicalDeviceProperties properties{};
+            p.get<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties")(physical,&properties);
+            const auto assessment=sampler ? probe_sampler_aliases(p,physical,family) :
+                uniform ? probe_large_uniform(p,physical,family,properties.limits) :
+                nativeprobe::probe_msaa_array_resolve(p,physical,family);
+            std::printf("VKFIX_PROBE_DETAIL:%.512s\n",assessment.detail.c_str());
+            if (assessment.verdict==DriverProbeVerdict::Healthy) { std::puts("VKFIX_PROBE_PASS"); return 0; }
+            if (assessment.verdict==DriverProbeVerdict::RepairConfirmed) { std::puts("VKFIX_PROBE_REPAIR"); return 4; }
+            return 2;
+        }
+        const bool passed=tiler ? probe_tiler_pressure(p,physical,family,subject,requested.multiDrawIndirect) :
+            graphics ? probe_push_graphics(p,physical,family,subject,use_indexed_heap,vertex ? (vertex_compute ? 2u : 1u) : 0u) : probe_push_transition(p,physical,family,subject);
         std::puts(passed ? "VKFIX_PROBE_PASS" : "VKFIX_PROBE_MISMATCH");
         return passed ? 0 : 3;
         // Instance lives to worker exit; incomplete GPU work is never destroyed.
@@ -404,64 +637,4 @@ int driver_trust_worker(const char *mode,const std::string &identity) {
 #endif
 }
 
-DriverTrustReport native_driver_trust(VkInstance instance,VkPhysicalDevice physical,PFN_vkGetInstanceProcAddr gipa) {
-    DriverTrustReport unavailable;
-    if (!instance || !physical || !gipa) return unavailable;
-    auto props=reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(gipa(instance,"vkGetPhysicalDeviceProperties"));
-    if (!props) return unavailable;
-    VkPhysicalDeviceProperties properties{}; props(physical,&properties);
-    static DriverTrustCache cache;
-    auto identity=driver_identity(properties,nativeprobe::revision);
-    identity.physical_cookie=reinterpret_cast<uintptr_t>(physical);
-    identity.provider_cookie=reinterpret_cast<uintptr_t>(gipa);
-    return cache.get(identity,[=] {
-        DriverTrustReport report;
-        NativeContext p{instance,{},gipa};
-        auto query=p.get<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
-        uint32_t count=0; query(physical,&count,nullptr);
-        if (!count || count>65536) throw std::runtime_error("native probe has no queue families");
-        std::vector<VkQueueFamilyProperties> families(count); query(physical,&count,families.data());
-        uint32_t family=0;
-        while (family<count && (!families[family].queueCount || !(families[family].queueFlags&VK_QUEUE_COMPUTE_BIT))) ++family;
-        if (family==count) throw std::runtime_error("native probe has no compute queue");
-        p.gdpa=p.get<PFN_vkGetDeviceProcAddr>("vkGetDeviceProcAddr");
-        float priority=1;
-        VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}; qi.queueFamilyIndex=family; qi.queueCount=1; qi.pQueuePriorities=&priority;
-        VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; ci.queueCreateInfoCount=1; ci.pQueueCreateInfos=&qi;
-        nativeprobe::check(p.get<PFN_vkCreateDevice>("vkCreateDevice")(physical,&ci,nullptr,&p.device),"native probe device");
-        // One unavailable probe must not suppress unrelated measurements.
-        auto run=[&](DriverProbeAssessment &assessment,const auto &probe) {
-            if (p.pending) { assessment.detail="previous native probe did not complete"; return; }
-            try { assessment=probe(); }
-            catch (const std::exception &error) { assessment.detail=std::string(error.what()).substr(0,4096); }
-        };
-        run(report.large_uniform,[&]{ return probe_large_uniform(p,physical,family,properties.limits); });
-        run(report.sampler_aliases,[&]() -> DriverProbeAssessment {
-            if (properties.limits.maxPerStageDescriptorSamplers<128 || properties.limits.maxDescriptorSetSamplers<128 ||
-                properties.limits.maxPerStageDescriptorSampledImages<2 || properties.limits.maxDescriptorSetSampledImages<2 ||
-                properties.limits.maxPerStageResources<3)
-                return {DriverProbeVerdict::Inconclusive,"probe requires 128 samplers, two sampled images and one SSBO"};
-            VkImageFormatProperties format{};
-            auto supported=p.get<PFN_vkGetPhysicalDeviceImageFormatProperties>("vkGetPhysicalDeviceImageFormatProperties")(
-                physical,VK_FORMAT_D32_SFLOAT,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,0,&format);
-            if (supported!=VK_SUCCESS || format.maxExtent.width<4 || format.maxExtent.height<4)
-                return {DriverProbeVerdict::Inconclusive,"D32 sampled/transfer control is unsupported"};
-            return probe_sampler_aliases(p,physical,family);
-        });
-        run(report.push_descriptor,[&]() -> DriverProbeAssessment {
-            auto enumerate=p.get<PFN_vkEnumerateDeviceExtensionProperties>("vkEnumerateDeviceExtensionProperties");
-            uint32_t size=0;
-            nativeprobe::check(enumerate(physical,nullptr,&size,nullptr),"probe native extensions");
-            if (size>65536) throw std::runtime_error("invalid native extension count");
-            std::vector<VkExtensionProperties> extensions(size);
-            nativeprobe::check(enumerate(physical,nullptr,&size,extensions.data()),"probe native extension list");
-            bool supported=false;
-            for (const auto &ext:extensions) supported|=std::strcmp(ext.extensionName,VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)==0;
-            if (!supported) return {DriverProbeVerdict::Inconclusive,"native push descriptors unsupported; missing feature uses emulation"};
-            return isolated_push_descriptor_probe(properties,nativeprobe::revision);
-        });
-        run(report.tiler_budget,[&]{ return isolated_tiler_probe(properties,nativeprobe::revision); });
-        return report;
-    });
-}
 } // namespace vkfix

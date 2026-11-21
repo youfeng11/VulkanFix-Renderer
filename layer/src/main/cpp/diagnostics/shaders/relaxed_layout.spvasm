@@ -1,0 +1,50 @@
+; Vec3 at byte offset 4: preserve neighboring guards, vector loads/stores,
+; dynamic component addressing and atomic operations across three invocations.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %index
+OpExecutionMode %main LocalSize 3 1 1
+OpDecorate %index BuiltIn LocalInvocationIndex
+OpDecorate %input DescriptorSet 0
+OpDecorate %input Binding 0
+OpDecorate %output DescriptorSet 0
+OpDecorate %output Binding 1
+OpDecorate %block BufferBlock
+OpMemberDecorate %block 0 Offset 0
+OpMemberDecorate %block 1 Offset 4
+OpMemberDecorate %block 2 Offset 16
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%vec = OpTypeVector %uint 3
+%block = OpTypeStruct %uint %vec %uint
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%two = OpConstant %uint 2
+%device = OpConstant %uint 1
+%workgroup = OpConstant %uint 2
+%uniform_acquire_release = OpConstant %uint 72
+%ptr_block = OpTypePointer Uniform %block
+%ptr_vec = OpTypePointer Uniform %vec
+%ptr_uint = OpTypePointer Uniform %uint
+%ptr_input = OpTypePointer Input %uint
+%input = OpVariable %ptr_block Uniform
+%output = OpVariable %ptr_block Uniform
+%index = OpVariable %ptr_input Input
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%i = OpLoad %uint %index
+%input_vec = OpAccessChain %ptr_vec %input %one
+%v = OpLoad %vec %input_vec
+%item = OpVectorExtractDynamic %uint %v %i
+%selected = OpAccessChain %ptr_uint %output %one %i
+OpStore %selected %item
+OpControlBarrier %workgroup %workgroup %uniform_acquire_release
+%old = OpAtomicIAdd %uint %selected %device %zero %one
+OpControlBarrier %workgroup %workgroup %uniform_acquire_release
+%all = OpLoad %vec %input_vec
+%last = OpVectorExtractDynamic %uint %all %two
+%footer = OpAccessChain %ptr_uint %output %two
+%ignored = OpAtomicExchange %uint %footer %device %zero %last
+OpReturn
+OpFunctionEnd

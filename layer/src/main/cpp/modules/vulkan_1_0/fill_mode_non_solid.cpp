@@ -3,22 +3,14 @@
 #include "layer_manager.h"
 #include "vk_pnext.h"
 
-// Capability supplement: expose fillModeNonSolid to applications that require
-// it (Minecraft 26.x enables its wireframe feature set when this bit is set).
-//
-// The driver cannot render LINE polygon mode on most mobile GPUs, so pipelines
-// that request a non-solid polygon mode are rewritten to VK_POLYGON_MODE_FILL in
-// on_modify_pipeline_create_info; the feature bit itself is stripped from
-// VkDeviceCreateInfo before it reaches the driver.
-//
-// Disable per device with VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID=skip
-// (VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID_FEATURE controls the feature bit).
+// A legacy, explicitly requested compatibility mode can substitute FILL for
+// LINE/POINT. Default queries retain the real feature bit: the substitution
+// cannot provide the semantics of fillModeNonSolid.
 REGISTER_LAYER_MODULE(FillModeNonSolidModule);
 
 
 FillModeNonSolidModule::FillModeNonSolidModule() {
     LOGI("Initialized Vulkan fillModeNonSolid emulation module");
-    LOGW("fillModeNonSolid: capability supplement, LINE/POINT polygon modes are rendered as FILL");
 }
 
 bool FillModeNonSolidModule::is_phys_device_native(VkPhysicalDevice physDev) {
@@ -50,7 +42,7 @@ bool FillModeNonSolidModule::is_phys_device_native(VkPhysicalDevice physDev) {
     }
     m_phys_native_support[(uint64_t)(uintptr_t)physDev] = native;
     if (!native) {
-        LOGI("Physical device %p lacks native fillModeNonSolid, enabling automatic emulation!", physDev);
+        LOGI("Physical device %p lacks native fillModeNonSolid", physDev);
     } else {
         LOGI("Physical device %p natively supports fillModeNonSolid", physDev);
     }
@@ -82,7 +74,8 @@ void FillModeNonSolidModule::on_get_features(
     } else if (featMode == EmulationMode::Skip) {
         should_inject = false;
     } else {
-        should_inject = !is_phys_device_native(physicalDevice);
+        should_inject = parse_emulation_mode("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID",
+            "FORCE_EMULATE_FILL_MODE_NON_SOLID") == EmulationMode::ForceEmulate;
     }
 
     if (should_inject) {
@@ -104,7 +97,8 @@ void FillModeNonSolidModule::on_post_get_features2(
     } else if (featMode == EmulationMode::Skip) {
         should_inject = false;
     } else {
-        should_inject = !is_phys_device_native(physicalDevice);
+        should_inject = parse_emulation_mode("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID",
+            "FORCE_EMULATE_FILL_MODE_NON_SOLID") == EmulationMode::ForceEmulate;
     }
 
     if (should_inject) {

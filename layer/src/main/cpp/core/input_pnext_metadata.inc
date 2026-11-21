@@ -9,6 +9,120 @@ static std::shared_ptr<VkBaseOutStructure> clone_input_node(const VkBaseInStruct
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
+    case VK_STRUCTURE_TYPE_ATTACHMENT_SAMPLE_COUNT_INFO_AMD: {
+        if (!(kind & 768)) return {};
+        auto original = reinterpret_cast<const VkAttachmentSampleCountInfoAMD*>(node);
+        auto owned = std::make_shared<VkAttachmentSampleCountInfoAMD>(*original);
+        if (deep) {
+            if (original->pColorAttachmentSamples) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO: {
+        if (!(kind & 64)) return {};
+        auto original = reinterpret_cast<const VkBindBufferMemoryDeviceGroupInfo*>(node);
+        auto owned = std::make_shared<VkBindBufferMemoryDeviceGroupInfo>(*original);
+        if (deep) {
+            if (original->pDeviceIndices) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_DEVICE_GROUP_INFO: {
+        if (!(kind & 128)) return {};
+        auto original = reinterpret_cast<const VkBindImageMemoryDeviceGroupInfo*>(node);
+        auto owned = std::make_shared<VkBindImageMemoryDeviceGroupInfo>(*original);
+        if (deep) {
+            if (original->pDeviceIndices) return {}; // This input kind only supports immediate calls.
+            if (original->pSplitInstanceBindRegions) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR: {
+        if (!(kind & 128)) return {};
+        auto original = reinterpret_cast<const VkBindImageMemorySwapchainInfoKHR*>(node);
+        auto owned = std::make_shared<VkBindImageMemorySwapchainInfoKHR>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO: {
+        if (!(kind & 128)) return {};
+        auto original = reinterpret_cast<const VkBindImagePlaneMemoryInfo*>(node);
+        auto owned = std::make_shared<VkBindImagePlaneMemoryInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_BIND_MEMORY_STATUS: {
+        if (!(kind & 192)) return {};
+        auto original = reinterpret_cast<const VkBindMemoryStatus*>(node);
+        auto owned = std::make_shared<VkBindMemoryStatus>(*original);
+        if (deep) {
+            if (original->pResult) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkBufferDeviceAddressAlignmentAllocateInfoVALVE*>(node);
+        auto owned = std::make_shared<VkBufferDeviceAddressAlignmentAllocateInfoVALVE>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_CONDITIONAL_RENDERING_INFO_EXT: {
+        if (!(kind & 512)) return {};
+        auto original = reinterpret_cast<const VkCommandBufferInheritanceConditionalRenderingInfoEXT*>(node);
+        auto owned = std::make_shared<VkCommandBufferInheritanceConditionalRenderingInfoEXT>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_DESCRIPTOR_HEAP_INFO_EXT: {
+        if (!(kind & 512)) return {};
+        auto original = reinterpret_cast<const VkCommandBufferInheritanceDescriptorHeapInfoEXT*>(node);
+        auto owned = std::make_shared<VkCommandBufferInheritanceDescriptorHeapInfoEXT>(*original);
+        if (deep) {
+            if (original->pSamplerHeapBindInfo) return {}; // This input kind only supports immediate calls.
+            if (original->pResourceHeapBindInfo) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDER_PASS_TRANSFORM_INFO_QCOM: {
+        if (!(kind & 512)) return {};
+        auto original = reinterpret_cast<const VkCommandBufferInheritanceRenderPassTransformInfoQCOM*>(node);
+        auto owned = std::make_shared<VkCommandBufferInheritanceRenderPassTransformInfoQCOM>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO: {
+        if (!(kind & 512)) return {};
+        auto original = reinterpret_cast<const VkCommandBufferInheritanceRenderingInfo*>(node);
+        auto owned = std::make_shared<VkCommandBufferInheritanceRenderingInfo>(*original);
+        if (deep) {
+            if (original->pColorAttachmentFormats) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_VIEWPORT_SCISSOR_INFO_NV: {
+        if (!(kind & 512)) return {};
+        auto original = reinterpret_cast<const VkCommandBufferInheritanceViewportScissorInfoNV*>(node);
+        auto owned = std::make_shared<VkCommandBufferInheritanceViewportScissorInfoNV>(*original);
+        if (deep) {
+            if (original->pViewportDepths) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_CUSTOM_RESOLVE_CREATE_INFO_EXT: {
+        if (!(kind & 768)) return {};
+        auto original = reinterpret_cast<const VkCustomResolveCreateInfoEXT*>(node);
+        auto owned = std::make_shared<VkCustomResolveCreateInfoEXT>(*original);
+        if (deep) {
+            if (original->pColorAttachmentFormats) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     case VK_STRUCTURE_TYPE_D3D12_FENCE_SUBMIT_INFO_KHR: {
         if (!(kind & 1)) return {};
@@ -21,11 +135,36 @@ static std::shared_ptr<VkBaseOutStructure> clone_input_node(const VkBaseInStruct
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
 #endif
+    case VK_STRUCTURE_TYPE_DEDICATED_ALLOCATION_MEMORY_ALLOCATE_INFO_NV: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkDedicatedAllocationMemoryAllocateInfoNV*>(node);
+        auto owned = std::make_shared<VkDedicatedAllocationMemoryAllocateInfoNV>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
     case VK_STRUCTURE_TYPE_DEVICE_GROUP_BIND_SPARSE_INFO: {
         if (!(kind & 4)) return {};
         auto original = reinterpret_cast<const VkDeviceGroupBindSparseInfo*>(node);
         auto owned = std::make_shared<VkDeviceGroupBindSparseInfo>(*original);
         if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_DEVICE_GROUP_COMMAND_BUFFER_BEGIN_INFO: {
+        if (!(kind & 8)) return {};
+        auto original = reinterpret_cast<const VkDeviceGroupCommandBufferBeginInfo*>(node);
+        auto owned = std::make_shared<VkDeviceGroupCommandBufferBeginInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_DEVICE_GROUP_RENDER_PASS_BEGIN_INFO: {
+        if (!(kind & 16)) return {};
+        auto original = reinterpret_cast<const VkDeviceGroupRenderPassBeginInfo*>(node);
+        auto owned = std::make_shared<VkDeviceGroupRenderPassBeginInfo>(*original);
+        if (deep) {
+            if (original->pDeviceRenderAreas) return {}; // This input kind only supports immediate calls.
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
@@ -40,9 +179,47 @@ static std::shared_ptr<VkBaseOutStructure> clone_input_node(const VkBaseInStruct
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
+    case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkExportMemoryAllocateInfo*>(node);
+        auto owned = std::make_shared<VkExportMemoryAllocateInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO_NV: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkExportMemoryAllocateInfoNV*>(node);
+        auto owned = std::make_shared<VkExportMemoryAllocateInfoNV>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    case VK_STRUCTURE_TYPE_EXPORT_MEMORY_WIN32_HANDLE_INFO_KHR: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkExportMemoryWin32HandleInfoKHR*>(node);
+        auto owned = std::make_shared<VkExportMemoryWin32HandleInfoKHR>(*original);
+        if (deep) {
+            if (original->pAttributes) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    case VK_STRUCTURE_TYPE_EXPORT_MEMORY_WIN32_HANDLE_INFO_NV: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkExportMemoryWin32HandleInfoNV*>(node);
+        auto owned = std::make_shared<VkExportMemoryWin32HandleInfoNV>(*original);
+        if (deep) {
+            if (original->pAttributes) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
 #if defined(VK_USE_PLATFORM_METAL_EXT)
     case VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT: {
-        if (!(kind & 2)) return {};
+        if (!(kind & 4130)) return {};
         auto original = reinterpret_cast<const VkExportMetalObjectCreateInfoEXT*>(node);
         auto owned = std::make_shared<VkExportMetalObjectCreateInfoEXT>(*original);
         if (deep) {
@@ -69,6 +246,26 @@ static std::shared_ptr<VkBaseOutStructure> clone_input_node(const VkBaseInStruct
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
 #endif
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) || defined(__ANDROID__)
+    case VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID: {
+        if (!(kind & 768)) return {};
+        auto original = reinterpret_cast<const VkExternalFormatANDROID*>(node);
+        auto owned = std::make_shared<VkExternalFormatANDROID>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+#if defined(VK_USE_PLATFORM_OHOS)
+    case VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_OHOS: {
+        if (!(kind & 768)) return {};
+        auto original = reinterpret_cast<const VkExternalFormatOHOS*>(node);
+        auto owned = std::make_shared<VkExternalFormatOHOS>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
     case VK_STRUCTURE_TYPE_FRAME_BOUNDARY_EXT: {
         if (!(kind & 5)) return {};
         auto original = reinterpret_cast<const VkFrameBoundaryEXT*>(node);
@@ -89,12 +286,189 @@ static std::shared_ptr<VkBaseOutStructure> clone_input_node(const VkBaseInStruct
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
+    case VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkGraphicsPipelineLibraryCreateInfoEXT*>(node);
+        auto owned = std::make_shared<VkGraphicsPipelineLibraryCreateInfoEXT>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_SHADER_GROUPS_CREATE_INFO_NV: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkGraphicsPipelineShaderGroupsCreateInfoNV*>(node);
+        auto owned = std::make_shared<VkGraphicsPipelineShaderGroupsCreateInfoNV>(*original);
+        if (deep) {
+            if (original->pGroups) return {}; // This input kind only supports immediate calls.
+            if (original->pPipelines) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_IMAGE_VIEW_ASTC_DECODE_MODE_EXT: {
+        if (!(kind & 4096)) return {};
+        auto original = reinterpret_cast<const VkImageViewASTCDecodeModeEXT*>(node);
+        auto owned = std::make_shared<VkImageViewASTCDecodeModeEXT>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT: {
+        if (!(kind & 4096)) return {};
+        auto original = reinterpret_cast<const VkImageViewMinLodCreateInfoEXT*>(node);
+        auto owned = std::make_shared<VkImageViewMinLodCreateInfoEXT>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_IMAGE_VIEW_SAMPLE_WEIGHT_CREATE_INFO_QCOM: {
+        if (!(kind & 4096)) return {};
+        auto original = reinterpret_cast<const VkImageViewSampleWeightCreateInfoQCOM*>(node);
+        auto owned = std::make_shared<VkImageViewSampleWeightCreateInfoQCOM>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_IMAGE_VIEW_SLICED_CREATE_INFO_EXT: {
+        if (!(kind & 4096)) return {};
+        auto original = reinterpret_cast<const VkImageViewSlicedCreateInfoEXT*>(node);
+        auto owned = std::make_shared<VkImageViewSlicedCreateInfoEXT>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR: {
+        if (!(kind & 4096)) return {};
+        auto original = reinterpret_cast<const VkImageViewUsage2CreateInfoKHR*>(node);
+        auto owned = std::make_shared<VkImageViewUsage2CreateInfoKHR>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO: {
+        if (!(kind & 4096)) return {};
+        auto original = reinterpret_cast<const VkImageViewUsageCreateInfo*>(node);
+        auto owned = std::make_shared<VkImageViewUsageCreateInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) || defined(__ANDROID__)
+    case VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportAndroidHardwareBufferInfoANDROID*>(node);
+        auto owned = std::make_shared<VkImportAndroidHardwareBufferInfoANDROID>(*original);
+        if (deep) {
+            if (original->buffer) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+    case VK_STRUCTURE_TYPE_IMPORT_MEMORY_BUFFER_COLLECTION_FUCHSIA: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportMemoryBufferCollectionFUCHSIA*>(node);
+        auto owned = std::make_shared<VkImportMemoryBufferCollectionFUCHSIA>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+    case VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportMemoryFdInfoKHR*>(node);
+        auto owned = std::make_shared<VkImportMemoryFdInfoKHR>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportMemoryHostPointerInfoEXT*>(node);
+        auto owned = std::make_shared<VkImportMemoryHostPointerInfoEXT>(*original);
+        if (deep) {
+            if (original->pHostPointer) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+    case VK_STRUCTURE_TYPE_IMPORT_MEMORY_METAL_HANDLE_INFO_EXT: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportMemoryMetalHandleInfoEXT*>(node);
+        auto owned = std::make_shared<VkImportMemoryMetalHandleInfoEXT>(*original);
+        if (deep) {
+            if (original->handle) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    case VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportMemoryWin32HandleInfoKHR*>(node);
+        auto owned = std::make_shared<VkImportMemoryWin32HandleInfoKHR>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    case VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_NV: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportMemoryWin32HandleInfoNV*>(node);
+        auto owned = std::make_shared<VkImportMemoryWin32HandleInfoNV>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+#if defined(VK_USE_PLATFORM_FUCHSIA)
+    case VK_STRUCTURE_TYPE_IMPORT_MEMORY_ZIRCON_HANDLE_INFO_FUCHSIA: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportMemoryZirconHandleInfoFUCHSIA*>(node);
+        auto owned = std::make_shared<VkImportMemoryZirconHandleInfoFUCHSIA>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+#if defined(VK_USE_PLATFORM_METAL_EXT)
+    case VK_STRUCTURE_TYPE_IMPORT_METAL_BUFFER_INFO_EXT: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportMetalBufferInfoEXT*>(node);
+        auto owned = std::make_shared<VkImportMetalBufferInfoEXT>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
 #if defined(VK_USE_PLATFORM_METAL_EXT)
     case VK_STRUCTURE_TYPE_IMPORT_METAL_SHARED_EVENT_INFO_EXT: {
         if (!(kind & 2)) return {};
         auto original = reinterpret_cast<const VkImportMetalSharedEventInfoEXT*>(node);
         auto owned = std::make_shared<VkImportMetalSharedEventInfoEXT>(*original);
         if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+#if defined(VK_USE_PLATFORM_OHOS)
+    case VK_STRUCTURE_TYPE_IMPORT_NATIVE_BUFFER_INFO_OHOS: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportNativeBufferInfoOHOS*>(node);
+        auto owned = std::make_shared<VkImportNativeBufferInfoOHOS>(*original);
+        if (deep) {
+            if (original->buffer) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+#endif
+#if defined(VK_USE_PLATFORM_SCREEN_QNX)
+    case VK_STRUCTURE_TYPE_IMPORT_SCREEN_BUFFER_INFO_QNX: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkImportScreenBufferInfoQNX*>(node);
+        auto owned = std::make_shared<VkImportScreenBufferInfoQNX>(*original);
+        if (deep) {
+            if (original->buffer) return {}; // This input kind only supports immediate calls.
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
@@ -107,10 +481,186 @@ static std::shared_ptr<VkBaseOutStructure> clone_input_node(const VkBaseInStruct
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
+    case VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkMemoryAllocateFlagsInfo*>(node);
+        auto owned = std::make_shared<VkMemoryAllocateFlagsInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkMemoryDedicatedAllocateInfo*>(node);
+        auto owned = std::make_shared<VkMemoryDedicatedAllocateInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_TENSOR_ARM: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkMemoryDedicatedAllocateInfoTensorARM*>(node);
+        auto owned = std::make_shared<VkMemoryDedicatedAllocateInfoTensorARM>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkMemoryOpaqueCaptureAddressAllocateInfo*>(node);
+        auto owned = std::make_shared<VkMemoryOpaqueCaptureAddressAllocateInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT: {
+        if (!(kind & 32)) return {};
+        auto original = reinterpret_cast<const VkMemoryPriorityAllocateInfoEXT*>(node);
+        auto owned = std::make_shared<VkMemoryPriorityAllocateInfoEXT>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_MULTIVIEW_PER_VIEW_ATTRIBUTES_INFO_NVX: {
+        if (!(kind & 768)) return {};
+        auto original = reinterpret_cast<const VkMultiviewPerViewAttributesInfoNVX*>(node);
+        auto owned = std::make_shared<VkMultiviewPerViewAttributesInfoNVX>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_MULTIVIEW_PER_VIEW_RENDER_AREAS_RENDER_PASS_BEGIN_INFO_QCOM: {
+        if (!(kind & 16)) return {};
+        auto original = reinterpret_cast<const VkMultiviewPerViewRenderAreasRenderPassBeginInfoQCOM*>(node);
+        auto owned = std::make_shared<VkMultiviewPerViewRenderAreasRenderPassBeginInfoQCOM>(*original);
+        if (deep) {
+            if (original->pPerViewRenderAreas) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT: {
+        if (!(kind & 4096)) return {};
+        auto original = reinterpret_cast<const VkOpaqueCaptureDescriptorDataCreateInfoEXT*>(node);
+        auto owned = std::make_shared<VkOpaqueCaptureDescriptorDataCreateInfoEXT>(*original);
+        if (deep) {
+            if (original->opaqueCaptureDescriptorData) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
     case VK_STRUCTURE_TYPE_PERFORMANCE_QUERY_SUBMIT_INFO_KHR: {
         if (!(kind & 1)) return {};
         auto original = reinterpret_cast<const VkPerformanceQuerySubmitInfoKHR*>(node);
         auto owned = std::make_shared<VkPerformanceQuerySubmitInfoKHR>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_BINARY_INFO_KHR: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineBinaryInfoKHR*>(node);
+        auto owned = std::make_shared<VkPipelineBinaryInfoKHR>(*original);
+        if (deep) {
+            if (original->pPipelineBinaries) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_COMPILER_CONTROL_CREATE_INFO_AMD: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineCompilerControlCreateInfoAMD*>(node);
+        auto owned = std::make_shared<VkPipelineCompilerControlCreateInfoAMD>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineCreateFlags2CreateInfo*>(node);
+        auto owned = std::make_shared<VkPipelineCreateFlags2CreateInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineCreationFeedbackCreateInfo*>(node);
+        auto owned = std::make_shared<VkPipelineCreationFeedbackCreateInfo>(*original);
+        if (deep) {
+            if (original->pPipelineCreationFeedback) return {}; // This input kind only supports immediate calls.
+            if (original->pPipelineStageCreationFeedbacks) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_DISCARD_RECTANGLE_STATE_CREATE_INFO_EXT: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineDiscardRectangleStateCreateInfoEXT*>(node);
+        auto owned = std::make_shared<VkPipelineDiscardRectangleStateCreateInfoEXT>(*original);
+        if (deep) {
+            if (original->pDiscardRectangles) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_DENSITY_MAP_LAYERED_CREATE_INFO_VALVE: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineFragmentDensityMapLayeredCreateInfoVALVE*>(node);
+        auto owned = std::make_shared<VkPipelineFragmentDensityMapLayeredCreateInfoVALVE>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_ENUM_STATE_CREATE_INFO_NV: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineFragmentShadingRateEnumStateCreateInfoNV*>(node);
+        auto owned = std::make_shared<VkPipelineFragmentShadingRateEnumStateCreateInfoNV>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineFragmentShadingRateStateCreateInfoKHR*>(node);
+        auto owned = std::make_shared<VkPipelineFragmentShadingRateStateCreateInfoKHR>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineLibraryCreateInfoKHR*>(node);
+        auto owned = std::make_shared<VkPipelineLibraryCreateInfoKHR>(*original);
+        if (deep) {
+            if (original->pLibraries) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineRenderingCreateInfo*>(node);
+        auto owned = std::make_shared<VkPipelineRenderingCreateInfo>(*original);
+        if (deep) {
+            if (original->pColorAttachmentFormats) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_REPRESENTATIVE_FRAGMENT_TEST_STATE_CREATE_INFO_NV: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineRepresentativeFragmentTestStateCreateInfoNV*>(node);
+        auto owned = std::make_shared<VkPipelineRepresentativeFragmentTestStateCreateInfoNV>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkPipelineRobustnessCreateInfo*>(node);
+        auto owned = std::make_shared<VkPipelineRobustnessCreateInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO: {
+        if (!(kind & 1024)) return {};
+        auto original = reinterpret_cast<const VkPipelineTessellationDomainOriginStateCreateInfo*>(node);
+        auto owned = std::make_shared<VkPipelineTessellationDomainOriginStateCreateInfo>(*original);
         if (deep) {
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
@@ -132,6 +682,116 @@ static std::shared_ptr<VkBaseOutStructure> clone_input_node(const VkBaseInStruct
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
+    case VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO: {
+        if (!(kind & 16)) return {};
+        auto original = reinterpret_cast<const VkRenderPassAttachmentBeginInfo*>(node);
+        auto owned = std::make_shared<VkRenderPassAttachmentBeginInfo>(*original);
+        if (deep) {
+            if (original->pAttachments) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDER_PASS_FRAGMENT_DENSITY_MAP_CREATE_INFO_EXT: {
+        if (!(kind & 2048)) return {};
+        auto original = reinterpret_cast<const VkRenderPassFragmentDensityMapCreateInfoEXT*>(node);
+        auto owned = std::make_shared<VkRenderPassFragmentDensityMapCreateInfoEXT>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO: {
+        if (!(kind & 2048)) return {};
+        auto original = reinterpret_cast<const VkRenderPassInputAttachmentAspectCreateInfo*>(node);
+        auto owned = std::make_shared<VkRenderPassInputAttachmentAspectCreateInfo>(*original);
+        if (deep) {
+            if (original->pAspectReferences) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO: {
+        if (!(kind & 2048)) return {};
+        auto original = reinterpret_cast<const VkRenderPassMultiviewCreateInfo*>(node);
+        auto owned = std::make_shared<VkRenderPassMultiviewCreateInfo>(*original);
+        if (deep) {
+            if (original->pViewMasks) return {}; // This input kind only supports immediate calls.
+            if (original->pViewOffsets) return {}; // This input kind only supports immediate calls.
+            if (original->pCorrelationMasks) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDER_PASS_PERFORMANCE_COUNTERS_BY_REGION_BEGIN_INFO_ARM: {
+        if (!(kind & 16)) return {};
+        auto original = reinterpret_cast<const VkRenderPassPerformanceCountersByRegionBeginInfoARM*>(node);
+        auto owned = std::make_shared<VkRenderPassPerformanceCountersByRegionBeginInfoARM>(*original);
+        if (deep) {
+            if (original->pCounterAddresses) return {}; // This input kind only supports immediate calls.
+            if (original->pCounterIndices) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDER_PASS_SAMPLE_LOCATIONS_BEGIN_INFO_EXT: {
+        if (!(kind & 16)) return {};
+        auto original = reinterpret_cast<const VkRenderPassSampleLocationsBeginInfoEXT*>(node);
+        auto owned = std::make_shared<VkRenderPassSampleLocationsBeginInfoEXT>(*original);
+        if (deep) {
+            if (original->pAttachmentInitialSampleLocations) return {}; // This input kind only supports immediate calls.
+            if (original->pPostSubpassSampleLocations) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDER_PASS_STRIPE_BEGIN_INFO_ARM: {
+        if (!(kind & 16)) return {};
+        auto original = reinterpret_cast<const VkRenderPassStripeBeginInfoARM*>(node);
+        auto owned = std::make_shared<VkRenderPassStripeBeginInfoARM>(*original);
+        if (deep) {
+            if (original->pStripeInfos) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDER_PASS_TILE_SHADING_CREATE_INFO_QCOM: {
+        if (!(kind & 2560)) return {};
+        auto original = reinterpret_cast<const VkRenderPassTileShadingCreateInfoQCOM*>(node);
+        auto owned = std::make_shared<VkRenderPassTileShadingCreateInfoQCOM>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDER_PASS_TRANSFORM_BEGIN_INFO_QCOM: {
+        if (!(kind & 16)) return {};
+        auto original = reinterpret_cast<const VkRenderPassTransformBeginInfoQCOM*>(node);
+        auto owned = std::make_shared<VkRenderPassTransformBeginInfoQCOM>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO: {
+        if (!(kind & 768)) return {};
+        auto original = reinterpret_cast<const VkRenderingAttachmentLocationInfo*>(node);
+        auto owned = std::make_shared<VkRenderingAttachmentLocationInfo>(*original);
+        if (deep) {
+            if (original->pColorAttachmentLocations) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_RENDERING_INPUT_ATTACHMENT_INDEX_INFO: {
+        if (!(kind & 768)) return {};
+        auto original = reinterpret_cast<const VkRenderingInputAttachmentIndexInfo*>(node);
+        auto owned = std::make_shared<VkRenderingInputAttachmentIndexInfo>(*original);
+        if (deep) {
+            if (original->pColorAttachmentInputIndices) return {}; // This input kind only supports immediate calls.
+            if (original->pDepthInputAttachmentIndex) return {}; // This input kind only supports immediate calls.
+            if (original->pStencilInputAttachmentIndex) return {}; // This input kind only supports immediate calls.
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO: {
+        if (!(kind & 4096)) return {};
+        auto original = reinterpret_cast<const VkSamplerYcbcrConversionInfo*>(node);
+        auto owned = std::make_shared<VkSamplerYcbcrConversionInfo>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
     case VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO: {
         if (!(kind & 2)) return {};
         auto original = reinterpret_cast<const VkSemaphoreTypeCreateInfo*>(node);
@@ -148,6 +808,22 @@ static std::shared_ptr<VkBaseOutStructure> clone_input_node(const VkBaseInStruct
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }
+    case VK_STRUCTURE_TYPE_TILE_MEMORY_BIND_INFO_QCOM: {
+        if (!(kind & 512)) return {};
+        auto original = reinterpret_cast<const VkTileMemoryBindInfoQCOM*>(node);
+        auto owned = std::make_shared<VkTileMemoryBindInfoQCOM>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_TILE_MEMORY_SIZE_INFO_QCOM: {
+        if (!(kind & 2048)) return {};
+        auto original = reinterpret_cast<const VkTileMemorySizeInfoQCOM*>(node);
+        auto owned = std::make_shared<VkTileMemorySizeInfoQCOM>(*original);
+        if (deep) {
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
     case VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO: {
         if (!(kind & 5)) return {};
         auto original = reinterpret_cast<const VkTimelineSemaphoreSubmitInfo*>(node);
@@ -155,6 +831,16 @@ static std::shared_ptr<VkBaseOutStructure> clone_input_node(const VkBaseInStruct
         if (deep) {
             owned->pWaitSemaphoreValues = owner.retain_array(original->pWaitSemaphoreValues, original->waitSemaphoreValueCount);
             owned->pSignalSemaphoreValues = owner.retain_array(original->pSignalSemaphoreValues, original->signalSemaphoreValueCount);
+        }
+        return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
+    }
+    case VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT: {
+        if (!(kind & 256)) return {};
+        auto original = reinterpret_cast<const VkValidationFeaturesEXT*>(node);
+        auto owned = std::make_shared<VkValidationFeaturesEXT>(*original);
+        if (deep) {
+            if (original->pEnabledValidationFeatures) return {}; // This input kind only supports immediate calls.
+            if (original->pDisabledValidationFeatures) return {}; // This input kind only supports immediate calls.
         }
         return {owned, reinterpret_cast<VkBaseOutStructure*>(owned.get())};
     }

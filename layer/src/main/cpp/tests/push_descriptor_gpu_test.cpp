@@ -197,7 +197,14 @@ struct Harness {
             vkDestroyInstance(instance, nullptr);
     }
     void run() {
-        setenv("VULKAN_FIX_EMULATE_PUSH_DESCRIPTOR", "force", 1);
+        // VULKAN_FIX_TEST_PUSH_AUTO exercises the measured trust decision instead
+        // of bypassing it. The external harness supplies a probe worker whose
+        // subject fails after READY, so the isolate must select this same
+        // emulated descriptor path.
+        if (getenv("VULKAN_FIX_TEST_PUSH_AUTO"))
+            unsetenv("VULKAN_FIX_EMULATE_PUSH_DESCRIPTOR");
+        else
+            setenv("VULKAN_FIX_EMULATE_PUSH_DESCRIPTOR", "force", 1);
         setenv("VULKAN_FIX_DISABLE_PIPELINE_CACHE", "1", 1);
         setenv("VULKAN_FIX_LOG_PATH", "/data/local/tmp/vulkanfix-core-goal/push-gpu-layer.log", 1);
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
@@ -320,7 +327,10 @@ struct Harness {
         auto push_template = (PFN_vkCmdPushDescriptorSetWithTemplateKHR)vkGetDeviceProcAddr(
             device, "vkCmdPushDescriptorSetWithTemplateKHR");
         require(push && push_template, "push entry points unavailable");
-        for (uint32_t frame = 0; frame < 1000; ++frame) {
+        const char *frames_env = getenv("VULKAN_FIX_TEST_PUSH_FRAMES");
+        const uint32_t frame_count = frames_env ? uint32_t(atoi(frames_env)) : 1000u;
+        require(frame_count > 0, "push frame count must be positive");
+        for (uint32_t frame = 0; frame < frame_count; ++frame) {
             success(vkResetCommandBuffer(cmd, 0), "reset command");
             VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             success(vkBeginCommandBuffer(cmd, &bi), "begin command");
@@ -399,8 +409,8 @@ struct Harness {
                 throw std::runtime_error("depth-image/partial descriptor snapshot result mismatch");
             }
         }
-        printf("PASS: 1000 GPU frames sample two D32 depth images correctly across partial "
-               "uniform/image and compute-template updates\n");
+        printf("PASS: %u GPU frames sample two D32 depth images correctly across partial "
+               "uniform/image and compute-template updates\n", frame_count);
         printf("PASS: earlier dispatches retain their original image/uniform bindings and command reset remains valid\n");
         printf("Set-layout lifetime mode: %s\n", getenv("VULKAN_FIX_TEST_KEEP_SET_LAYOUT") ?
             "retained until teardown" : "application layout destroyed before dispatch");

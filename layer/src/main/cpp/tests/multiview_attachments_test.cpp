@@ -10,6 +10,8 @@ namespace {
 template<class T> T handle(uint64_t n) { return (T)(uintptr_t)n; }
 unsigned failures = 0, next_handle = 0x10000, conversion_creates = 0;
 bool fail_framebuffer = false;
+bool native_device_group = false;
+std::vector<VkDependencyFlags> last_dependency_flags;
 struct View { VkDevice device; VkImageViewCreateInfo info; VkImageUsageFlags usage; };
 struct Frame { VkDevice device; VkRenderPass pass; uint32_t width, height, layers; std::vector<VkImageView> views; };
 std::map<VkImageView, View> views;
@@ -23,6 +25,13 @@ VKAPI_ATTR VkResult VKAPI_CALL create_pass(VkDevice, const VkRenderPassCreateInf
     if (allocator) return VK_ERROR_UNKNOWN;
     for (auto p = static_cast<const VkBaseInStructure*>(ci->pNext); p; p = p->pNext)
         if (p->sType == VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO) return VK_ERROR_FEATURE_NOT_PRESENT;
+    last_dependency_flags.clear();
+    for (uint32_t i = 0; i < ci->dependencyCount; ++i) {
+        auto flags = ci->pDependencies[i].dependencyFlags;
+        if ((flags & VK_DEPENDENCY_VIEW_LOCAL_BIT) || (!native_device_group && (flags & VK_DEPENDENCY_DEVICE_GROUP_BIT)))
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        last_dependency_flags.push_back(flags);
+    }
     *out = handle<VkRenderPass>(++next_handle); passes.insert(*out); return VK_SUCCESS;
 }
 VKAPI_ATTR void VKAPI_CALL destroy_pass(VkDevice, VkRenderPass pass, const VkAllocationCallbacks*) { passes.erase(pass); }
@@ -130,6 +139,42 @@ int main() {
     VkRenderPassCreateInfo pci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO}; pci.pNext = &mv; pci.attachmentCount = 2; pci.pAttachments = descriptions; pci.subpassCount = 1; pci.pSubpasses = &subpass;
     VkRenderPass public_pass{}, compatible{}; VkResult status{};
     auto& render_passes = MultiviewRenderPasses::get();
+    VkSubpassDependency dependency{0,0,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
+        VK_DEPENDENCY_BY_REGION_BIT | VK_DEPENDENCY_VIEW_LOCAL_BIT | VK_DEPENDENCY_DEVICE_GROUP_BIT};
+    auto group_ci = pci; group_ci.dependencyCount = 1; group_ci.pDependencies = &dependency;
+    VkAttachmentDescription2 group_attachments[2]{};
+    for (uint32_t i = 0; i < 2; ++i) {
+        auto& a = group_attachments[i]; a.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+        a.format = descriptions[i].format; a.samples = descriptions[i].samples;
+        a.loadOp = descriptions[i].loadOp; a.storeOp = descriptions[i].storeOp;
+        a.initialLayout = descriptions[i].initialLayout; a.finalLayout = descriptions[i].finalLayout;
+    }
+    VkAttachmentReference2 group_color{VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2}; group_color.attachment = color.attachment; group_color.layout = color.layout;
+    VkSubpassDescription2 group_subpass{VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2}; group_subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    group_subpass.viewMask = mask; group_subpass.colorAttachmentCount = 1; group_subpass.pColorAttachments = &group_color;
+    VkSubpassDependency2 group_dependency{VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2};
+    group_dependency.srcStageMask = dependency.srcStageMask; group_dependency.dstStageMask = dependency.dstStageMask;
+    group_dependency.srcAccessMask = dependency.srcAccessMask; group_dependency.dstAccessMask = dependency.dstAccessMask;
+    group_dependency.dependencyFlags = dependency.dependencyFlags;
+    VkRenderPassCreateInfo2 group_ci2{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2}; group_ci2.attachmentCount = 2; group_ci2.pAttachments = group_attachments;
+    group_ci2.subpassCount = group_ci2.dependencyCount = 1; group_ci2.pSubpasses = &group_subpass; group_ci2.pDependencies = &group_dependency;
+    for (bool version2 : {false,true}) for (bool group : {false,true}) {
+        native_device_group = group;
+        const std::vector<VkDependencyFlags> expected{VK_DEPENDENCY_BY_REGION_BIT | (group ? VK_DEPENDENCY_DEVICE_GROUP_BIT : 0u)};
+        VkRenderPass routed{};
+        const bool handled = version2 ? render_passes.create_fallback(device,&group_ci2,nullptr,&routed,true,status,group) :
+            render_passes.create_fallback(device,&group_ci,nullptr,&routed,true,status,group);
+        check(handled && status == VK_SUCCESS && last_dependency_flags == expected,
+            "legacy/RP2 representative respects the enabled device-group route and preserves BY_REGION");
+        auto resource = render_passes.acquire(device,routed); VkRenderPass private_pass{};
+        check(resource && resource->native_pass(0,2,true,true,true,private_pass) == VK_SUCCESS && last_dependency_flags == expected,
+            "lazy native view pass applies the same device-group dependency normalization");
+        check(resource && resource->plan()->dependencies[0].info.dependencyFlags == dependency.dependencyFlags,
+            "native dependency normalization leaves the immutable logical plan unchanged");
+        render_passes.forget(device,routed); resource.reset(); destroy_pass(device,routed,nullptr);
+    }
+    native_device_group = false;
     check(render_passes.create_fallback(device, &pci, nullptr, &public_pass, true, status) && status == VK_SUCCESS, "capture multiview pass");
     check(render_passes.create_fallback(device, &pci, nullptr, &compatible, true, status) && status == VK_SUCCESS, "capture compatible active pass");
     VkImageView attachments[] = {unused, used};
@@ -259,6 +304,50 @@ int main() {
     begin.renderPass = empty_pass; begin.framebuffer = empty_fb; begin.pNext = nullptr;
     check(registry.native_framebuffer(device, begin, 0, 2, true, true, true, native) == VK_SUCCESS &&
         frames.at(native).views.empty(), "attachmentless imageless pass needs no attachment-begin structure");
+
+    {
+        auto ordinary_ci = group_ci; ordinary_ci.pNext = nullptr;
+        ordinary_ci.dependencyCount = 0; ordinary_ci.pDependencies = nullptr;
+        auto ordinary_subpass = subpass; ordinary_subpass.colorAttachmentCount = 1; ordinary_subpass.pColorAttachments = &color;
+        ordinary_ci.pSubpasses = &ordinary_subpass;
+        check(!MultiviewPassPlan::capture(&ordinary_ci), "ordinary passes keep their native fast path unless explicitly captured");
+        const auto ordinary_plan = MultiviewPassPlan::capture(&ordinary_ci,true);
+        check(ordinary_plan && !ordinary_plan->multiview && ordinary_plan->subpasses[0].view_mask == 0 &&
+            ordinary_plan->replay_mask(0) == 1 && ordinary_plan->lifetimes[1].first[0] == 0,
+            "ordinary layered pass has one replay group without fabricating a logical multiview mask");
+        VkRenderPass ordinary_pass{};
+        check(render_passes.create_fallback(device,&ordinary_ci,nullptr,&ordinary_pass,true,status,false,true) && status == VK_SUCCESS,
+            "explicitly capture an ordinary legacy pass for attachment lowering");
+        const auto array = handle<VkImage>(0x940); const auto array_view = handle<VkImageView>(0x950);
+        auto array_ci = ici; array_ci.imageType = VK_IMAGE_TYPE_2D; array_ci.arrayLayers = 48;
+        registry.remember_image(device,array,array_ci);
+        VkImageViewCreateInfo array_vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO}; array_vi.image = array;
+        array_vi.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY; array_vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+        array_vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,1,1,3,45};
+        registry.remember_view(device,array_view,array_vi);
+        VkImageView ordinary_views[] = {array_view,array_view};
+        auto ordinary_fb_ci = fci; ordinary_fb_ci.flags = 0; ordinary_fb_ci.renderPass = ordinary_pass;
+        ordinary_fb_ci.attachmentCount = 2; ordinary_fb_ci.pAttachments = ordinary_views; ordinary_fb_ci.layers = 40;
+        const auto ordinary_fb = handle<VkFramebuffer>(0x960); registry.remember_framebuffer(device,ordinary_fb,ordinary_fb_ci);
+        auto ordinary_begin = begin; ordinary_begin.renderPass = ordinary_pass; ordinary_begin.framebuffer = ordinary_fb;
+        check(registry.native_framebuffer(device,ordinary_begin,0,0,true,true,true,native) == VK_SUCCESS &&
+            frames.at(native).layers == 40 && frames.at(native).views.size() == 1 &&
+            views.at(frames.at(native).views[0]).info.subresourceRange.baseArrayLayer == 3 &&
+            views.at(frames.at(native).views[0]).info.subresourceRange.layerCount == 45,
+            "ordinary framebuffer preserves more than32 native layers and the original view base/range");
+        transitions.clear();
+        check(registry.acquire_view(device,array_view)->layout_barriers(1,false,VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,transitions,40) == VK_SUCCESS && transitions.size() == 1 &&
+            transitions[0].subresourceRange.baseArrayLayer == 3 && transitions[0].subresourceRange.layerCount == 40,
+            "unused ordinary attachments transition framebuffer.layers rather than one simulated view");
+        registry.forget_framebuffer(device,ordinary_fb); registry.forget_view(device,array_view); registry.forget_image(device,array);
+        render_passes.forget(device,ordinary_pass); destroy_pass(device,ordinary_pass,nullptr);
+        auto ordinary_ci2 = group_ci2; ordinary_ci2.dependencyCount = 0;
+        auto ordinary_subpass2 = group_subpass; ordinary_subpass2.viewMask = 0; ordinary_ci2.pSubpasses = &ordinary_subpass2;
+        const auto ordinary2 = MultiviewPassPlan::capture(&ordinary_ci2,true);
+        check(ordinary2 && !ordinary2->multiview && ordinary2->replay_mask(0) == 1 && ordinary2->chunk(0,0,true,true).colors.size() == 1,
+            "renderpass2 ordinary plans retain zero viewMask and produce the same single native chunk");
+    }
 
     registry.forget_framebuffer(device, public_fb);
     check(retained_fb->native_framebuffer(render_passes.acquire(device, public_pass), 0, 4, true, true, true,

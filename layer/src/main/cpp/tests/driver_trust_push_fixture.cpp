@@ -12,9 +12,13 @@
 #include <vector>
 
 namespace {
+void *native_library() {
+    static auto library=dlopen("libvulkan.so",RTLD_NOW|RTLD_LOCAL);
+    return library;
+}
 PFN_vkGetInstanceProcAddr native() {
     static auto proc=[] {
-        auto library=dlopen("libvulkan.so",RTLD_NOW|RTLD_LOCAL);
+        auto library=native_library();
         return library ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(library,"vkGetInstanceProcAddr")) : nullptr;
     }();
     return proc;
@@ -24,6 +28,8 @@ PFN_vkCreateDevice create_device{};
 PFN_vkEnumerateDeviceExtensionProperties enumerate_extensions{};
 VkDevice device{};
 std::unordered_map<VkPipelineLayout,std::vector<VkDescriptorSetLayout>> layouts;
+std::unordered_map<VkDescriptorSetLayout,std::vector<VkDescriptorSetLayoutBinding>> set_bindings;
+std::unordered_map<VkCommandBuffer,std::unordered_map<VkPipelineLayout,VkDescriptorSet>> pushed;
 std::vector<VkDescriptorPool> pools;
 template<class T> T dev(const char *name) { return reinterpret_cast<T>(gdpa(device,name)); }
 bool fault(const char *value) {
@@ -64,7 +70,9 @@ VKAPI_ATTR VkResult VKAPI_CALL create(VkPhysicalDevice physical,const VkDeviceCr
 }
 VKAPI_ATTR VkResult VKAPI_CALL set_layout(VkDevice d,const VkDescriptorSetLayoutCreateInfo *info,const VkAllocationCallbacks *allocator,VkDescriptorSetLayout *out) {
     auto modified=*info; modified.flags&=~VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-    return dev<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(d,&modified,allocator,out);
+    const auto result=dev<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(d,&modified,allocator,out);
+    if (result==VK_SUCCESS && info->bindingCount) set_bindings[*out]={info->pBindings,info->pBindings+info->bindingCount};
+    return result;
 }
 VKAPI_ATTR VkResult VKAPI_CALL pipeline_layout(VkDevice d,const VkPipelineLayoutCreateInfo *info,const VkAllocationCallbacks *allocator,VkPipelineLayout *out) {
     auto result=dev<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(d,info,allocator,out);
@@ -73,7 +81,7 @@ VKAPI_ATTR VkResult VKAPI_CALL pipeline_layout(VkDevice d,const VkPipelineLayout
 }
 VKAPI_ATTR void VKAPI_CALL destroy(VkDevice d,const VkAllocationCallbacks *allocator) {
     for (auto pool:pools) dev<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool")(d,pool,nullptr);
-    pools.clear(); layouts.clear();
+    pools.clear(); layouts.clear(); set_bindings.clear(); pushed.clear();
     dev<PFN_vkDestroyDevice>("vkDestroyDevice")(d,allocator);
 }
 VKAPI_ATTR void VKAPI_CALL dispatch(VkCommandBuffer cb,uint32_t x,uint32_t y,uint32_t z) {
@@ -81,18 +89,32 @@ VKAPI_ATTR void VKAPI_CALL dispatch(VkCommandBuffer cb,uint32_t x,uint32_t y,uin
         (fault("subject-mismatch") && phase("push-subject"))) return;
     dev<PFN_vkCmdDispatch>("vkCmdDispatch")(cb,x,y,z);
 }
+VKAPI_ATTR VkResult VKAPI_CALL shader(VkDevice d,const VkShaderModuleCreateInfo *info,
+                                     const VkAllocationCallbacks *allocator,VkShaderModule *out) {
+    if (fault("uniform-crash") && phase("uniform")) raise(SIGSEGV);
+    return dev<PFN_vkCreateShaderModule>("vkCreateShaderModule")(d,info,allocator,out);
+}
 VKAPI_ATTR void VKAPI_CALL push(VkCommandBuffer cb,VkPipelineBindPoint bind,VkPipelineLayout layout,uint32_t index,uint32_t count,const VkWriteDescriptorSet *writes) {
     if (fault("subject-crash")) raise(SIGSEGV);
-    VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1};
-    VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; ci.maxSets=1; ci.poolSizeCount=1; ci.pPoolSizes=&size;
-    VkDescriptorPool pool{};
-    if (dev<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(device,&ci,nullptr,&pool)!=VK_SUCCESS) std::abort();
-    pools.push_back(pool);
-    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO}; ai.descriptorPool=pool; ai.descriptorSetCount=1;
+    if (fault("graphics-subject-crash") && bind==VK_PIPELINE_BIND_POINT_GRAPHICS) raise(SIGSEGV);
+    if (fault("vertex-subject-crash") && phase("push-vertex-subject")) raise(SIGSEGV);
     if (!layouts.count(layout) || index>=layouts[layout].size()) std::abort();
-    ai.pSetLayouts=&layouts[layout][index];
-    VkDescriptorSet set{};
-    if (dev<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(device,&ai,&set)!=VK_SUCCESS) std::abort();
+    auto &set=pushed[cb][layout];
+    if (!set) {
+        std::vector<VkDescriptorPoolSize> sizes;
+        for (const auto &binding:set_bindings[layouts[layout][index]]) sizes.push_back({binding.descriptorType,binding.descriptorCount});
+        VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        ci.maxSets=1; ci.poolSizeCount=uint32_t(sizes.size()); ci.pPoolSizes=sizes.data();
+        VkDescriptorPool pool{};
+        if (dev<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(device,&ci,nullptr,&pool)!=VK_SUCCESS) std::abort();
+        pools.push_back(pool);
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO}; ai.descriptorPool=pool; ai.descriptorSetCount=1;
+        ai.pSetLayouts=&layouts[layout][index];
+        if (dev<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(device,&ai,&set)!=VK_SUCCESS) std::abort();
+    }
+    // Fixture workload records both full and partial writes before its only
+    // draw; no previously recorded draw consumes this mutable native set.
+    if (fault("graphics-drop-partial") && bind==VK_PIPELINE_BIND_POINT_GRAPHICS && count==1) return;
     std::vector<VkWriteDescriptorSet> updates(writes,writes+count);
     for (auto &write:updates) write.dstSet=set;
     dev<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets")(device,count,updates.data(),0,nullptr);
@@ -104,21 +126,38 @@ bool suppress_tiler_draw() {
            (fault("subject-mismatch") && phase("tiler-subject"));
 }
 VKAPI_ATTR void VKAPI_CALL draw(VkCommandBuffer cb,uint32_t vertices,uint32_t instances,uint32_t first,uint32_t first_instance) {
+    if ((fault("graphics-subject-mismatch") && phase("push-graphics-subject")) ||
+        (fault("graphics-control-mismatch") && phase("push-graphics-control"))) return;
+    if ((fault("vertex-subject-mismatch") && phase("push-vertex-subject")) ||
+        (fault("vertex-control-mismatch") && phase("push-vertex-control")) ||
+        (fault("stage-mask-subject-mismatch") && phase("push-vertex-compute-subject"))) return;
     if (!suppress_tiler_draw()) dev<PFN_vkCmdDraw>("vkCmdDraw")(cb,vertices,instances,first,first_instance);
 }
 VKAPI_ATTR void VKAPI_CALL indirect(VkCommandBuffer cb,VkBuffer buffer,VkDeviceSize offset,uint32_t count,uint32_t stride) {
     if (!suppress_tiler_draw()) dev<PFN_vkCmdDrawIndirect>("vkCmdDrawIndirect")(cb,buffer,offset,count,stride);
+}
+VKAPI_ATTR void VKAPI_CALL copy_buffer(VkCommandBuffer cb,VkBuffer from,VkBuffer to,uint32_t count,const VkBufferCopy *regions) {
+    if (fault("timeline-drop-copy") && phase("timeline-subject")) return;
+    dev<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(cb,from,to,count,regions);
 }
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL get_device(VkDevice d,const char *name) {
     if (!std::strcmp(name,"vkCreateDescriptorSetLayout")) return reinterpret_cast<PFN_vkVoidFunction>(set_layout);
     if (!std::strcmp(name,"vkCreatePipelineLayout")) return reinterpret_cast<PFN_vkVoidFunction>(pipeline_layout);
     if (!std::strcmp(name,"vkCmdPushDescriptorSetKHR")) return reinterpret_cast<PFN_vkVoidFunction>(push);
     if (!std::strcmp(name,"vkCmdDispatch")) return reinterpret_cast<PFN_vkVoidFunction>(dispatch);
+    if (!std::strcmp(name,"vkCreateShaderModule")) return reinterpret_cast<PFN_vkVoidFunction>(shader);
     if (!std::strcmp(name,"vkDestroyDevice")) return reinterpret_cast<PFN_vkVoidFunction>(destroy);
     if (!std::strcmp(name,"vkCmdDraw")) return reinterpret_cast<PFN_vkVoidFunction>(draw);
     if (!std::strcmp(name,"vkCmdDrawIndirect")) return reinterpret_cast<PFN_vkVoidFunction>(indirect);
+    if (!std::strcmp(name,"vkCmdCopyBuffer")) return reinterpret_cast<PFN_vkVoidFunction>(copy_buffer);
     return gdpa(d,name);
 }
+}
+extern "C" __attribute__((visibility("default"))) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+vkGetDeviceProcAddr(VkDevice d,const char *name) {
+    if (!gdpa && native_library())
+        gdpa=reinterpret_cast<PFN_vkGetDeviceProcAddr>(dlsym(native_library(),"vkGetDeviceProcAddr"));
+    return gdpa && name ? get_device(d,name) : nullptr;
 }
 extern "C" __attribute__((visibility("default"))) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vkGetInstanceProcAddr(VkInstance instance,const char *name) {
@@ -132,7 +171,7 @@ vkGetInstanceProcAddr(VkInstance instance,const char *name) {
         return reinterpret_cast<PFN_vkVoidFunction>(create);
     }
     if (!std::strcmp(name,"vkGetDeviceProcAddr")) {
-        gdpa=reinterpret_cast<PFN_vkGetDeviceProcAddr>(gipa(instance,name));
+        if (auto proc=gipa(instance,name)) gdpa=reinterpret_cast<PFN_vkGetDeviceProcAddr>(proc);
         return reinterpret_cast<PFN_vkVoidFunction>(get_device);
     }
     return gipa(instance,name);

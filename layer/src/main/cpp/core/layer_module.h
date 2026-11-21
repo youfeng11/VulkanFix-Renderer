@@ -119,6 +119,7 @@ public:
     virtual void on_post_create_descriptor_set_layout(
         VkDevice device,
         const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+        const VkDescriptorSetLayoutCreateInfo& nativeCreateInfo,
         VkResult result,
         VkDescriptorSetLayout setLayout) {}
 

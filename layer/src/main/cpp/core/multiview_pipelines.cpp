@@ -10,7 +10,7 @@ MultiviewPipelineVariants::MultiviewPipelineVariants(VkDevice device,
     std::shared_ptr<MultiviewPassResources> pass, uint32_t subpass,
     PFN_vkDestroyPipeline destroy, const VkAllocationCallbacks* allocator)
     : device_(device), pass_(std::move(pass)), subpass_(subpass),
-      view_mask_(pass_->plan()->subpasses.at(subpass).view_mask), destroy_(destroy) {
+      view_mask_(pass_->plan()->replay_mask(subpass)), destroy_(destroy) {
     if (allocator) allocator_ = *allocator;
 }
 MultiviewPipelineVariants::~MultiviewPipelineVariants() { release(); }
@@ -86,7 +86,7 @@ bool MultiviewPipelines::create(VkDevice device, VkPipelineCache cache, uint32_t
     const VkGraphicsPipelineCreateInfo* infos, const VkAllocationCallbacks* allocator,
     VkPipeline* pipelines, VkResult& result, PFN_vkCreateGraphicsPipelines create,
     PFN_vkDestroyPipeline destroy, PFN_vkCreateShaderModule create_shader, PFN_vkDestroyShaderModule destroy_shader, uint32_t routes) {
-    if ((routes & NativeMultiview) || !infos || !pipelines || !count) return false;
+    if (!infos || !pipelines || !count) return false;
     bool handles = false;
     for (uint32_t i = 0; i < count; ++i)
         if (auto pass = MultiviewRenderPasses::get().acquire(device, infos[i].renderPass))

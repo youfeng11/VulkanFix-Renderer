@@ -1,5 +1,6 @@
 #include "shader/shader_rewriter.h"
 #include "shader/storage_buffer_lowering.h"
+#include "shader/relaxed_block_layout.h"
 
 #include "vk_common.h"
 
@@ -17,6 +18,7 @@ namespace {
 constexpr uint32_t kSpirvMagic = 0x07230203u;
 constexpr size_t kSpirvHeaderWords = 5;
 constexpr size_t kMaxCachedModules = 4096;
+constexpr uint32_t kDiskCacheVersion = 9u;
 
 // Optional capabilities that older drivers frequently reject. They are only
 // dropped when a version downgrade is already happening, and the validator
@@ -292,7 +294,6 @@ ShaderRewriter::~ShaderRewriter() {
 
 void ShaderRewriter::load_disk_cache() {
     constexpr uint32_t kDiskCacheMagic = 0x564B4658u;  // "VKFX"
-    constexpr uint32_t kDiskCacheVersion = 6u;
     FILE* file = std::fopen(m_cache_path.c_str(), "rb");
     if (file == nullptr) return;
 
@@ -342,7 +343,6 @@ void ShaderRewriter::load_disk_cache() {
 void ShaderRewriter::save_disk_cache() {
     if (m_cache_path.empty()) return;
     constexpr uint32_t kDiskCacheMagic = 0x564B4658u;  // "VKFX"
-    constexpr uint32_t kDiskCacheVersion = 6u;
 
     std::lock_guard<std::mutex> lock(m_cache_mutex);
     if (m_cache.empty()) return;
@@ -436,7 +436,10 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     const uint32_t current = code[1];
     const bool legacy_storage = target < 0x00010300u &&
         !(native_extensions & vkfix::NativeStorageBufferClass);
-    if (current <= target && !(legacy_storage &&
+    const bool legacy_layout = target < 0x00010300u &&
+        !(native_extensions & vkfix::NativeRelaxedBlockLayout) &&
+        vkfix::has_block_vectors(code.data(), code.size());
+    if (current <= target && !legacy_layout && !(legacy_storage &&
         vkfix::has_storage_buffer_class(code.data(), code.size()))) return false;
 
     const uint64_t key = hash_code(code, target, native_extensions);
@@ -451,6 +454,13 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     }
 
     std::vector<uint32_t> lowered = code;
+    if (legacy_layout) {
+        std::string error;
+        if (vkfix::lower_relaxed_block_layout(lowered, error) == vkfix::BlockLayoutLowering::Invalid) {
+            LOGW("Block layout lowering rejected: %s", error.c_str());
+            return false;
+        }
+    }
     if (legacy_storage && vkfix::has_storage_buffer_class(lowered.data(), lowered.size())) {
         std::string error;
         const auto result=vkfix::lower_storage_buffer_class(lowered,error);
@@ -472,6 +482,7 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
     uint32_t bool_type_id = 0;
     std::unordered_map<uint32_t, uint32_t> vector_components;
     std::unordered_map<uint32_t, uint32_t> vector_counts;
+    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> matrix_shapes;
     std::unordered_map<uint32_t, uint32_t> value_types;
     uint32_t max_id = 0;
     {
@@ -488,6 +499,8 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
                 vector_components[input[scan + 1]] = input[scan + 2];
                 vector_counts[input[scan + 1]] = input[scan + 3];
                 max_id = std::max(max_id, input[scan + 1]);
+            } else if (scan_opcode == spv::OpTypeMatrix && scan_count == 4) {
+                matrix_shapes[input[scan + 1]] = {input[scan + 2], input[scan + 3]};
             }
             if (scan_opcode == static_cast<uint16_t>(spv::OpVariable) && scan_count >= 4) {
                 variable_storage[input[scan + 2]] = input[scan + 3];
@@ -542,6 +555,13 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
                     break;
                 }
             }
+        } else if (target < 0x00010400u && opcode == spv::OpDecorate && word_count == 3 &&
+                   input[offset + 2] == spv::DecorationNonWritable) {
+            const auto storage = variable_storage.find(input[offset + 1]);
+            // Before 1.4, local and private variables cannot carry this
+            // annotation. Their initialization and accesses are unchanged.
+            drop = storage != variable_storage.end() &&
+                (storage->second == spv::StorageClassFunction || storage->second == spv::StorageClassPrivate);
         }
 
         if (opcode == static_cast<uint16_t>(spv::OpImageFetch) && word_count >= 6) {
@@ -563,13 +583,15 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
                 continue;
             }
         }
-        if (opcode == static_cast<uint16_t>(spv::OpSelect) && word_count >= 6 && bool_type_id != 0) {
+        if (target < 0x00010400u && opcode == spv::OpSelect && word_count == 6 && bool_type_id != 0) {
             const uint32_t result_type = input[offset + 1];
-            auto count_it = vector_counts.find(result_type);
-            auto component_it = vector_components.find(result_type);
+            const auto matrix = matrix_shapes.find(result_type);
+            const bool matrix_select = matrix != matrix_shapes.end();
+            const uint32_t vector_type = matrix_select ? matrix->second.first : result_type;
+            auto count_it = vector_counts.find(vector_type);
             auto condition_it = value_types.find(input[offset + 3]);
-            if (count_it != vector_counts.end() && component_it != vector_components.end() &&
-                condition_it != value_types.end() && condition_it->second == bool_type_id) {
+            const bool scalar_condition = condition_it != value_types.end() && condition_it->second == bool_type_id;
+            if (count_it != vector_counts.end() && (matrix_select || scalar_condition)) {
                 uint32_t bool_vector = 0;
                 for (const auto& vector : vector_counts) {
                     auto component = vector_components.find(vector.first);
@@ -607,9 +629,31 @@ bool ShaderRewriter::rewrite(std::vector<uint32_t>& code, uint32_t targetVersion
                     construct.push_back(construct_id);
                     for (uint32_t i = 0; i < count_it->second; ++i) construct.push_back(condition);
                     output.insert(output.end(), construct.begin(), construct.end());
-                    const size_t select_offset = output.size();
-                    output.insert(output.end(), input.begin() + offset, input.begin() + offset + word_count);
-                    output[select_offset + 3] = construct_id;
+                    if (matrix_select) {
+                        // Matrix OpSelect uses one scalar condition. Select each
+                        // column with that condition and rebuild the matrix.
+                        const uint32_t columns = matrix->second.second;
+                        if (columns < 2 || columns > 4) return false;
+                        uint32_t selected[4]{};
+                        for (uint32_t column = 0; column < columns; ++column) {
+                            const uint32_t yes = ++next_id;
+                            const uint32_t no = ++next_id;
+                            selected[column] = ++next_id;
+                            output.insert(output.end(), {(5u << 16) | spv::OpCompositeExtract,
+                                vector_type, yes, input[offset + 4], column});
+                            output.insert(output.end(), {(5u << 16) | spv::OpCompositeExtract,
+                                vector_type, no, input[offset + 5], column});
+                            output.insert(output.end(), {(6u << 16) | spv::OpSelect,
+                                vector_type, selected[column], construct_id, yes, no});
+                        }
+                        output.insert(output.end(), {((3u + columns) << 16) | spv::OpCompositeConstruct,
+                            result_type, input[offset + 2]});
+                        output.insert(output.end(), selected, selected + columns);
+                    } else {
+                        const size_t select_offset = output.size();
+                        output.insert(output.end(), input.begin() + offset, input.begin() + offset + word_count);
+                        output[select_offset + 3] = construct_id;
+                    }
                     ++replaced_instructions;
                     offset += word_count;
                     continue;

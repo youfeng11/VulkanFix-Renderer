@@ -11,7 +11,7 @@
 
 namespace vkfix {
 // Trust is per defect, never a blanket verdict about a GPU vendor.
-enum class DriverProbeVerdict { Healthy, RepairConfirmed, Inconclusive };
+enum class DriverProbeVerdict { Healthy, RepairConfirmed, DefectObserved, Inconclusive };
 struct DriverProbeAssessment {
     DriverProbeVerdict verdict = DriverProbeVerdict::Inconclusive;
     std::string detail = "not measured";
@@ -34,31 +34,43 @@ struct DriverIdentity {
 };
 DriverIdentity driver_identity(const VkPhysicalDeviceProperties &, uint64_t revision);
 struct DriverIdentityHash { size_t operator()(const DriverIdentity &) const; };
-struct DriverTrustReport {
-    DriverProbeAssessment sampler_aliases;
-    // Further driver-specific probes are migrated independently. An unmeasured
-    // field must never be presented as a healthy driver or a confirmed repair.
-    DriverProbeAssessment large_uniform;
-    DriverProbeAssessment push_descriptor;
-    DriverProbeAssessment tiler_budget;
-};
-
-// Process-local, bounded single-flight memoization. Never hold the map mutex
-// while compiling shaders, submitting GPU work, or waiting on another thread.
+// Process-local single-flight memoization. At capacity, evict the least
+// recently used completed result and retain every measurement in flight.
 class DriverTrustCache {
 public:
     explicit DriverTrustCache(size_t capacity = 32) : capacity_(capacity) {}
-    DriverTrustReport get(const DriverIdentity &, const std::function<DriverTrustReport()> &);
+    DriverProbeAssessment get(const DriverIdentity &, const std::function<DriverProbeAssessment()> &);
     size_t size() const;
 private:
-    struct Entry { std::shared_future<DriverTrustReport> future; std::thread::id owner; };
+    struct Entry {
+        std::shared_future<DriverProbeAssessment> future;
+        std::thread::id owner;
+        uint64_t last_use;
+    };
     size_t capacity_;
+    uint64_t access_count_ = 0;
     mutable std::mutex mutex_;
     std::unordered_map<DriverIdentity, Entry, DriverIdentityHash> entries_;
 };
 
-// Calls native function pointers on a throwaway native device, never VulkanFix
-// interception or an application's queues. Used by both POST and game startup.
-DriverTrustReport native_driver_trust(VkInstance, VkPhysicalDevice,
-                                      PFN_vkGetInstanceProcAddr);
+enum class DriverProbe { SamplerAliases, LargeUniform, PushDescriptor, TilerBudget, MsaaArrayResolve,
+                         CrossFormatImageSlices, RasterizerDiscardState, StorageArrayStatic, StorageArrayDynamic,
+                         DepthStencilResolve, E5BufferTransfer, E5ImageTransfer, Queue2,
+                         TimelineQueue, Sync2Events, Sync2Submit, TimestampQueries, HostQueryReset, Count };
+
+// Resolve the raw driver identity once. Measure and cache each behavior
+// independently so an extension query only runs the probe it depends on.
+class NativeDriverProbes {
+public:
+    NativeDriverProbes(VkInstance, VkPhysicalDevice, PFN_vkGetInstanceProcAddr);
+    DriverProbeAssessment measure(DriverProbe) const;
+    std::string worker_identity() const;
+private:
+    VkInstance instance_;
+    VkPhysicalDevice physical_;
+    PFN_vkGetInstanceProcAddr gipa_;
+    VkPhysicalDeviceProperties properties_{};
+    DriverIdentity identity_;
+    bool valid_ = false;
+};
 } // namespace vkfix

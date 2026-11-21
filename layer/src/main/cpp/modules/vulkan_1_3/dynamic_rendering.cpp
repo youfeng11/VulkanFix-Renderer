@@ -6,10 +6,36 @@
 #include "core/layout_compat.h"
 #include "core/driver_trust.h"
 #include "core/native_instance_state.h"
+#include "core/multiview_render_pass.h"
+#include "core/multiview_attachments.h"
+#include "core/multiview_commands.h"
+#include "core/volume_attachment.h"
 #include <string.h>
 #include <algorithm>
 
 REGISTER_LAYER_MODULE(DynamicRenderingModule);
+static bool attachment_replay_required(VkDevice device) {
+    return LayerManager::get().uses_render_pass_replay(device) &&
+        !(LayerManager::get().get_device_spirv_extensions(device) & vkfix::NativeMaintenance1);
+}
+
+static VkResult create_dynamic_pass(VkDevice device, const VkRenderPassCreateInfo& info,
+                                   uint32_t viewMask, VkRenderPass& pass) {
+    const auto routes = LayerManager::get().get_device_spirv_extensions(device);
+    if ((viewMask && !(routes & vkfix::NativeMultiview)) || !(routes & vkfix::NativeMaintenance1)) {
+        VkResult result = VK_SUCCESS;
+        if (vkfix::MultiviewRenderPasses::get().create_fallback(device, &info, nullptr, &pass,
+                (routes & vkfix::NativeInputAttachmentAspects) != 0, result,
+                (routes & vkfix::NativeDeviceGroup) != 0,!(routes & vkfix::NativeMaintenance1))) return result;
+    }
+    const auto create = (PFN_vkCreateRenderPass)get_real_proc(get_last_instance(), device, "vkCreateRenderPass");
+    return create ? create(device, &info, nullptr, &pass) : VK_ERROR_INITIALIZATION_FAILED;
+}
+static void destroy_dynamic_pass(VkDevice device, VkRenderPass pass) {
+    vkfix::MultiviewRenderPasses::get().forget(device, pass);
+    const auto destroy = (PFN_vkDestroyRenderPass)get_real_proc(get_last_instance(), device, "vkDestroyRenderPass");
+    if (destroy) destroy(device, pass, nullptr);
+}
 
 static inline void hash_combine(size_t& seed, size_t v) {
     seed ^= v + 0x9e3779b9 + (seed << 6) + (seed >> 2);
@@ -29,6 +55,7 @@ size_t DynamicRenderingModule::PipelineRenderPassKeyHash::operator()(const Pipel
 
 size_t DynamicRenderingModule::DynamicRenderPassKeyHash::operator()(const DynamicRenderPassKey& k) const {
     size_t seed = std::hash<VkDevice>{}(k.device);
+    hash_combine(seed, k.viewMask);
     for (uint32_t i = 0; i < k.colorAttachmentCount; ++i) {
         const auto& a = k.colorAttachments[i];
         hash_combine(seed, (size_t)a.format);
@@ -163,11 +190,12 @@ bool DynamicRenderingModule::is_phys_device_native(VkPhysicalDevice physDev) {
     if (native) {
         auto instance=vkfix::native_instance_for_physical(physDev);
         if (!instance) instance=get_last_instance();
-        const auto trust=vkfix::native_driver_trust(instance,physDev,get_real_instance_proc_addr());
-        if (vkfix::use_bounded_tiler_guard(trust.tiler_budget,getenv("VULKAN_FIX_MALI_TILER_GUARD"))) {
+        const vkfix::NativeDriverProbes probes(instance, physDev, get_real_instance_proc_addr());
+        const auto trust = probes.measure(vkfix::DriverProbe::TilerBudget);
+        if (vkfix::use_bounded_tiler_guard(trust,getenv("VULKAN_FIX_MALI_TILER_GUARD"))) {
             native=false;
             LOGI("Dynamic rendering uses preserving render-pass continuations: tiler pressure %s (%s)",
-                vkfix::driver_probe_verdict_name(trust.tiler_budget.verdict),trust.tiler_budget.detail.c_str());
+                vkfix::driver_probe_verdict_name(trust.verdict),trust.detail.c_str());
         }
     }
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
@@ -310,11 +338,12 @@ void DynamicRenderingModule::on_post_create_device(
         bool native = is_phys_device_native(physicalDevice);
         auto instance=vkfix::native_instance_for_physical(physicalDevice);
         if (!instance) instance=get_last_instance();
-        const auto trust=vkfix::native_driver_trust(instance,physicalDevice,get_real_instance_proc_addr());
+        const vkfix::NativeDriverProbes probes(instance, physicalDevice, get_real_instance_proc_addr());
+        const auto trust = probes.measure(vkfix::DriverProbe::TilerBudget);
         const char* guard = getenv("VULKAN_FIX_MALI_TILER_GUARD");
-        const bool tilerGuard = !native && vkfix::use_bounded_tiler_guard(trust.tiler_budget,guard);
+        const bool tilerGuard = !native && vkfix::use_bounded_tiler_guard(trust,guard);
         LOGI("Driver probe tiler pressure: %s (%s); bounded rendering=%u",
-            vkfix::driver_probe_verdict_name(trust.tiler_budget.verdict),trust.tiler_budget.detail.c_str(),unsigned(tilerGuard));
+            vkfix::driver_probe_verdict_name(trust.verdict),trust.detail.c_str(),unsigned(tilerGuard));
         std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
         m_device_native_support[(uint64_t)(uintptr_t)device] = native;
         if (tilerGuard) {
@@ -353,11 +382,13 @@ void DynamicRenderingModule::on_destroy_device(VkDevice device) {
     if (it != m_device_resources.end()) {
         if (real_destroy_fb) {
             for (VkFramebuffer fb : it->second.framebuffers) {
+                vkfix::MultiviewAttachments::get().forget_framebuffer(device, fb);
                 real_destroy_fb(device, fb, NULL);
             }
         }
         if (real_destroy_rp) {
             for (VkRenderPass rp : it->second.renderPasses) {
+                vkfix::MultiviewRenderPasses::get().forget(device, rp);
                 real_destroy_rp(device, rp, NULL);
             }
         }
@@ -406,7 +437,7 @@ bool DynamicRenderingModule::needs_pipeline_interception(
     uint32_t createInfoCount,
     const VkGraphicsPipelineCreateInfo* pCreateInfos
 ) {
-    if (is_device_native(device)) return false;
+    if (is_device_native(device) && !attachment_replay_required(device)) return false;
     if (!pCreateInfos || createInfoCount == 0) return false;
 
     for (uint32_t i = 0; i < createInfoCount; ++i) {
@@ -419,6 +450,24 @@ bool DynamicRenderingModule::needs_pipeline_interception(
     return false;
 }
 
+VkResult DynamicRenderingModule::prepare_software_multiview_pipeline(VkDevice device,
+    const VkGraphicsPipelineCreateInfo& info, VkRenderPass& pass) {
+    pass = VK_NULL_HANDLE;
+    if (info.renderPass || (is_device_native(device) && !attachment_replay_required(device))) return VK_SUCCESS;
+    const auto* rendering = vku::find_pnext<VkPipelineRenderingCreateInfo>(info.pNext,
+        VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO);
+    // A dynamic ordinary pass always has one subpass. Its native compatible
+    // pass needs no per-view pipeline variants. Preserve dynamic create info
+    // here so vertex-store lowering can still prepare compute/replay shaders.
+    if (!rendering || !rendering->viewMask) return VK_SUCCESS;
+    VkResult result = VK_SUCCESS;
+    pass = get_or_create_pipeline_render_pass(device, rendering->colorAttachmentCount,
+        rendering->pColorAttachmentFormats, rendering->depthAttachmentFormat, rendering->stencilAttachmentFormat,
+        info.pMultisampleState ? info.pMultisampleState->rasterizationSamples : VK_SAMPLE_COUNT_1_BIT,
+        rendering->viewMask, &result);
+    return pass ? VK_SUCCESS : result == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : result;
+}
+
 VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     VkDevice device,
     uint32_t colorAttachmentCount,
@@ -426,8 +475,10 @@ VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     VkFormat depthAttachmentFormat,
     VkFormat stencilAttachmentFormat,
     VkSampleCountFlagBits samples,
-    uint32_t viewMask
+    uint32_t viewMask,
+    VkResult* result
 ) {
+    if (result) *result = VK_SUCCESS;
     uint32_t effectiveColorCount = 0;
     if (pColorAttachmentFormats != NULL) {
         for (uint32_t i = colorAttachmentCount; i > 0; --i) {
@@ -524,22 +575,30 @@ VkRenderPass DynamicRenderingModule::get_or_create_pipeline_render_pass(
     rpInfo.subpassCount = 1;
     rpInfo.pSubpasses = &subpass;
 
-    PFN_vkCreateRenderPass real_create_rp = (PFN_vkCreateRenderPass)
-        get_real_proc(get_last_instance(), device, "vkCreateRenderPass");
-    if (!real_create_rp) return VK_NULL_HANDLE;
+    VkRenderPassMultiviewCreateInfo multiview{VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO};
+    if (viewMask) {
+        multiview.subpassCount = 1;
+        multiview.pViewMasks = &viewMask;
+        rpInfo.pNext = &multiview;
+    }
 
     VkRenderPass rp = VK_NULL_HANDLE;
-    VkResult res = real_create_rp(device, &rpInfo, NULL, &rp);
+    VkResult res = create_dynamic_pass(device, rpInfo, viewMask, rp);
+    if (result) *result = res;
     if (res == VK_SUCCESS && rp != VK_NULL_HANDLE) {
-        std::unique_lock<std::shared_mutex> writeLock(m_rw_mutex);
-        auto inserted = m_pipeline_rp_cache.emplace(key, rp);
-        if (!inserted.second) {
-            auto destroy = (PFN_vkDestroyRenderPass)get_real_proc(
-                get_last_instance(), device, "vkDestroyRenderPass");
-            if (destroy) destroy(device, rp, nullptr);
-            return inserted.first->second;
+        try {
+            std::unique_lock<std::shared_mutex> writeLock(m_rw_mutex);
+            auto inserted = m_pipeline_rp_cache.emplace(key, rp);
+            if (!inserted.second) {
+                destroy_dynamic_pass(device, rp);
+                return inserted.first->second;
+            }
+            try { m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(rp); }
+            catch (...) { m_pipeline_rp_cache.erase(inserted.first); throw; }
+        } catch (...) {
+            destroy_dynamic_pass(device, rp);
+            throw;
         }
-        m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(rp);
         LOGI("Created cached pipeline compatible renderPass %p", (void*)(uintptr_t)rp);
         return rp;
     }
@@ -555,7 +614,7 @@ void DynamicRenderingModule::on_modify_pipeline_create_info(
     VkPipelineVertexInputStateCreateInfo& viState,
     std::vector<void*>& allocationsToFree
 ) {
-    if (is_device_native(device)) return;
+    if (is_device_native(device) && !attachment_replay_required(device)) return;
     if (createInfo.renderPass != VK_NULL_HANDLE) return;
 
     const auto* renderingCreateInfo = vku::find_pnext<VkPipelineRenderingCreateInfoKHR>(
@@ -653,7 +712,7 @@ void DynamicRenderingModule::on_pre_begin_command_buffer(
     if (!pBeginInfo || !pBeginInfo->pInheritanceInfo) return;
 
     VkDevice device = get_device_for_cmd(commandBuffer);
-    if (is_device_native(device)) return;
+    if (is_device_native(device) && !attachment_replay_required(device)) return;
 
     const VkCommandBufferInheritanceInfo* inInherit = pBeginInfo->pInheritanceInfo;
     if (inInherit->renderPass == VK_NULL_HANDLE) {
@@ -761,6 +820,7 @@ void DynamicRenderingModule::on_destroy_image_view(
             auto fbIt = m_framebuffer_cache.find(fbKey);
             if (fbIt != m_framebuffer_cache.end()) {
                 if (real_destroy_fb) {
+                    vkfix::MultiviewAttachments::get().forget_framebuffer(device, fbIt->second);
                     real_destroy_fb(device, fbIt->second, NULL);
                 }
                 auto resources = m_device_resources.find((uint64_t)(uintptr_t)device);
@@ -859,17 +919,15 @@ VkRenderPass DynamicRenderingModule::continuation_render_pass(
     create.pAttachments = preserved.data();
     create.subpassCount = 1;
     create.pSubpasses = &subpass;
-    auto real = (PFN_vkCreateRenderPass)get_real_proc(get_last_instance(), device, "vkCreateRenderPass");
     VkRenderPass pass{};
-    if (!real || real(device, &create, nullptr, &pass) != VK_SUCCESS || !pass) {
+    if (create_dynamic_pass(device,create,originalKey.viewMask,pass) != VK_SUCCESS || !pass) {
         LOGE("Bounded tiler rendering: could not create LOAD continuation render pass");
         return VK_NULL_HANDLE;
     }
     std::unique_lock<std::shared_mutex> lock(m_rw_mutex);
     auto inserted = m_dynamic_rp_cache.emplace(key, pass);
     if (!inserted.second) {
-        auto destroy = (PFN_vkDestroyRenderPass)get_real_proc(get_last_instance(), device, "vkDestroyRenderPass");
-        if (destroy) destroy(device, pass, nullptr);
+        destroy_dynamic_pass(device,pass);
         return inserted.first->second;
     }
     m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(pass);
@@ -1117,7 +1175,9 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     const VkRenderingInfo* pRenderingInfo
 ) {
     VkDevice device = get_device_for_cmd(commandBuffer);
-    if (is_device_native(device) || !pRenderingInfo) return false;
+    if ((is_device_native(device) && !attachment_replay_required(device)) || !pRenderingInfo) return false;
+    const bool softwareMultiview = LayerManager::get().uses_render_pass_replay(device);
+    try {
 
     uint32_t effectiveColorCount = 0;
     if (pRenderingInfo->pColorAttachments != NULL) {
@@ -1162,6 +1222,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
 
     DynamicRenderPassKey& rpKey = scratch.rpKey;
     rpKey.device = device;
+    rpKey.viewMask = pRenderingInfo->viewMask;
     FramebufferKey& fbKey = scratch.fbKey;
     fbKey.device = device;
 
@@ -1197,6 +1258,15 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     if (has_resolves) {
         resolveRefs.reserve(colorCount);
     }
+    const auto volume_view = [&](VkImageView handle) {
+        const auto view = vkfix::MultiviewAttachments::get().acquire_view(device,handle);
+        return view && view->image() && view->image()->emulated_attachment;
+    };
+    bool volumeAttachments = volume_view(dsView);
+    for (uint32_t i = 0; i < colorCount; ++i)
+        volumeAttachments |= volume_view(pRenderingInfo->pColorAttachments[i].imageView) ||
+            volume_view(pRenderingInfo->pColorAttachments[i].resolveImageView);
+    const bool capturePass = volumeAttachments || (pRenderingInfo->viewMask && softwareMultiview);
 
     // Acquire lock once for view metadata and cache lookups (concurrent multi-thread read)
     std::shared_lock<std::shared_mutex> readLock(m_rw_mutex);
@@ -1392,7 +1462,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
     uint32_t fb_h = (min_att_h > 0) ? min_att_h : area_h;
     if (fb_w == 0) fb_w = 1;
     if (fb_h == 0) fb_h = 1;
-    uint32_t fb_layers = (pRenderingInfo->layerCount > 0) ? pRenderingInfo->layerCount : 1;
+    uint32_t fb_layers = pRenderingInfo->viewMask ? 1 : std::max(1u, pRenderingInfo->layerCount);
 
     // Clamp renderArea to within framebuffer extents to satisfy VUID-VkRenderPassBeginInfo-renderArea-00171
     VkRect2D clampedRenderArea = pRenderingInfo->renderArea;
@@ -1432,7 +1502,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
 
     // Only ordinary inline, single-sample STORE scopes are safe to split.
     // Preserve query/transform-feedback scopes and caller-owned resolve work.
-    bool tilerEligible = m_tiler_devices.count((uint64_t)(uintptr_t)device) &&
+    bool tilerEligible = !volumeAttachments && m_tiler_devices.count((uint64_t)(uintptr_t)device) &&
         !pRenderingInfo->flags && !pRenderingInfo->pNext && !pRenderingInfo->viewMask &&
         !attachments.empty();
     auto storable = [&](const VkRenderingAttachmentInfo* attachment) {
@@ -1490,7 +1560,9 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
             VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE;
 
         const auto& dt = LayerManager::get().get_dispatch_table(device);
-        if (dt.CmdBeginRenderPass) {
+        if (capturePass && vkfix::MultiviewCommands::get().begin_pass(commandBuffer, &beginInfo, contents)) {
+            return true;
+        } else if (dt.CmdBeginRenderPass) {
             dt.CmdBeginRenderPass(commandBuffer, &beginInfo, contents);
         } else {
             PFN_vkCmdBeginRenderPass real_begin_rp = (PFN_vkCmdBeginRenderPass)
@@ -1520,23 +1592,25 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
         rpInfo.subpassCount = 1;
         rpInfo.pSubpasses = &subpass;
 
-        PFN_vkCreateRenderPass real_create_rp = (PFN_vkCreateRenderPass)
-            get_real_proc(get_last_instance(), device, "vkCreateRenderPass");
-        if (!real_create_rp) return false;
+        VkRenderPassMultiviewCreateInfo multiview{VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO};
+        if (pRenderingInfo->viewMask) {
+            multiview.subpassCount = 1;
+            multiview.pViewMasks = &pRenderingInfo->viewMask;
+            rpInfo.pNext = &multiview;
+        }
 
-        VkResult res = real_create_rp(device, &rpInfo, NULL, &renderPass);
+        VkResult res = create_dynamic_pass(device, rpInfo, pRenderingInfo->viewMask, renderPass);
         if (res != VK_SUCCESS || renderPass == VK_NULL_HANDLE) {
             LOGE("DynamicRendering: failed to create renderPass: %d", res);
-            return false;
+            return softwareMultiview ? vkfix::MultiviewCommands::get().record_error(commandBuffer,
+                res == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : res) : false;
         }
 
         {
             std::unique_lock<std::shared_mutex> writeLock(m_rw_mutex);
             auto [it, inserted] = m_dynamic_rp_cache.emplace(rpKey, renderPass);
             if (!inserted) {
-                PFN_vkDestroyRenderPass real_destroy_rp = (PFN_vkDestroyRenderPass)
-                    get_real_proc(get_last_instance(), device, "vkDestroyRenderPass");
-                if (real_destroy_rp) real_destroy_rp(device, renderPass, NULL);
+                destroy_dynamic_pass(device, renderPass);
                 renderPass = it->second;
             } else {
                 m_device_resources[(uint64_t)(uintptr_t)device].renderPasses.push_back(renderPass);
@@ -1576,10 +1650,21 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                 get_real_proc(get_last_instance(), device, "vkCreateFramebuffer");
             if (!real_create_fb) return false;
 
-            VkResult res = real_create_fb(device, &fbInfo, NULL, &framebuffer);
+            VkResult res = volumeAttachments ?
+                vkfix::create_replay_framebuffer(device,&fbInfo,nullptr,&framebuffer) : real_create_fb(device, &fbInfo, NULL, &framebuffer);
             if (res != VK_SUCCESS || framebuffer == VK_NULL_HANDLE) {
                 LOGE("DynamicRendering: failed to create framebuffer: %d", res);
-                return false;
+                return softwareMultiview ? vkfix::MultiviewCommands::get().record_error(commandBuffer,
+                    res == VK_SUCCESS ? VK_ERROR_INITIALIZATION_FAILED : res) : false;
+            }
+
+            if (softwareMultiview) {
+                try { vkfix::MultiviewAttachments::get().remember_framebuffer(device, framebuffer, fbInfo); }
+                catch (...) {
+                    auto destroy = (PFN_vkDestroyFramebuffer)get_real_proc(get_last_instance(), device, "vkDestroyFramebuffer");
+                    if (destroy) destroy(device, framebuffer, nullptr);
+                    throw;
+                }
             }
 
             {
@@ -1588,6 +1673,7 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
                 if (!inserted) {
                     PFN_vkDestroyFramebuffer real_destroy_fb = (PFN_vkDestroyFramebuffer)
                         get_real_proc(get_last_instance(), device, "vkDestroyFramebuffer");
+                    vkfix::MultiviewAttachments::get().forget_framebuffer(device, framebuffer);
                     if (real_destroy_fb) real_destroy_fb(device, framebuffer, NULL);
                     framebuffer = it->second;
                 } else {
@@ -1619,7 +1705,9 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     vku::cmd_begin_label(commandBuffer, "[VulkanFix] DynamicRendering Pass");
-    if (dt.CmdBeginRenderPass) {
+    if (capturePass && vkfix::MultiviewCommands::get().begin_pass(commandBuffer, &beginInfo, contents)) {
+        // The recorder emits per-view native passes when this scope closes.
+    } else if (dt.CmdBeginRenderPass) {
         dt.CmdBeginRenderPass(commandBuffer, &beginInfo, contents);
     } else {
         PFN_vkCmdBeginRenderPass real_begin_rp = (PFN_vkCmdBeginRenderPass)
@@ -1647,14 +1735,20 @@ bool DynamicRenderingModule::on_cmd_begin_rendering(
 
     LOG_OPT_DEBUG("DynamicRendering: emulated vkCmdBeginRenderingKHR for cmd %p", commandBuffer);
     return true;
+    } catch (const std::bad_alloc&) {
+        if (softwareMultiview) return vkfix::MultiviewCommands::get().record_error(commandBuffer, VK_ERROR_OUT_OF_HOST_MEMORY);
+        throw;
+    }
 }
 
 bool DynamicRenderingModule::on_cmd_end_rendering(VkCommandBuffer commandBuffer) {
     VkDevice device = get_device_for_cmd(commandBuffer);
-    if (is_device_native(device)) return false;
+    if (is_device_native(device) && !attachment_replay_required(device)) return false;
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
-    if (dt.CmdEndRenderPass) {
+    if (vkfix::MultiviewCommands::get().end_pass(commandBuffer)) {
+        // All physical view passes were closed by the replay recorder.
+    } else if (dt.CmdEndRenderPass) {
         dt.CmdEndRenderPass(commandBuffer);
     } else {
         PFN_vkCmdEndRenderPass real_end_rp = (PFN_vkCmdEndRenderPass)

@@ -77,11 +77,21 @@ public:
 
     bool is_phys_device_native(VkPhysicalDevice physDev);
     bool is_device_native(VkDevice device) override;
+    bool prefers_legacy_submit(VkDevice device);
+    bool prefers_legacy_reset(VkDevice device);
+
+protected:
+    enum LegacyRoute : uintptr_t { LegacySubmit = 1, LegacyReset = 2 };
 
 private:
+    struct DeviceRoutes {
+        bool native;
+        uintptr_t legacy;
+    };
+    bool prefers_legacy(VkDevice device, LegacyRoute route);
     std::mutex m_mutex;
     std::unordered_map<uint64_t, bool> m_phys_native_support;
-    std::unordered_map<uint64_t, bool> m_device_needs_emulation;
+    std::unordered_map<VkDevice, DeviceRoutes> m_device_routes;
 
     std::atomic<VkDevice> m_primary_dev{VK_NULL_HANDLE};
     std::atomic<bool> m_primary_native{false};

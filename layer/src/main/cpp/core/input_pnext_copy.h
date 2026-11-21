@@ -4,13 +4,18 @@
 #include <memory>
 #include <vector>
 namespace vkfix {
-enum class InputChainKind { Submit = 1, Semaphore = 2, BindSparse = 4 };
+enum class InputChainKind { Submit = 1, Semaphore = 2, BindSparse = 4,
+                            CommandBegin = 8, RenderPassBegin = 16, MemoryAllocate = 32,
+                            BindBuffer = 64, BindImage = 128,
+                            GraphicsPipeline = 256, CommandInheritance = 512, TessellationState = 1024,
+                            RenderPassCreate = 2048, ImageViewCreate = 4096 };
 // Owns typed nodes and links. deep=true also owns counted pointer payloads.
 // Top-level submission arrays and nested sparse bindings are owned separately
 // by the queue snapshot; unsupported pointer payloads are never borrowed deep.
 class InputPNextCopy {
   public:
-    VkResult copy(const void *source, InputChainKind kind, bool deep = false);
+    VkResult copy(const void *source, InputChainKind kind, bool deep = false,
+                  VkStructureType omitted = VK_STRUCTURE_TYPE_MAX_ENUM);
     template <class T> T *retain_array(const T *source, size_t count) {
         if (!source || !count)
             return nullptr;

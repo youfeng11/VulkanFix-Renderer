@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
+#include <dlfcn.h>
 #include <vulkan/vulkan.h>
 
 #define EXPORT extern "C" __attribute__((visibility("default")))
@@ -17,6 +19,10 @@ bool bad_queries() {
     return value && !strcmp(value, "1");
 }
 uint32_t api() { return route() == 1 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_0; }
+bool format_mode(const char* mode) {
+    const auto* value = getenv("VKFIX_CORE11_QUERY_FORMAT_MODE");
+    return value && !strcmp(value, mode);
+}
 VkResult VKAPI_CALL version(uint32_t* out) { *out = api(); return VK_SUCCESS; }
 VkResult VKAPI_CALL create(const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance* out) {
     *out = (VkInstance)(uintptr_t(0x1000) + ++next_instance);
@@ -46,13 +52,49 @@ VkResult VKAPI_CALL devices(VkInstance instance, uint32_t* count, VkPhysicalDevi
     return VK_SUCCESS;
 }
 template<unsigned N> void verify(VkPhysicalDevice physical) {
-    mismatches += uintptr_t(physical) != 0x2000 + N;
+    if (uintptr_t(physical) != 0x2000 + N) {
+        ++mismatches;
+        std::printf("QUERY OWNER MISMATCH: instance %u expected physical %p, got %p\n",
+                    N, (void*)(uintptr_t(0x2000) + N), (void*)physical);
+        Dl_info location{};
+        if (dladdr(__builtin_return_address(0), &location))
+            std::printf("QUERY CALLER: %s + 0x%zx\n", location.dli_fname,
+                uintptr_t(__builtin_return_address(0)) - uintptr_t(location.dli_fbase));
+    }
 }
 template<unsigned N> void VKAPI_CALL properties(VkPhysicalDevice p, VkPhysicalDeviceProperties* out) {
-    verify<N>(p); *out = {}; out->apiVersion = api(); out->deviceID = N;
+    verify<N>(p); *out = {}; out->apiVersion = format_mode("modern") ? VK_API_VERSION_1_1 : api(); out->deviceID = N;
+}
+template<unsigned N> void VKAPI_CALL properties2(VkPhysicalDevice p, VkPhysicalDeviceProperties2* out) {
+    properties<N>(p, &out->properties);
+    for (auto node = static_cast<VkBaseOutStructure*>(out->pNext); node; node = node->pNext)
+        if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES) {
+            auto subgroup = reinterpret_cast<VkPhysicalDeviceSubgroupProperties*>(node);
+            subgroup->subgroupSize = 8;
+            subgroup->supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
+            subgroup->supportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
+            subgroup->quadOperationsInAllStages = VK_FALSE;
+        }
 }
 template<unsigned N> void VKAPI_CALL format(VkPhysicalDevice p, VkFormat, VkFormatProperties* out) {
     verify<N>(p); *out = {}; out->bufferFeatures = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
+    const auto* mode = getenv("VKFIX_CORE11_QUERY_FORMAT_MODE");
+    if (!mode || format_mode("zero")) return;
+    out->linearTilingFeatures = VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+    out->optimalTilingFeatures = VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    if (format_mode("native-khr") || format_mode("modern")) {
+        out->linearTilingFeatures |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+        out->optimalTilingFeatures |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    }
+}
+template<unsigned N> VkResult VKAPI_CALL device_extensions(VkPhysicalDevice p, const char*, uint32_t* count, VkExtensionProperties* out) {
+    verify<N>(p);
+    if (format_mode("enum-error")) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    const uint32_t size = format_mode("native-khr") ? 1 : 0;
+    if (!out) { *count = size; return VK_SUCCESS; }
+    const auto written = std::min(*count, size);
+    if (written) { *out = {}; strcpy(out->extensionName, VK_KHR_MAINTENANCE_1_EXTENSION_NAME); out->specVersion = 2; }
+    *count = written; return written < size ? VK_INCOMPLETE : VK_SUCCESS;
 }
 template<unsigned N> VkResult VKAPI_CALL image(VkPhysicalDevice p, VkFormat format, VkImageType,
     VkImageTiling, VkImageUsageFlags, VkImageCreateFlags, VkImageFormatProperties* out) {
@@ -137,6 +179,7 @@ template<unsigned N> void VKAPI_CALL external_semaphore(VkPhysicalDevice p,
 template<unsigned N> PFN_vkVoidFunction proc(const char* name) {
 #define LEGACY(command, function) if (!strcmp(name, #command)) return (PFN_vkVoidFunction)function<N>
     LEGACY(vkGetPhysicalDeviceProperties, properties);
+    LEGACY(vkEnumerateDeviceExtensionProperties, device_extensions);
     LEGACY(vkGetPhysicalDeviceFormatProperties, format);
     LEGACY(vkGetPhysicalDeviceImageFormatProperties, image);
     LEGACY(vkGetPhysicalDeviceQueueFamilyProperties, families);
@@ -145,6 +188,7 @@ template<unsigned N> PFN_vkVoidFunction proc(const char* name) {
 #undef LEGACY
     if (!route()) return nullptr;
 #define QUERY(command, function) if (!strcmp(name, route() == 1 ? #command : #command "KHR")) return (PFN_vkVoidFunction)function<N>
+    QUERY(vkGetPhysicalDeviceProperties2, properties2);
     QUERY(vkGetPhysicalDeviceFormatProperties2, format2);
     QUERY(vkGetPhysicalDeviceImageFormatProperties2, image2);
     QUERY(vkGetPhysicalDeviceQueueFamilyProperties2, families2);

@@ -12,8 +12,12 @@
 #include <atomic>
 #include <unordered_set>
 #include <unordered_map>
+#include <optional>
+
+namespace vkfix { class InputPNextCopy; }
 
 struct DeviceDispatchTable {
+    std::optional<VkAllocationCallbacks> allocationCallbacks;
     PFN_vkCmdDraw CmdDraw = nullptr;
     PFN_vkCmdDrawIndexed CmdDrawIndexed = nullptr;
     PFN_vkCmdDrawIndirect CmdDrawIndirect = nullptr;
@@ -87,6 +91,8 @@ struct DeviceDispatchTable {
     PFN_vkGetImageMemoryRequirements2 GetImageMemoryRequirements2 = nullptr;
     PFN_vkGetImageSparseMemoryRequirements2 GetImageSparseMemoryRequirements2 = nullptr;
     PFN_vkUpdateDescriptorSetWithTemplate UpdateDescriptorSetWithTemplate = nullptr;
+    PFN_vkCreateDescriptorUpdateTemplate CreateDescriptorUpdateTemplate = nullptr;
+    PFN_vkDestroyDescriptorUpdateTemplate DestroyDescriptorUpdateTemplate = nullptr;
     PFN_vkGetDescriptorSetLayoutSupport GetDescriptorSetLayoutSupport = nullptr;
     PFN_vkCmdDispatchBase CmdDispatchBase = nullptr;
     PFN_vkTrimCommandPool TrimCommandPool = nullptr;
@@ -114,6 +120,7 @@ struct DeviceDispatchTable {
     PFN_vkCmdDispatchIndirect CmdDispatchIndirect = nullptr;
     PFN_vkCmdCopyBuffer CmdCopyBuffer = nullptr;
     PFN_vkCmdCopyImage CmdCopyImage = nullptr;
+    PFN_vkCmdResolveImage CmdResolveImage = nullptr;
     PFN_vkCmdBlitImage CmdBlitImage = nullptr;
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage = nullptr;
     PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer = nullptr;
@@ -127,6 +134,8 @@ struct DeviceBypassFlags {
     bool bypass_draw = false;
     bool bypass_multi_draw = false;
     bool bypass_sync2 = false;
+    bool bypass_submit2 = false;
+    bool bypass_reset_event2 = false;
     bool bypass_dynamic_rendering = false;
     bool bypass_push_descriptor = false;
     bool bypass_timeline = false;
@@ -170,6 +179,7 @@ public:
     void track_descriptor_binding(VkCommandBuffer cmd, VkPipelineBindPoint point,
         VkPipelineLayout layout, uint32_t first, uint32_t count);
     void track_command_pool_reset(VkDevice device, VkCommandPool pool, bool destroyed);
+    void remember_command_pool_family(VkDevice, VkCommandPool, uint32_t family);
     VkResult dispatch_enumerate_device_extensions(
         VkPhysicalDevice physicalDevice,
         const char* pLayerName,
@@ -251,9 +261,13 @@ public:
     uint32_t get_device_max_spirv_version(VkDevice device);
     uint32_t get_device_spirv_extensions(VkDevice device);
     bool uses_software_multiview(VkDevice device);
+    bool uses_render_pass_replay(VkDevice device);
+    VkResult prepare_software_multiview_pipelines(VkDevice, uint32_t, const VkGraphicsPipelineCreateInfo*,
+        std::vector<VkGraphicsPipelineCreateInfo>&, std::vector<vkfix::InputPNextCopy>&);
     vkfix::SubgroupBroadcastSupport get_device_subgroup_broadcast(VkDevice device);
     bool should_prune_uniform_members(VkDevice device);
     bool should_dedup_sampler_aliases(VkDevice device);
+    bool should_repair_msaa_array_resolve(VkDevice device);
 
     VkResult dispatch_create_descriptor_set_layout(
         VkDevice device,
@@ -536,7 +550,9 @@ public:
     }
 
     void init_device_dispatch_table(VkDevice device,
-        uint32_t nativeApi = VK_API_VERSION_1_0, bool renderPass2Extension = false);
+        uint32_t nativeApi = VK_API_VERSION_1_0,
+        const std::vector<const char*>& nativeExtensions = {},
+        const VkAllocationCallbacks* hostAllocator = nullptr);
     void remove_device_dispatch_table(VkDevice device);
 
     VkDevice get_device_for_cmd_slow(VkCommandBuffer cmd);
@@ -609,6 +625,7 @@ public:
     VkResult dispatch_queue_wait_idle(VkQueue queue);
     VkResult dispatch_device_wait_idle(VkDevice device);
     bool is_timeline_semaphore(VkDevice device, VkSemaphore semaphore);
+    bool has_native_timeline_submit(VkDevice device);
 
     VkResult dispatch_create_semaphore(
         VkDevice device,
@@ -897,6 +914,7 @@ private:
     std::unordered_map<uint64_t, CommandOwner> m_cmd_devices;
     std::unordered_map<vkfix::DeviceObjectKey, std::unordered_set<uint64_t>,
                        vkfix::DeviceObjectKeyHash> m_pool_commands;
+    std::unordered_map<vkfix::DeviceObjectKey, uint32_t, vkfix::DeviceObjectKeyHash> m_pool_families;
     void notify_command_buffers_freed(VkDevice device, uint32_t count,
                                      const VkCommandBuffer* commands);
     std::unordered_map<uint64_t, VkDevice> m_queue_devices;
@@ -924,6 +942,7 @@ private:
     std::unordered_map<uint64_t, vkfix::SubgroupBroadcastSupport> m_device_subgroup_broadcast;
     std::unordered_set<uint64_t> m_device_uniform_member_pruning;
     std::unordered_set<uint64_t> m_device_sampler_alias_dedup;
+    std::unordered_set<uint64_t> m_device_msaa_array_resolve_repair;
 
     IVulkanLayerModule* m_divisor_mod = nullptr;
     IVulkanLayerModule* m_dyn_rendering_mod = nullptr;

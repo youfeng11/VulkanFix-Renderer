@@ -5,7 +5,7 @@ namespace vkfix {
 namespace {
 #include "input_pnext_metadata.inc"
 } // namespace
-VkResult InputPNextCopy::copy(const void *source, InputChainKind kind, bool deep) {
+VkResult InputPNextCopy::copy(const void *source, InputChainKind kind, bool deep, VkStructureType omitted) {
     nodes.clear();
     payloads.clear();
     std::set<const void *> seen;
@@ -15,6 +15,7 @@ VkResult InputPNextCopy::copy(const void *source, InputChainKind kind, bool deep
                 nodes.clear();
                 return VK_ERROR_INITIALIZATION_FAILED;
             }
+            if (node->sType == omitted) continue;
             auto owned = clone_input_node(node, int(kind), *this, deep);
             if (!owned) {
                 nodes.clear();

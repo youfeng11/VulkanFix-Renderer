@@ -2,6 +2,8 @@
 // This test-only library is never packaged in the plugin.
 #include <atomic>
 #include <cstring>
+#include <cstdlib>
+#include <cstdio>
 #include <dlfcn.h>
 #include <mutex>
 #include <vector>
@@ -12,6 +14,7 @@ PFN_vkGetInstanceProcAddr gipa;
 PFN_vkGetDeviceProcAddr gdpa;
 std::once_flag once;
 std::atomic<unsigned> accepted{0}, rejected{0};
+std::atomic<bool> reported_api{false};
 void init() {
     std::call_once(once, [] {
         auto library = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
@@ -22,7 +25,11 @@ void init() {
 VkInstance current_instance{};
 void VKAPI_CALL properties_for_instance(VkPhysicalDevice physical, VkPhysicalDeviceProperties* out) {
     auto fn = (PFN_vkGetPhysicalDeviceProperties)gipa(current_instance, "vkGetPhysicalDeviceProperties");
-    fn(physical, out); out->apiVersion = VK_API_VERSION_1_0;
+    fn(physical, out);
+    const auto* keep_api = std::getenv("VULKANFIX_TEST_KEEP_PHYSICAL_API");
+    if (!keep_api || strcmp(keep_api, "1")) out->apiVersion = VK_API_VERSION_1_0;
+    else if (!reported_api.exchange(true))
+        std::printf("Strict Vulkan1.0 shader boundary with physical API 0x%x\n", out->apiVersion);
 }
 VkResult VKAPI_CALL extensions(VkPhysicalDevice physical, const char* layer, uint32_t* count,
                               VkExtensionProperties* out) {

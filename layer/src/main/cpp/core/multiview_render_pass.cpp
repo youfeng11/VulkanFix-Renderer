@@ -42,8 +42,8 @@ void sanitize(MultiviewPassPlan::Chunk& chunk) {
 }
 }
 
-std::shared_ptr<const MultiviewPassPlan> MultiviewPassPlan::capture(const VkRenderPassCreateInfo* info) {
-    if (!info) return {};
+std::shared_ptr<const MultiviewPassPlan> MultiviewPassPlan::capture(const VkRenderPassCreateInfo* info, bool include_ordinary) {
+    if (!info || !info->subpassCount) return {};
     const VkRenderPassMultiviewCreateInfo* multiview = nullptr;
     const VkRenderPassInputAttachmentAspectCreateInfo* aspects = nullptr;
     bool core = true;
@@ -56,13 +56,15 @@ std::shared_ptr<const MultiviewPassPlan> MultiviewPassPlan::capture(const VkRend
             aspects = reinterpret_cast<const VkRenderPassInputAttachmentAspectCreateInfo*>(node);
         else core = false;
     }
-    if (!multiview || !multiview->subpassCount) return {};
     uint32_t all_views = 0;
-    if (!multiview->pViewMasks || multiview->subpassCount != info->subpassCount)
-        throw std::invalid_argument("invalid multiview subpass masks");
-    for (uint32_t i = 0; i < multiview->subpassCount; ++i) all_views |= multiview->pViewMasks[i];
-    if (!all_views) return {};
+    if (multiview && multiview->subpassCount) {
+        if (!multiview->pViewMasks || multiview->subpassCount != info->subpassCount)
+            throw std::invalid_argument("invalid multiview subpass masks");
+        for (uint32_t i = 0; i < multiview->subpassCount; ++i) all_views |= multiview->pViewMasks[i];
+    }
+    if (!all_views && !include_ordinary) return {};
     auto plan = std::make_shared<MultiviewPassPlan>();
+    plan->multiview = all_views != 0;
     plan->flags = info->flags; plan->core_only = core && !info->flags;
     plan->attachments = copy(info->attachmentCount, info->pAttachments);
     if (!info->pSubpasses) throw std::invalid_argument("missing subpass descriptions");
@@ -70,7 +72,7 @@ std::shared_ptr<const MultiviewPassPlan> MultiviewPassPlan::capture(const VkRend
         const auto& src = info->pSubpasses[i];
         Subpass dst;
         dst.flags = src.flags; dst.bind_point = src.pipelineBindPoint;
-        dst.view_mask = multiview->pViewMasks[i];
+        dst.view_mask = multiview && multiview->subpassCount ? multiview->pViewMasks[i] : 0;
         dst.inputs = copy(src.inputAttachmentCount, src.pInputAttachments);
         dst.colors = copy(src.colorAttachmentCount, src.pColorAttachments);
         if (src.pResolveAttachments) dst.resolves = copy(src.colorAttachmentCount, src.pResolveAttachments);
@@ -80,12 +82,12 @@ std::shared_ptr<const MultiviewPassPlan> MultiviewPassPlan::capture(const VkRend
         plan->core_only &= !src.flags;
         plan->subpasses.push_back(std::move(dst));
     }
-    if (multiview->dependencyCount && (multiview->dependencyCount != info->dependencyCount || !multiview->pViewOffsets))
+    if (multiview && multiview->dependencyCount && (multiview->dependencyCount != info->dependencyCount || !multiview->pViewOffsets))
         throw std::invalid_argument("invalid multiview dependency offsets");
     const auto deps = copy(info->dependencyCount, info->pDependencies);
     for (uint32_t i = 0; i < deps.size(); ++i)
-        plan->dependencies.push_back({deps[i], multiview->dependencyCount ? multiview->pViewOffsets[i] : 0});
-    plan->correlation_masks = copy(multiview->correlationMaskCount, multiview->pCorrelationMasks);
+        plan->dependencies.push_back({deps[i], multiview && multiview->dependencyCount ? multiview->pViewOffsets[i] : 0});
+    if (multiview) plan->correlation_masks = copy(multiview->correlationMaskCount, multiview->pCorrelationMasks);
     if (aspects) for (const auto& ref : copy(aspects->aspectReferenceCount, aspects->pAspectReferences)) {
         if (ref.subpass >= plan->subpasses.size() || ref.inputAttachmentIndex >= plan->subpasses[ref.subpass].inputs.size())
             throw std::invalid_argument("input attachment aspect reference is out of range");
@@ -94,12 +96,13 @@ std::shared_ptr<const MultiviewPassPlan> MultiviewPassPlan::capture(const VkRend
     plan->finish(); return plan;
 }
 
-std::shared_ptr<const MultiviewPassPlan> MultiviewPassPlan::capture(const VkRenderPassCreateInfo2* info) {
+std::shared_ptr<const MultiviewPassPlan> MultiviewPassPlan::capture(const VkRenderPassCreateInfo2* info, bool include_ordinary) {
     if (!info || !info->subpassCount || !info->pSubpasses) return {};
     uint32_t views = 0;
     for (uint32_t i = 0; i < info->subpassCount; ++i) views |= info->pSubpasses[i].viewMask;
-    if (!views) return {};
+    if (!views && !include_ordinary) return {};
     auto plan = std::make_shared<MultiviewPassPlan>();
+    plan->multiview = views != 0;
     plan->flags = info->flags; plan->core_only = !info->pNext && !info->flags;
     if (info->attachmentCount && !info->pAttachments) throw std::invalid_argument("missing attachments");
     for (uint32_t i = 0; i < info->attachmentCount; ++i) {
@@ -144,13 +147,14 @@ std::shared_ptr<const MultiviewPassPlan> MultiviewPassPlan::capture(const VkRend
 void MultiviewPassPlan::finish() {
     lifetimes.resize(attachments.size());
     for (uint32_t s = 0; s < subpasses.size(); ++s) {
-        const auto& subpass = subpasses[s]; all_views |= subpass.view_mask;
-        if (!subpass.view_mask) throw std::invalid_argument("mixed multiview and ordinary subpasses");
+        const auto& subpass = subpasses[s];
+        const auto mask = replay_mask(s); all_views |= mask;
+        if (multiview && !subpass.view_mask) throw std::invalid_argument("mixed multiview and ordinary subpasses");
         references(subpass, true, [&](const VkAttachmentReference& ref) {
             if (ref.attachment == VK_ATTACHMENT_UNUSED) return;
             if (ref.attachment >= attachments.size()) throw std::invalid_argument("attachment index is out of range");
             auto& life = lifetimes[ref.attachment];
-            for (uint32_t v = 0; v < 32; ++v) if (subpass.view_mask & (uint32_t(1) << v)) {
+            for (uint32_t v = 0; v < 32; ++v) if (mask & (uint32_t(1) << v)) {
                 if (life.first[v] == VK_SUBPASS_EXTERNAL) life.first[v] = s;
                 life.last[v] = s;
             }
@@ -162,8 +166,8 @@ uint32_t MultiviewPassPlan::source_views(const Dependency& dependency, uint32_t 
     const auto& d = dependency.info;
     if (view >= 32 || d.srcSubpass == VK_SUBPASS_EXTERNAL || d.dstSubpass == VK_SUBPASS_EXTERNAL ||
         d.srcSubpass >= subpasses.size() || d.dstSubpass >= subpasses.size() ||
-        !(subpasses[d.dstSubpass].view_mask & (uint32_t(1) << view))) return 0;
-    const auto mask = subpasses[d.srcSubpass].view_mask;
+        !(replay_mask(d.dstSubpass) & (uint32_t(1) << view))) return 0;
+    const auto mask = replay_mask(d.srcSubpass);
     if (!(d.dependencyFlags & VK_DEPENDENCY_VIEW_LOCAL_BIT)) return mask;
     const int64_t source = int64_t(view) + dependency.view_offset;
     return source >= 0 && source < 32 ? mask & (uint32_t(1) << uint32_t(source)) : 0;
@@ -172,7 +176,7 @@ uint32_t MultiviewPassPlan::source_views(const Dependency& dependency, uint32_t 
 VkImageLayout MultiviewPassPlan::previous_layout(uint32_t attachment, uint32_t subpass, uint32_t view) const {
     while (subpass) {
         const auto& previous = subpasses[--subpass];
-        if ((previous.view_mask & (uint32_t(1) << view)) && used(previous, attachment)) return layout(previous, attachment);
+        if ((replay_mask(subpass) & (uint32_t(1) << view)) && used(previous, attachment)) return layout(previous, attachment);
     }
     return attachments.at(attachment).initialLayout;
 }
@@ -181,10 +185,10 @@ VkImageLayout MultiviewPassPlan::attachment_layout(uint32_t attachment, uint32_t
     return layout(subpasses.at(subpass), attachment);
 }
 MultiviewPassPlan::Chunk MultiviewPassPlan::chunk(uint32_t subpass, uint32_t view, bool first, bool last,
-    const std::vector<uint32_t>& manual_layouts) const {
+    const std::vector<uint32_t>& manual_layouts, const std::vector<uint32_t>& general_attachments) const {
     if (!core_only) throw std::invalid_argument("extended multiview semantics require an additional lowering");
     const auto& src = subpasses.at(subpass);
-    if (view >= 32 || !(src.view_mask & (uint32_t(1) << view))) throw std::invalid_argument("inactive multiview view");
+    if (view >= 32 || !(replay_mask(subpass) & (uint32_t(1) << view))) throw std::invalid_argument("inactive replay view");
     Chunk result;
     std::map<uint32_t, uint32_t> indices;
     references(src, last, [&](const VkAttachmentReference& ref) {
@@ -202,6 +206,8 @@ MultiviewPassPlan::Chunk MultiviewPassPlan::chunk(uint32_t subpass, uint32_t vie
         // 1.1. Its transitions are emitted once around all views, not per slice.
         if (std::find(manual_layouts.begin(), manual_layouts.end(), attachment) != manual_layouts.end())
             desc.initialLayout = desc.finalLayout = layout(src, attachment);
+        if (std::find(general_attachments.begin(),general_attachments.end(),attachment) != general_attachments.end())
+            desc.initialLayout = desc.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
         if (!(first && starts) || resolve_only) {
             desc.loadOp = resolve_only ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD;
             desc.stencilLoadOp = resolve_only ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -268,8 +274,9 @@ std::vector<VkClearValue> MultiviewPassPlan::Chunk::clear_values(uint32_t count,
     return result;
 }
 
-MultiviewPassResources::MultiviewPassResources(VkDevice device, std::shared_ptr<const MultiviewPassPlan> plan, bool emulated)
-    : device_(device), plan_(std::move(plan)), emulated_(emulated) {
+MultiviewPassResources::MultiviewPassResources(VkDevice device, std::shared_ptr<const MultiviewPassPlan> plan, bool emulated,
+                                             bool native_device_group)
+    : device_(device), plan_(std::move(plan)), emulated_(emulated), native_device_group_(native_device_group) {
     create_ = reinterpret_cast<PFN_vkCreateRenderPass>(get_real_proc(get_last_instance(), device, "vkCreateRenderPass"));
     destroy_ = reinterpret_cast<PFN_vkDestroyRenderPass>(get_real_proc(get_last_instance(), device, "vkDestroyRenderPass"));
 }
@@ -316,6 +323,10 @@ VkResult MultiviewPassResources::create_base(const VkAllocationCallbacks* alloca
         std::vector<VkSubpassDependency> dependencies;
         for (const auto& d : plan_->dependencies) {
             auto native = d.info; native.dependencyFlags &= ~VK_DEPENDENCY_VIEW_LOCAL_BIT;
+            // The no-native route exposes singleton groups. Device-local and
+            // non-device-local dependencies coincide there, but a 1.0 driver
+            // must not receive a flag whose device extension is not enabled.
+            if (!native_device_group_) native.dependencyFlags &= ~VK_DEPENDENCY_DEVICE_GROUP_BIT;
             dependencies.push_back(native);
         }
         VkRenderPassInputAttachmentAspectCreateInfo aspects{VK_STRUCTURE_TYPE_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO};
@@ -331,15 +342,18 @@ VkResult MultiviewPassResources::create_base(const VkAllocationCallbacks* alloca
     } catch (const std::bad_alloc&) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
 }
 VkResult MultiviewPassResources::native_pass(uint32_t subpass, uint32_t view, bool first, bool last,
-                                           bool native_input_aspects, VkRenderPass& result, const std::vector<uint32_t>& manual_layouts) {
+                                           bool native_input_aspects, VkRenderPass& result, const std::vector<uint32_t>& manual_layouts,
+                                           const std::vector<uint32_t>& general_attachments) {
     result = VK_NULL_HANDLE;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!device_ || !create_ || !destroy_ || !plan_->core_only) return VK_ERROR_FEATURE_NOT_PRESENT;
     try {
-        const auto key = std::make_tuple(subpass, view, first, last, native_input_aspects, manual_layouts);
+        const auto key = std::make_tuple(subpass, view, first, last, native_input_aspects, manual_layouts,general_attachments);
         const auto cached = native_.find(key);
         if (cached != native_.end()) { result = cached->second; return VK_SUCCESS; }
-        auto chunk = plan_->chunk(subpass, view, first, last, manual_layouts);
+        auto chunk = plan_->chunk(subpass, view, first, last, manual_layouts,general_attachments);
+        if (!native_device_group_) for (auto& dependency : chunk.dependencies)
+            dependency.dependencyFlags &= ~VK_DEPENDENCY_DEVICE_GROUP_BIT;
         if (LayoutCompat::get().is_emulated(device_)) sanitize(chunk);
         auto info = chunk.info(native_input_aspects);
         VkRenderPass pass{};
@@ -373,28 +387,28 @@ void MultiviewRenderPasses::remember_resources(VkDevice device, VkRenderPass pas
     passes_[DeviceObjectKey::make(device, pass)] = std::move(resources);
 }
 bool MultiviewRenderPasses::create_fallback(VkDevice device, const VkRenderPassCreateInfo* info,
-    const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool aspects, VkResult& result) {
-    try { return create_fallback(device, MultiviewPassPlan::capture(info), allocator, pass, aspects, result); }
+    const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool aspects, VkResult& result, bool native_device_group, bool include_ordinary) {
+    try { return create_fallback(device, MultiviewPassPlan::capture(info,include_ordinary), allocator, pass, aspects, result, native_device_group); }
     catch (const std::bad_alloc&) { result = VK_ERROR_OUT_OF_HOST_MEMORY; }
     catch (const std::invalid_argument&) { result = VK_ERROR_UNKNOWN; }
     if (pass) *pass = VK_NULL_HANDLE;
     return true;
 }
 bool MultiviewRenderPasses::create_fallback(VkDevice device, const VkRenderPassCreateInfo2* info,
-    const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool aspects, VkResult& result) {
-    try { return create_fallback(device, MultiviewPassPlan::capture(info), allocator, pass, aspects, result); }
+    const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool aspects, VkResult& result, bool native_device_group, bool include_ordinary) {
+    try { return create_fallback(device, MultiviewPassPlan::capture(info,include_ordinary), allocator, pass, aspects, result, native_device_group); }
     catch (const std::bad_alloc&) { result = VK_ERROR_OUT_OF_HOST_MEMORY; }
     catch (const std::invalid_argument&) { result = VK_ERROR_UNKNOWN; }
     if (pass) *pass = VK_NULL_HANDLE;
     return true;
 }
 bool MultiviewRenderPasses::create_fallback(VkDevice device, std::shared_ptr<const MultiviewPassPlan> plan,
-    const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool aspects, VkResult& result) {
+    const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool aspects, VkResult& result, bool native_device_group) {
     if (!plan) return false;
     result = VK_ERROR_INITIALIZATION_FAILED;
     if (!pass) return true;
     *pass = VK_NULL_HANDLE;
-    auto resources = std::make_shared<MultiviewPassResources>(device, std::move(plan), true);
+    auto resources = std::make_shared<MultiviewPassResources>(device, std::move(plan), true, native_device_group);
     result = resources->create_base(allocator, aspects, *pass);
     if (result == VK_SUCCESS && !*pass) result = VK_ERROR_INITIALIZATION_FAILED;
     if (result != VK_SUCCESS || !*pass) return true;

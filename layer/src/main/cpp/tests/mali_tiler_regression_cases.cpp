@@ -187,7 +187,7 @@ void run_mali_tiler_regressions(void (*check)(bool, const char *)) {
           "non-null RenderPass2 loader symbols do not authorize an unenabled device route");
     // This fixture injects logical device state directly, without CreateDevice.
     // Select an enabled KHR route and provide its complete four-command set.
-    manager.init_device_dispatch_table(device, VK_API_VERSION_1_1, true);
+    manager.init_device_dispatch_table(device, VK_API_VERSION_1_1, {VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME});
     manager.update_device_bypass_flags(device);
     check(manager.should_intercept_device_proc(device, "vkCreateRenderPass2KHR") &&
               manager.should_intercept_device_proc(device, "vkCmdBeginQuery") &&

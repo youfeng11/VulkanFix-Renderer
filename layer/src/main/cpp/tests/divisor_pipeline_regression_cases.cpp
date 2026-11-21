@@ -102,6 +102,18 @@ void run_divisor_pipeline_regressions(void (*check)(bool, const char*)) {
     auto owned = std::make_unique<EmulatedDivisor>();
     auto& module = *owned;
     manager.register_module(std::move(owned));
+    DivisorPipelineTestAccess::physical(module, physical_a, false);
+    VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR khr_divisor{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_KHR};
+    VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT ext_divisor{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT, &khr_divisor};
+    VkPhysicalDeviceProperties2 divisor_properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &ext_divisor};
+    void* property_data = nullptr;
+    module.on_pre_get_properties2(physical_a, &divisor_properties, property_data);
+    module.on_post_get_properties2(physical_a, &divisor_properties, property_data);
+    check(ext_divisor.maxVertexAttribDivisor == UINT32_MAX && khr_divisor.maxVertexAttribDivisor == UINT32_MAX &&
+          divisor_properties.pNext == &ext_divisor && ext_divisor.pNext == &khr_divisor && !khr_divisor.pNext,
+          "a mixed EXT/KHR divisor property query fills both distinct structures and preserves their headers");
     VkDeviceCreateInfo create_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     VkDevice a{}, b{};
     manager.dispatch_create_device(physical_a, &create_info, nullptr, &a);

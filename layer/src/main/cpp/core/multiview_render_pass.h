@@ -47,6 +47,9 @@ struct MultiviewPassPlan {
         std::vector<VkClearValue> clear_values(uint32_t count, const VkClearValue* original) const;
     };
     VkRenderPassCreateFlags flags = 0;
+    bool multiview = false;
+    // Replay groups: ordinary layered passes execute once (bit0), without
+    // changing their native framebuffer layers or logical viewMask==0.
     uint32_t all_views = 0;
     bool core_only = true;
     std::vector<VkAttachmentDescription> attachments;
@@ -55,14 +58,15 @@ struct MultiviewPassPlan {
     std::vector<uint32_t> correlation_masks;
     std::vector<Lifetime> lifetimes;
 
-    static std::shared_ptr<const MultiviewPassPlan> capture(const VkRenderPassCreateInfo* info);
-    static std::shared_ptr<const MultiviewPassPlan> capture(const VkRenderPassCreateInfo2* info);
+    static std::shared_ptr<const MultiviewPassPlan> capture(const VkRenderPassCreateInfo* info, bool include_ordinary = false);
+    static std::shared_ptr<const MultiviewPassPlan> capture(const VkRenderPassCreateInfo2* info, bool include_ordinary = false);
+    uint32_t replay_mask(uint32_t subpass) const { return multiview ? subpasses.at(subpass).view_mask : 1u; }
     uint32_t source_views(const Dependency& dependency, uint32_t destination_view) const;
     // first/last refer to chunks of one logical subpass, not the entire pass.
     // Only the last chunk resolves multisampled attachments. Non-final chunks
     // store their contents so barrier-driven splits do not discard them.
     Chunk chunk(uint32_t subpass, uint32_t view, bool first, bool last,
-        const std::vector<uint32_t>& manual_layouts = {}) const;
+        const std::vector<uint32_t>& manual_layouts = {}, const std::vector<uint32_t>& general_attachments = {}) const;
     VkImageLayout attachment_layout(uint32_t attachment, uint32_t subpass) const;
 private:
     void finish();
@@ -73,22 +77,25 @@ private:
 // Native resources are lazy: tracking native multiview alone creates none.
 class MultiviewPassResources {
 public:
-    MultiviewPassResources(VkDevice device, std::shared_ptr<const MultiviewPassPlan> plan, bool emulated = false);
+    MultiviewPassResources(VkDevice device, std::shared_ptr<const MultiviewPassPlan> plan, bool emulated = false,
+                          bool native_device_group = false);
     ~MultiviewPassResources();
     std::shared_ptr<const MultiviewPassPlan> plan() const { return plan_; }
     bool emulated() const { return emulated_; }
+    bool native_device_group() const { return native_device_group_; }
     VkResult create_base(const VkAllocationCallbacks* allocator, bool native_input_aspects, VkRenderPass& result);
     VkResult native_pass(uint32_t subpass, uint32_t view, bool first, bool last,
-                         bool native_input_aspects, VkRenderPass& result, const std::vector<uint32_t>& manual_layouts = {});
+                         bool native_input_aspects, VkRenderPass& result, const std::vector<uint32_t>& manual_layouts = {},
+                         const std::vector<uint32_t>& general_attachments = {});
     void release();
 private:
     std::mutex mutex_;
     VkDevice device_;
     std::shared_ptr<const MultiviewPassPlan> plan_;
-    bool emulated_;
+    bool emulated_, native_device_group_;
     PFN_vkCreateRenderPass create_ = nullptr;
     PFN_vkDestroyRenderPass destroy_ = nullptr;
-    std::map<std::tuple<uint32_t, uint32_t, bool, bool, bool, std::vector<uint32_t>>, VkRenderPass> native_;
+    std::map<std::tuple<uint32_t, uint32_t, bool, bool, bool, std::vector<uint32_t>,std::vector<uint32_t>>, VkRenderPass> native_;
 };
 
 class MultiviewRenderPasses {
@@ -97,9 +104,11 @@ public:
     void remember(VkDevice device, VkRenderPass pass, const VkRenderPassCreateInfo* info);
     void remember(VkDevice device, VkRenderPass pass, const VkRenderPassCreateInfo2* info);
     bool create_fallback(VkDevice device, const VkRenderPassCreateInfo* info,
-        const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool native_input_aspects, VkResult& result);
+        const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool native_input_aspects, VkResult& result,
+        bool native_device_group = false, bool include_ordinary = false);
     bool create_fallback(VkDevice device, const VkRenderPassCreateInfo2* info,
-        const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool native_input_aspects, VkResult& result);
+        const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool native_input_aspects, VkResult& result,
+        bool native_device_group = false, bool include_ordinary = false);
     std::shared_ptr<MultiviewPassResources> acquire(VkDevice device, VkRenderPass pass);
     void forget(VkDevice device, VkRenderPass pass);
     // Also releases resources retained by a pipeline/command buffer whose
@@ -107,7 +116,8 @@ public:
     void forget_device(VkDevice device);
 private:
     bool create_fallback(VkDevice device, std::shared_ptr<const MultiviewPassPlan> plan,
-        const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool native_input_aspects, VkResult& result);
+        const VkAllocationCallbacks* allocator, VkRenderPass* pass, bool native_input_aspects, VkResult& result,
+        bool native_device_group);
     void remember_resources(VkDevice device, VkRenderPass pass, std::shared_ptr<MultiviewPassResources> resources);
     void remember(VkDevice device, VkRenderPass pass, std::shared_ptr<const MultiviewPassPlan> plan);
     std::mutex mutex_;

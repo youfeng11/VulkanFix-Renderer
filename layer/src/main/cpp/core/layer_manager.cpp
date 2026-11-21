@@ -1,12 +1,20 @@
 #include "layer_manager.h"
+#include "image_slice_copy_repair.h"
+#include "discard_state_repair.h"
 #include "driver_info.h"
 #include "vertex_store_emulator.h"
 #include "promoted_features.h"
 #include "promoted_properties.h"
 #include "input_pnext_copy.h"
+#include "singleton_device_group.h"
+#include "device_group_routes.h"
 #include "timeline_scheduler.h"
 #include "extension_dependencies.h"
 #include "native_instance_state.h"
+#include "native_queue_route.h"
+#include "public_proc_state.h"
+#include "descriptor_layout_query.h"
+#include "feature_request_validation.h"
 #include "legacy_query_array.h"
 #include "memory_requirements_repair.h"
 #include "driver_loader.h"
@@ -18,7 +26,10 @@
 #include "modules/vulkan_1_1/negative_viewport.h"
 #include "core11_aggregate_repair.h"
 #include "modules/vulkan_1_1/dispatch_base.h"
+#include "modules/vulkan_1_1/descriptor_update_template.h"
 #include "modules/vulkan_1_2/renderpass2.h"
+#include "modules/vulkan_1_3/dynamic_rendering.h"
+#include "modules/vulkan_1_3/synchronization2.h"
 #include "shader/uniform_member_pruning.h"
 #include "driver_trust.h"
 #include "shader/sampler_alias_dedup.h"
@@ -28,6 +39,9 @@
 #include "multiview_attachments.h"
 #include "multiview_descriptors.h"
 #include "multiview_commands.h"
+#include "image_type_copy.h"
+#include "volume_attachment.h"
+#include "msaa_resolve_image.h"
 #include "multiview_pipeline_layouts.h"
 #include "layout_compat.h"
 #include "vk_pnext.h"
@@ -37,6 +51,13 @@ static VKAPI_ATTR void VKAPI_CALL multiview_begin_native(VkCommandBuffer cmd, co
     LayerManager::get().dispatch_cmd_begin_render_pass(cmd, info, contents);
 }
 static VKAPI_ATTR void VKAPI_CALL multiview_end_native(VkCommandBuffer cmd) { LayerManager::get().dispatch_cmd_end_render_pass(cmd); }
+static VKAPI_ATTR void VKAPI_CALL multiview_resolve_native(VkCommandBuffer cmd, VkImage source, VkImageLayout source_layout,
+    VkImage target, VkImageLayout target_layout, uint32_t count, const VkImageResolve* regions) {
+    auto& manager = LayerManager::get();
+    TBDRBarrierOptimizer::get().on_cmd_action(cmd);
+    const auto& dt = manager.get_dispatch_table(manager.get_device_for_cmd(cmd));
+    dt.CmdResolveImage(cmd,source,source_layout,target,target_layout,count,regions);
+}
 static VKAPI_ATTR VkResult VKAPI_CALL multiview_layout_create(VkDevice device, const VkPipelineLayoutCreateInfo* info,
     const VkAllocationCallbacks* allocator, VkPipelineLayout* layout) {
     return LayerManager::get().dispatch_create_pipeline_layout(device, info, allocator, layout, true);
@@ -48,6 +69,19 @@ static VKAPI_ATTR void VKAPI_CALL multiview_barrier_native(VkCommandBuffer cmd, 
     VkPipelineStageFlags dst, VkDependencyFlags flags, uint32_t mc, const VkMemoryBarrier* memory,
     uint32_t bc, const VkBufferMemoryBarrier* buffers, uint32_t ic, const VkImageMemoryBarrier* images) {
     LayerManager::get().dispatch_cmd_pipeline_barrier(cmd, src, dst, flags, mc, memory, bc, buffers, ic, images);
+}
+static VKAPI_ATTR void VKAPI_CALL attachment_requirements(VkDevice device,
+    const VkImageMemoryRequirementsInfo2* info, VkMemoryRequirements2* result) {
+    LayerManager::get().dispatch_get_image_memory_requirements2(device,info,result);
+}
+static VKAPI_ATTR void VKAPI_CALL attachment_descriptor_update(VkDevice device, uint32_t wc, const VkWriteDescriptorSet* writes,
+    uint32_t cc, const VkCopyDescriptorSet* copies) {
+    const auto update = (PFN_vkUpdateDescriptorSets)get_real_proc(get_last_instance(),device,"vkUpdateDescriptorSets");
+    if (!update) return;
+    if (LayerManager::get().uses_render_pass_replay(device) &&
+        !(LayerManager::get().get_device_spirv_extensions(device) & vkfix::NativeMaintenance1) &&
+        vkfix::MultiviewDescriptors::get().update_native_layouts(device,wc,writes,cc,copies,update)) return;
+    update(device,wc,writes,cc,copies);
 }
 
 LayerManager& LayerManager::get() {
@@ -118,10 +152,16 @@ void LayerManager::register_module(std::unique_ptr<IVulkanLayerModule> module) {
 }
 
 void LayerManager::init_device_dispatch_table(VkDevice device, uint32_t nativeApi,
-                                            bool renderPass2Extension) {
+                                            const std::vector<const char*>& nativeExtensions,
+                                            const VkAllocationCallbacks* hostAllocator) {
     if (device == VK_NULL_HANDLE) return;
     DeviceDispatchTable dt{};
+    if (hostAllocator) dt.allocationCallbacks = *hostAllocator;
     VkInstance inst = get_last_instance();
+    auto enabled = [&](const char* name) {
+        return std::any_of(nativeExtensions.begin(), nativeExtensions.end(),
+            [&](const char* candidate) { return strcmp(name, candidate) == 0; });
+    };
 
     #define LOAD_PROC(name) \
         dt.name = (decltype(dt.name)) get_real_proc(inst, device, "vk" #name)
@@ -175,7 +215,9 @@ void LayerManager::init_device_dispatch_table(VkDevice device, uint32_t nativeAp
     LOAD_PROC(QueueWaitIdle);
     LOAD_PROC(DeviceWaitIdle);
     LOAD_PROC(GetDeviceQueue);
-    LOAD_PROC(GetDeviceQueue2);
+    if (nativeApi >= VK_API_VERSION_1_1) {
+        LOAD_PROC(GetDeviceQueue2);
+    }
     LOAD_PROC(CreateGraphicsPipelines);
     LOAD_PROC(CreateComputePipelines);
     LOAD_PROC(CreatePipelineCache);
@@ -230,7 +272,7 @@ void LayerManager::init_device_dispatch_table(VkDevice device, uint32_t nativeAp
         LOAD_PROC(CmdBeginRenderPass2);
         LOAD_PROC(CmdNextSubpass2);
         LOAD_PROC(CmdEndRenderPass2);
-    } else if (renderPass2Extension) {
+    } else if (enabled(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)) {
         LOAD_PROC_OPT(CreateRenderPass2, "vkCreateRenderPass2KHR");
         LOAD_PROC_OPT(CmdBeginRenderPass2, "vkCmdBeginRenderPass2KHR");
         LOAD_PROC_OPT(CmdNextSubpass2, "vkCmdNextSubpass2KHR");
@@ -270,48 +312,60 @@ void LayerManager::init_device_dispatch_table(VkDevice device, uint32_t nativeAp
     if (!dt.GetBufferDeviceAddress) {
         LOAD_PROC_OPT(GetBufferDeviceAddress, "vkGetBufferDeviceAddressEXT");
     }
-    LOAD_PROC(BindBufferMemory2);
-    if (!dt.BindBufferMemory2) {
+    if (nativeApi >= VK_API_VERSION_1_1) {
+        LOAD_PROC(BindBufferMemory2);
+        LOAD_PROC(BindImageMemory2);
+    } else if (enabled(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME)) {
         LOAD_PROC_OPT(BindBufferMemory2, "vkBindBufferMemory2KHR");
-    }
-    LOAD_PROC(BindImageMemory2);
-    if (!dt.BindImageMemory2) {
         LOAD_PROC_OPT(BindImageMemory2, "vkBindImageMemory2KHR");
     }
-    LOAD_PROC(GetBufferMemoryRequirements2);
-    if (!dt.GetBufferMemoryRequirements2) {
+    if (nativeApi >= VK_API_VERSION_1_1) {
+        LOAD_PROC(GetBufferMemoryRequirements2);
+        LOAD_PROC(GetImageMemoryRequirements2);
+        LOAD_PROC(GetImageSparseMemoryRequirements2);
+    } else if (enabled(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME)) {
         LOAD_PROC_OPT(GetBufferMemoryRequirements2, "vkGetBufferMemoryRequirements2KHR");
-    }
-    LOAD_PROC(GetImageMemoryRequirements2);
-    if (!dt.GetImageMemoryRequirements2) {
         LOAD_PROC_OPT(GetImageMemoryRequirements2, "vkGetImageMemoryRequirements2KHR");
-    }
-    LOAD_PROC(GetImageSparseMemoryRequirements2);
-    if (!dt.GetImageSparseMemoryRequirements2) {
         LOAD_PROC_OPT(GetImageSparseMemoryRequirements2, "vkGetImageSparseMemoryRequirements2KHR");
     }
-    LOAD_PROC(UpdateDescriptorSetWithTemplate);
-    if (!dt.UpdateDescriptorSetWithTemplate) {
+    if (nativeApi >= VK_API_VERSION_1_1) {
+        LOAD_PROC(CreateDescriptorUpdateTemplate);
+        LOAD_PROC(DestroyDescriptorUpdateTemplate);
+        LOAD_PROC(UpdateDescriptorSetWithTemplate);
+    } else if (enabled(VK_KHR_DESCRIPTOR_UPDATE_TEMPLATE_EXTENSION_NAME)) {
+        LOAD_PROC_OPT(CreateDescriptorUpdateTemplate, "vkCreateDescriptorUpdateTemplateKHR");
+        LOAD_PROC_OPT(DestroyDescriptorUpdateTemplate, "vkDestroyDescriptorUpdateTemplateKHR");
         LOAD_PROC_OPT(UpdateDescriptorSetWithTemplate, "vkUpdateDescriptorSetWithTemplateKHR");
     }
-    LOAD_PROC(GetDescriptorSetLayoutSupport);
-    if (!dt.GetDescriptorSetLayoutSupport) {
-        LOAD_PROC_OPT(GetDescriptorSetLayoutSupport, "vkGetDescriptorSetLayoutSupportKHR");
+    const bool nativeTemplates = dt.CreateDescriptorUpdateTemplate && dt.DestroyDescriptorUpdateTemplate && dt.UpdateDescriptorSetWithTemplate;
+    if (!nativeTemplates) {
+        dt.CreateDescriptorUpdateTemplate = nullptr;
+        dt.DestroyDescriptorUpdateTemplate = nullptr;
+        dt.UpdateDescriptorSetWithTemplate = nullptr;
     }
-    LOAD_PROC(CmdDispatchBase);
-    if (!dt.CmdDispatchBase) {
+    if (m_desc_template_mod && m_desc_template_mod->is_enabled()) {
+        auto* templates = static_cast<DescriptorUpdateTemplateModule*>(m_desc_template_mod);
+        templates->set_native_route(device, nativeTemplates);
+        templates->set_update_callback(attachment_descriptor_update);
+    }
+    if (nativeApi >= VK_API_VERSION_1_1) {
+        LOAD_PROC(GetDescriptorSetLayoutSupport);
+        LOAD_PROC(TrimCommandPool);
+    } else {
+        if (enabled(VK_KHR_MAINTENANCE3_EXTENSION_NAME)) {
+            LOAD_PROC_OPT(GetDescriptorSetLayoutSupport, "vkGetDescriptorSetLayoutSupportKHR");
+        }
+        if (enabled(VK_KHR_MAINTENANCE1_EXTENSION_NAME)) {
+            LOAD_PROC_OPT(TrimCommandPool, "vkTrimCommandPoolKHR");
+        }
+    }
+    if (nativeApi >= VK_API_VERSION_1_1) {
+        LOAD_PROC(CmdDispatchBase);
+        LOAD_PROC(CmdSetDeviceMask);
+        LOAD_PROC(GetDeviceGroupPeerMemoryFeatures);
+    } else if (enabled(VK_KHR_DEVICE_GROUP_EXTENSION_NAME)) {
         LOAD_PROC_OPT(CmdDispatchBase, "vkCmdDispatchBaseKHR");
-    }
-    LOAD_PROC(TrimCommandPool);
-    if (!dt.TrimCommandPool) {
-        LOAD_PROC_OPT(TrimCommandPool, "vkTrimCommandPoolKHR");
-    }
-    LOAD_PROC(CmdSetDeviceMask);
-    if (!dt.CmdSetDeviceMask) {
         LOAD_PROC_OPT(CmdSetDeviceMask, "vkCmdSetDeviceMaskKHR");
-    }
-    LOAD_PROC(GetDeviceGroupPeerMemoryFeatures);
-    if (!dt.GetDeviceGroupPeerMemoryFeatures) {
         LOAD_PROC_OPT(GetDeviceGroupPeerMemoryFeatures, "vkGetDeviceGroupPeerMemoryFeaturesKHR");
     }
     LOAD_PROC_OPT(CreateSwapchain, "vkCreateSwapchainKHR");
@@ -336,6 +390,7 @@ void LayerManager::init_device_dispatch_table(VkDevice device, uint32_t nativeAp
     LOAD_PROC_OPT(CmdDispatchIndirect, "vkCmdDispatchIndirect");
     LOAD_PROC_OPT(CmdCopyBuffer, "vkCmdCopyBuffer");
     LOAD_PROC_OPT(CmdCopyImage, "vkCmdCopyImage");
+    LOAD_PROC_OPT(CmdResolveImage, "vkCmdResolveImage");
     LOAD_PROC_OPT(CmdBlitImage, "vkCmdBlitImage");
     LOAD_PROC_OPT(CmdCopyBufferToImage, "vkCmdCopyBufferToImage");
     LOAD_PROC_OPT(CmdCopyImageToBuffer, "vkCmdCopyImageToBuffer");
@@ -343,6 +398,9 @@ void LayerManager::init_device_dispatch_table(VkDevice device, uint32_t nativeAp
     LOAD_PROC_OPT(CmdClearColorImage, "vkCmdClearColorImage");
     LOAD_PROC_OPT(CmdClearDepthStencilImage, "vkCmdClearDepthStencilImage");
     LOAD_PROC_OPT(CmdExecuteCommands, "vkCmdExecuteCommands");
+
+    if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled())
+        static_cast<DispatchBaseModule*>(m_dispatch_base_mod)->set_native_route(device, dt.CmdDispatchBase != nullptr);
 
     #undef LOAD_PROC
     #undef LOAD_PROC_OPT
@@ -390,6 +448,10 @@ void LayerManager::update_device_bypass_flags(VkDevice device) {
     flags.bypass_draw = (m_divisor_mod == nullptr || !m_divisor_mod->is_enabled() || m_divisor_mod->is_device_native(device));
     flags.bypass_multi_draw = (m_multi_draw_indirect_mod == nullptr || !m_multi_draw_indirect_mod->is_enabled() || m_multi_draw_indirect_mod->is_device_native(device));
     flags.bypass_sync2 = (m_sync2_mod == nullptr || !m_sync2_mod->is_enabled() || m_sync2_mod->is_device_native(device));
+    flags.bypass_submit2 = flags.bypass_sync2 && (!m_sync2_mod || !m_sync2_mod->is_enabled() ||
+        !static_cast<Synchronization2Module *>(m_sync2_mod)->prefers_legacy_submit(device));
+    flags.bypass_reset_event2 = flags.bypass_sync2 && (!m_sync2_mod || !m_sync2_mod->is_enabled() ||
+        !static_cast<Synchronization2Module *>(m_sync2_mod)->prefers_legacy_reset(device));
     flags.bypass_dynamic_rendering = (m_dyn_rendering_mod == nullptr || !m_dyn_rendering_mod->is_enabled() || m_dyn_rendering_mod->is_device_native(device));
     flags.bypass_push_descriptor = (m_push_desc_mod == nullptr || !m_push_desc_mod->is_enabled() || m_push_desc_mod->is_device_native(device));
     flags.bypass_timeline = (m_timeline_mod == nullptr || !m_timeline_mod->is_enabled() || m_timeline_mod->is_device_native(device));
@@ -428,7 +490,58 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
     if (VertexStoreEmulator::get().enabled(device)) return true;
 
     if (!pName) return true;
-    if (uses_software_multiview(device) && !strncmp(pName, "vkCmd", 5)) return true;
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1) &&
+        (!strcmp(pName,"vkEndCommandBuffer") || !strcmp(pName,"vkResetCommandPool")))
+        return true; // Preserve staging error reporting and resource retirement on the legacy route.
+    const bool discard_repair = vkfix::DiscardStateRepair::get().enabled(device);
+    for (const auto *name : {"vkCmdSetViewportWithCount", "vkCmdSetViewportWithCountEXT",
+                            "vkCmdSetScissorWithCount", "vkCmdSetScissorWithCountEXT",
+                            "vkCmdSetRasterizerDiscardEnable", "vkCmdSetRasterizerDiscardEnableEXT",
+                            "vkCmdBindShadersEXT", "vkCmdExecuteGeneratedCommandsEXT",
+                            "vkCmdExecuteGeneratedCommandsNV", "vkCmdBindPipelineShaderGroupNV"})
+        if (!strcmp(pName, name)) return discard_repair;
+    if (discard_repair &&
+        (!strcmp(pName, "vkCmdBindPipeline") || !strcmp(pName, "vkCmdBindShadersEXT") ||
+         !strncmp(pName, "vkCmdSetViewport", 16) || !strncmp(pName, "vkCmdSetScissor", 15) ||
+         !strncmp(pName, "vkCmdSetRasterizerDiscardEnable", 30) ||
+         !strcmp(pName, "vkCmdExecuteCommands")))
+        return true;
+    // Copies can become repairable after their command pointers are queried.
+    if (!strcmp(pName, "vkCreateCommandPool") || !strcmp(pName, "vkDestroyCommandPool"))
+        return true;
+    // Compute replay needs the currently bound pipeline even when every
+    // graphics feature can otherwise use a raw native binding shortcut.
+    if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled() &&
+        !m_dispatch_base_mod->is_device_native(device) && !strcmp(pName,"vkCmdBindPipeline"))
+        return true;
+    // Both public spellings must use the actual enabled Core/KHR backend.
+    // A raw loader pointer can belong to an unenabled spelling or bypass
+    // dispatch-base emulation on a legacy application API target.
+    for (const char* name : {"vkCmdSetDeviceMask", "vkCmdSetDeviceMaskKHR",
+                            "vkCmdDispatchBase", "vkCmdDispatchBaseKHR",
+                            "vkGetDeviceGroupPeerMemoryFeatures", "vkGetDeviceGroupPeerMemoryFeaturesKHR",
+                            "vkTrimCommandPool", "vkTrimCommandPoolKHR",
+                            "vkGetDescriptorSetLayoutSupport", "vkGetDescriptorSetLayoutSupportKHR",
+                            "vkGetBufferMemoryRequirements2", "vkGetBufferMemoryRequirements2KHR",
+                            "vkGetImageMemoryRequirements2", "vkGetImageMemoryRequirements2KHR",
+                            "vkGetImageSparseMemoryRequirements2", "vkGetImageSparseMemoryRequirements2KHR",
+                            "vkCreateDescriptorUpdateTemplate", "vkCreateDescriptorUpdateTemplateKHR",
+                            "vkDestroyDescriptorUpdateTemplate", "vkDestroyDescriptorUpdateTemplateKHR",
+                            "vkUpdateDescriptorSetWithTemplate", "vkUpdateDescriptorSetWithTemplateKHR"})
+        if (!strcmp(pName, name)) return true;
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup) &&
+        (!strcmp(pName,"vkCmdPipelineBarrier") || !strcmp(pName,"vkCmdSetDeviceMask") ||
+         !strcmp(pName,"vkCmdSetDeviceMaskKHR"))) return true;
+    if (uses_render_pass_replay(device)) {
+        if (!strncmp(pName,"vkCmd",5)) return true;
+        for (const char* name : {"vkQueueSubmit","vkQueueSubmit2","vkQueueSubmit2KHR",
+            "vkCreateImage","vkDestroyImage","vkCreateImageView","vkDestroyImageView",
+            "vkCreateFramebuffer","vkDestroyFramebuffer","vkCreateRenderPass","vkDestroyRenderPass",
+            "vkCreateGraphicsPipelines","vkDestroyPipeline","vkCreateShaderModule","vkDestroyShaderModule",
+            "vkCreatePipelineLayout","vkDestroyPipelineLayout","vkCreateDescriptorSetLayout","vkDestroyDescriptorSetLayout",
+            "vkAllocateDescriptorSets","vkFreeDescriptorSets","vkCreateDescriptorPool","vkResetDescriptorPool",
+            "vkDestroyDescriptorPool","vkUpdateDescriptorSets"}) if (!strcmp(pName,name)) return true;
+    }
     if (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview) &&
         (!strcmp(pName, "vkAllocateDescriptorSets") || !strcmp(pName, "vkFreeDescriptorSets") ||
          !strcmp(pName, "vkCreateDescriptorPool") || !strcmp(pName, "vkResetDescriptorPool") ||
@@ -475,7 +588,7 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
         return true;
     // These were direct driver calls before vertex emulation introduced state tracking.
     for (const char* name : {"vkCreateBuffer", "vkDestroyBuffer", "vkDestroyShaderModule",
-                            "vkCreateCommandPool", "vkDestroyCommandPool", "vkResetCommandPool",
+                            "vkResetCommandPool",
                             "vkEndCommandBuffer", "vkCmdBindDescriptorSets", "vkCmdBindIndexBuffer",
                             "vkCmdPushConstants", "vkCmdBeginQuery", "vkCmdEndQuery",
                             "vkCmdBindDescriptorSets2", "vkCmdBindDescriptorSets2KHR",
@@ -541,11 +654,9 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
                     return false;
                 }
             }
-            if (c0 == 'S' || c0 == 'R' || c0 == 'W') {
+            if (c0 == 'S' || c0 == 'W') {
                 if (strcmp(cmd, "SetEvent2") == 0 ||
                     strcmp(cmd, "SetEvent2KHR") == 0 ||
-                    strcmp(cmd, "ResetEvent2") == 0 ||
-                    strcmp(cmd, "ResetEvent2KHR") == 0 ||
                     strcmp(cmd, "WaitEvents2") == 0 ||
                     strcmp(cmd, "WaitEvents2KHR") == 0 ||
                     strcmp(cmd, "WriteTimestamp2") == 0 ||
@@ -553,6 +664,10 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
                     return false;
                 }
             }
+        }
+        if (flags.bypass_reset_event2 && c0 == 'R' &&
+            (strcmp(cmd, "ResetEvent2") == 0 || strcmp(cmd, "ResetEvent2KHR") == 0)) {
+            return false;
         }
         if (!tbdr_active) {
             if (flags.bypass_dynamic_rendering && (c0 == 'B' || c0 == 'E')) {
@@ -602,7 +717,7 @@ bool LayerManager::should_intercept_device_proc(VkDevice device, const char* pNa
     }
 
     // Queue submissions:
-    if (flags.bypass_sync2 && flags.bypass_timeline) {
+    if (flags.bypass_submit2 && flags.bypass_timeline) {
         if (strcmp(pName, "vkQueueSubmit2") == 0 ||
             strcmp(pName, "vkQueueSubmit2KHR") == 0) {
             return false;
@@ -727,6 +842,33 @@ bool LayerManager::uses_software_multiview(VkDevice device) {
     std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
     return m_device_software_multiview.count((uint64_t)(uintptr_t)device) != 0;
 }
+bool LayerManager::uses_render_pass_replay(VkDevice device) {
+    return uses_software_multiview(device) || (get_device_max_spirv_version(device) &&
+        !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1));
+}
+VkResult LayerManager::prepare_software_multiview_pipelines(VkDevice device, uint32_t count,
+    const VkGraphicsPipelineCreateInfo* infos, std::vector<VkGraphicsPipelineCreateInfo>& prepared,
+    std::vector<vkfix::InputPNextCopy>& chains) {
+    if (!infos || !uses_render_pass_replay(device) || !m_dyn_rendering_mod || !m_dyn_rendering_mod->is_enabled())
+        return VK_SUCCESS;
+    try {
+        auto module = static_cast<DynamicRenderingModule*>(m_dyn_rendering_mod);
+        for (uint32_t i = 0; i < count; ++i) {
+            VkRenderPass pass{};
+            const auto result = module->prepare_software_multiview_pipeline(device, infos[i], pass);
+            if (result != VK_SUCCESS) return result;
+            if (!pass) continue;
+            if (prepared.empty()) { prepared.assign(infos, infos + count); chains.resize(count); }
+            const auto copied = chains[i].copy(infos[i].pNext, vkfix::InputChainKind::GraphicsPipeline,
+                false, VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO);
+            if (copied != VK_SUCCESS) return copied;
+            prepared[i].renderPass = pass;
+            prepared[i].subpass = 0;
+            prepared[i].pNext = chains[i].head();
+        }
+        return VK_SUCCESS;
+    } catch (const std::bad_alloc&) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
+}
 
 vkfix::SubgroupBroadcastSupport LayerManager::get_device_subgroup_broadcast(VkDevice device) {
     std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
@@ -743,6 +885,10 @@ bool LayerManager::should_dedup_sampler_aliases(VkDevice device) {
     std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
     return m_device_sampler_alias_dedup.count((uint64_t)(uintptr_t)device) != 0;
 }
+bool LayerManager::should_repair_msaa_array_resolve(VkDevice device) {
+    std::shared_lock<std::shared_mutex> lock(m_device_info_mutex);
+    return m_device_msaa_array_resolve_repair.count((uint64_t)(uintptr_t)device) != 0;
+}
 
 VkResult LayerManager::dispatch_enumerate_device_extensions(
     VkPhysicalDevice physicalDevice,
@@ -750,8 +896,10 @@ VkResult LayerManager::dispatch_enumerate_device_extensions(
     uint32_t* pPropertyCount,
     VkExtensionProperties* pProperties
 ) {
+    auto instance = vkfix::native_instance_for_physical(physicalDevice);
+    if (!instance) instance = get_last_instance();
     PFN_vkEnumerateDeviceExtensionProperties real_fn =
-        (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+        (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(instance, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     if (pLayerName != NULL) {
@@ -796,8 +944,10 @@ void LayerManager::dispatch_get_physical_device_features(
 ) {
     if (!pFeatures) return;
 
+    auto instance = vkfix::native_instance_for_physical(physicalDevice);
+    if (!instance) instance = get_last_instance();
     PFN_vkGetPhysicalDeviceFeatures real_fn =
-        (PFN_vkGetPhysicalDeviceFeatures) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures");
+        (PFN_vkGetPhysicalDeviceFeatures) get_real_proc(instance, VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures");
     if (real_fn) {
         real_fn(physicalDevice, pFeatures);
     }
@@ -868,11 +1018,12 @@ void LayerManager::dispatch_get_physical_device_features2(
         }
     }
 
-    real_fn(physicalDevice, pFeatures);
+    promotions.query_native();
     vkfix::repair_vulkan11_features(physicalDevice, pFeatures);
 
     for (size_t i = 0; i < mod_count; i++) {
         if (m_modules[i]->is_enabled()) {
+            m_modules[i]->on_get_features(physicalDevice, &pFeatures->features);
             m_modules[i]->on_post_get_features2(physicalDevice, pFeatures, user_data[i]);
         }
     }
@@ -907,8 +1058,10 @@ void LayerManager::dispatch_get_physical_device_properties(
 ) {
     if (!pProperties) return;
 
+    auto instance = vkfix::native_instance_for_physical(physicalDevice);
+    if (!instance) instance = get_last_instance();
     PFN_vkGetPhysicalDeviceProperties real_fn =
-        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+        (PFN_vkGetPhysicalDeviceProperties) get_real_proc(instance, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
     if (real_fn) {
         real_fn(physicalDevice, pProperties);
     }
@@ -918,6 +1071,11 @@ void LayerManager::dispatch_get_physical_device_properties(
             mod->on_get_properties(physicalDevice, pProperties);
         }
     }
+}
+
+static VKAPI_ATTR void VKAPI_CALL query_public_features_for_create(VkPhysicalDevice physical,
+                                                       VkPhysicalDeviceFeatures2* features) {
+    LayerManager::get().dispatch_get_physical_device_features2(physical, features);
 }
 
 VkResult LayerManager::dispatch_create_device(
@@ -933,6 +1091,13 @@ VkResult LayerManager::dispatch_create_device(
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
     if (!pCreateInfo) return real_fn(physicalDevice, pCreateInfo, pAllocator, pDevice);
+
+    const auto feature_status = vkfix::validate_device_features(physicalDevice, *pCreateInfo,
+                                                              query_public_features_for_create);
+    if (feature_status != VK_SUCCESS) {
+        if (pDevice) *pDevice = VK_NULL_HANDLE;
+        return feature_status;
+    }
 
     VkDeviceCreateInfo modCreateInfo = *pCreateInfo;
     VkPhysicalDeviceFeatures modFeatures{};
@@ -1048,12 +1213,27 @@ VkResult LayerManager::dispatch_create_device(
                               ? vkfix::close_extension_dependencies(enabledExtensions, environment)
                               : vkfix::ExtensionDependencyPlan{};
     if (res == VK_SUCCESS) res = dependencyPlan.result;
+    VkDeviceGroupDeviceCreateInfo group_storage{};
+    if (res == VK_SUCCESS) {
+        const bool nativeGroup = environment.device_api >= VK_API_VERSION_1_1 ||
+            std::any_of(dependencyPlan.names.begin(),dependencyPlan.names.end(),
+                [](const char* name) { return strcmp(name,VK_KHR_DEVICE_GROUP_EXTENSION_NAME) == 0; });
+        res = vkfix::prepare_device_group_creation(nativeInstance,physicalDevice,*pCreateInfo,modCreateInfo,nativeGroup,group_storage);
+    }
     if (res == VK_SUCCESS) {
         modCreateInfo.enabledExtensionCount = uint32_t(dependencyPlan.names.size());
         modCreateInfo.ppEnabledExtensionNames = dependencyPlan.names.empty() ? nullptr : dependencyPlan.names.data();
         res = real_fn(physicalDevice, &modCreateInfo, pAllocator, pDevice);
+        if (res == VK_SUCCESS && pDevice && *pDevice) {
+            res = vkfix::remember_public_device(*pDevice, nativeInstance, *pCreateInfo);
+            if (res != VK_SUCCESS) {
+                if (auto destroy = (PFN_vkDestroyDevice)get_real_proc(nativeInstance, *pDevice, "vkDestroyDevice"))
+                    destroy(*pDevice, pAllocator);
+                *pDevice = VK_NULL_HANDLE;
+            }
+        }
     } else {
-        LOGE("vkCreateDevice: native extension dependency failed: %s", dependencyPlan.missing.c_str());
+        LOGE("vkCreateDevice: native input/dependency preparation failed (%d): %s", res, dependencyPlan.missing.c_str());
         if (pDevice) *pDevice = VK_NULL_HANDLE;
     }
 
@@ -1072,6 +1252,7 @@ VkResult LayerManager::dispatch_create_device(
             if (started != VK_SUCCESS) {
                 for (auto& module : m_modules) if (module->is_enabled()) module->on_destroy_device(*pDevice);
                 if (auto destroy = (PFN_vkDestroyDevice)get_real_proc(get_last_instance(),*pDevice,"vkDestroyDevice")) destroy(*pDevice,pAllocator);
+                vkfix::forget_public_device(*pDevice);
                 *pDevice=VK_NULL_HANDLE;
                 return started;
             }
@@ -1085,22 +1266,17 @@ VkResult LayerManager::dispatch_create_device(
             std::unique_lock<std::shared_mutex> lock(m_state_rw_mutex);
             m_device_phys[(uint64_t)(uintptr_t)*pDevice] = physicalDevice;
         }
-        const bool renderPass2Enabled = std::any_of(dependencyPlan.names.begin(), dependencyPlan.names.end(),
-            [](const char* name) { return strcmp(name, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME) == 0; });
-        init_device_dispatch_table(*pDevice, environment.device_api, renderPass2Enabled);
+        const auto inheritedAllocator = vkfix::native_instance_allocation_callbacks(nativeInstance);
+        init_device_dispatch_table(*pDevice, environment.device_api, dependencyPlan.names,
+            pAllocator ? pAllocator : inheritedAllocator ? &*inheritedAllocator : nullptr);
         RenderDocManager::get().on_device_created(*pDevice, nativeInstance);
         update_device_bypass_flags(*pDevice);
         PipelineCacheManager::get().init_for_device(physicalDevice, *pDevice);
 
-        // Record the SPIR-V ceiling implied by the *real* driver API version.
-        PFN_vkGetPhysicalDeviceProperties real_props = (PFN_vkGetPhysicalDeviceProperties)
-            get_real_proc(nativeInstance, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
-        uint32_t api_version = VK_API_VERSION_1_0;
-        VkPhysicalDeviceProperties native_properties{};
-        if (real_props) {
-            real_props(physicalDevice, &native_properties);
-            api_version = native_properties.apiVersion;
-        }
+        // Device core functionality is bounded by the application's actual
+        // native API target as well as the physical device's supported version.
+        // Extensions below are taken only from the native enablement plan.
+        const uint32_t api_version = environment.device_api;
         const uint32_t spirv_version = ShaderRewriter::api_version_to_spirv(api_version);
         set_device_max_spirv_version(*pDevice, spirv_version);
         uint32_t shader_routes=0;
@@ -1113,12 +1289,14 @@ VkResult LayerManager::dispatch_create_device(
         };
         route(VK_API_VERSION_1_1,VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME,vkfix::NativeStorageBufferClass);
         route(VK_API_VERSION_1_1,VK_KHR_MULTIVIEW_EXTENSION_NAME,vkfix::NativeMultiview);
-        route(VK_API_VERSION_1_1,VK_KHR_DEVICE_GROUP_EXTENSION_NAME,vkfix::NativeDeviceGroup);
+        if (environment.device_api >= VK_API_VERSION_1_1 || enabled(VK_KHR_DEVICE_GROUP_EXTENSION_NAME))
+            shader_routes |= vkfix::NativeDeviceGroup;
         route(VK_API_VERSION_1_1,VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,vkfix::NativeDrawParameters);
         route(VK_API_VERSION_1_1,VK_KHR_16BIT_STORAGE_EXTENSION_NAME,vkfix::Native16BitStorage);
         route(VK_API_VERSION_1_1,VK_KHR_VARIABLE_POINTERS_EXTENSION_NAME,vkfix::NativeVariablePointers);
         route(VK_API_VERSION_1_1,VK_KHR_RELAXED_BLOCK_LAYOUT_EXTENSION_NAME,vkfix::NativeRelaxedBlockLayout);
         route(VK_API_VERSION_1_1,VK_KHR_MAINTENANCE_2_EXTENSION_NAME,vkfix::NativeInputAttachmentAspects);
+        route(VK_API_VERSION_1_1,VK_KHR_MAINTENANCE_1_EXTENSION_NAME,vkfix::NativeMaintenance1);
         route(VK_API_VERSION_1_2,VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME,vkfix::NativeVulkanMemoryModel);
         {
             std::unique_lock<std::shared_mutex> lock(m_device_info_mutex);
@@ -1126,24 +1304,32 @@ VkResult LayerManager::dispatch_create_device(
             if (requested_multiview && !(shader_routes & vkfix::NativeMultiview))
                 m_device_software_multiview.insert((uint64_t)(uintptr_t)*pDevice);
         }
+        if (!(shader_routes & vkfix::NativeMaintenance1) && m_desc_template_mod && m_desc_template_mod->is_enabled())
+            static_cast<DescriptorUpdateTemplateModule*>(m_desc_template_mod)->set_native_route(*pDevice,false);
         // Probe the native boundary before taking metadata locks. A private
         // native device avoids renderer recursion and the application's queues.
-        const auto trust = vkfix::native_driver_trust(nativeInstance, physicalDevice,
-                                                     get_real_instance_proc_addr());
-        const bool repair_sampler_aliases = vkfix::use_measured_repair(trust.sampler_aliases,
+        const vkfix::NativeDriverProbes probes(nativeInstance, physicalDevice, get_real_instance_proc_addr());
+        const auto sampler_aliases = probes.measure(vkfix::DriverProbe::SamplerAliases);
+        const auto large_uniform = probes.measure(vkfix::DriverProbe::LargeUniform);
+        const auto msaa_array_resolve = probes.measure(vkfix::DriverProbe::MsaaArrayResolve);
+        const bool repair_sampler_aliases = vkfix::use_measured_repair(sampler_aliases,
                                                      getenv("VULKAN_FIX_DEDUP_SAMPLER_ALIASES"));
-        const bool repair_large_uniform = vkfix::use_measured_repair(trust.large_uniform,
+        const bool repair_large_uniform = vkfix::use_measured_repair(large_uniform,
                                                      getenv("VULKAN_FIX_PRUNE_UNUSED_UNIFORM_MEMBERS"));
         LOGI("Driver probe sampler aliases: %s (%s); repair=%u",
-             vkfix::driver_probe_verdict_name(trust.sampler_aliases.verdict),
-             trust.sampler_aliases.detail.c_str(), unsigned(repair_sampler_aliases));
+             vkfix::driver_probe_verdict_name(sampler_aliases.verdict),
+             sampler_aliases.detail.c_str(), unsigned(repair_sampler_aliases));
         LOGI("Driver probe large UBO: %s (%s); repair=%u",
-             vkfix::driver_probe_verdict_name(trust.large_uniform.verdict),
-             trust.large_uniform.detail.c_str(), unsigned(repair_large_uniform));
+             vkfix::driver_probe_verdict_name(large_uniform.verdict),
+             large_uniform.detail.c_str(), unsigned(repair_large_uniform));
+        LOGI("Driver probe MSAA array resolve: %s (%s)",
+             vkfix::driver_probe_verdict_name(msaa_array_resolve.verdict), msaa_array_resolve.detail.c_str());
         {
             auto broadcast = vkfix::subgroup_broadcast_support(physicalDevice);
             std::unique_lock<std::shared_mutex> lock(m_device_info_mutex);
             m_device_subgroup_broadcast[(uint64_t)(uintptr_t)*pDevice] = broadcast;
+            if (msaa_array_resolve.verdict == vkfix::DriverProbeVerdict::RepairConfirmed)
+                m_device_msaa_array_resolve_repair.insert((uint64_t)(uintptr_t)*pDevice);
             if (repair_sampler_aliases) {
                 m_device_sampler_alias_dedup.insert((uint64_t)(uintptr_t)*pDevice);
                 LOGI("Measured driver repair: sampler alias deduplication enabled");
@@ -1153,6 +1339,8 @@ VkResult LayerManager::dispatch_create_device(
                 LOGI("Measured driver repair: unused large UBO member pruning enabled");
             }
         }
+        vkfix::DiscardStateRepair::get().configure_device(nativeInstance, physicalDevice,
+            get_real_instance_proc_addr(), *pDevice, *pCreateInfo);
         LOGI("Created logical device %p (driver api 0x%x, max SPIR-V %s)",
              *pDevice, api_version, ShaderRewriter::spirv_version_string(spirv_version));
     }
@@ -1166,6 +1354,7 @@ void LayerManager::dispatch_destroy_device(
 ) {
     vkfix::TimelineScheduler::get().stop(device);
     vkfix::MultiviewCommands::get().forget_device(device);
+    vkfix::ImageTypeCopy::get().forget_device(device);
     // Private pipeline callbacks need live module state and dispatch tables.
     vkfix::MultiviewPipelines::get().forget_device(device);
     vkfix::MultiviewPipelineLayouts::get().forget_device(device);
@@ -1195,6 +1384,10 @@ void LayerManager::dispatch_destroy_device(
         }
         for (auto it = m_pool_commands.begin(); it != m_pool_commands.end(); ) {
             if (it->first.device == device) it = m_pool_commands.erase(it);
+            else ++it;
+        }
+        for (auto it = m_pool_families.begin(); it != m_pool_families.end(); ) {
+            if (it->first.device == device) it = m_pool_families.erase(it);
             else ++it;
         }
         for (auto it = m_queue_devices.begin(); it != m_queue_devices.end(); ) {
@@ -1229,16 +1422,20 @@ void LayerManager::dispatch_destroy_device(
         m_device_subgroup_broadcast.erase((uint64_t)(uintptr_t)device);
         m_device_uniform_member_pruning.erase((uint64_t)(uintptr_t)device);
         m_device_sampler_alias_dedup.erase((uint64_t)(uintptr_t)device);
+        m_device_msaa_array_resolve_repair.erase((uint64_t)(uintptr_t)device);
     }
 
     // Internal passes can outlive the application's render-pass handle through
     // pipeline/command-buffer snapshots. Retire them while the device is live.
     vkfix::MultiviewRenderPasses::get().forget_device(device);
+    vkfix::ImageSliceCopyRepair::get().forget_device(device);
+    vkfix::DiscardStateRepair::get().forget_device(device);
     PFN_vkDestroyDevice real_fn =
         (PFN_vkDestroyDevice) get_real_proc(get_last_instance(), device, "vkDestroyDevice");
     if (real_fn) {
         real_fn(device, pAllocator);
     }
+    vkfix::forget_public_device(device);
 }
 
 VkResult LayerManager::dispatch_create_graphics_pipelines(
@@ -1268,6 +1465,7 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
 
     if (!is_emulated_device(device) || createInfoCount == 0 || !pCreateInfos) {
         VkResult res = real_fn(device, effectiveCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+        vkfix::DiscardStateRepair::get().remember_pipelines(device, createInfoCount, pCreateInfos, pPipelines);
         if (res == VK_SUCCESS) {
             PipelineCacheManager::get().on_pipelines_created(device, effectiveCache, createInfoCount);
         }
@@ -1289,6 +1487,7 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
     // FAST-PATH: Zero heap allocations, zero copies!
     if (!needs_interception) {
         VkResult res = real_fn(device, effectiveCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+        vkfix::DiscardStateRepair::get().remember_pipelines(device, createInfoCount, pCreateInfos, pPipelines);
         if (res == VK_SUCCESS) {
             PipelineCacheManager::get().on_pipelines_created(device, effectiveCache, createInfoCount);
         }
@@ -1334,6 +1533,7 @@ VkResult LayerManager::dispatch_create_graphics_pipelines(
     }
 
     VkResult res = real_fn(device, effectiveCache, createInfoCount, modInfos, pAllocator, pPipelines);
+    vkfix::DiscardStateRepair::get().remember_pipelines(device, createInfoCount, modInfos, pPipelines);
 
     // Vulkan can return live handles for a subset of a failed batch. Complete
     // every pending divisor record, including failures and early-return slots.
@@ -1479,7 +1679,7 @@ VkResult LayerManager::dispatch_create_descriptor_set_layout(
 
     VkResult res = real_fn(device, &modInfo, pAllocator, pSetLayout);
     if (res == VK_SUCCESS && pSetLayout && *pSetLayout &&
-        !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+        (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview) || uses_render_pass_replay(device))) {
         try { vkfix::MultiviewDescriptors::get().remember_layout(device, *pSetLayout, modInfo); }
         catch (const std::bad_alloc&) {
             dispatch_destroy_descriptor_set_layout(device, *pSetLayout, pAllocator);
@@ -1489,7 +1689,8 @@ VkResult LayerManager::dispatch_create_descriptor_set_layout(
     if (res == VK_SUCCESS) VertexStoreEmulator::get().set_layout(device, *pSetLayout, &modInfo);
 
     if (m_push_desc_mod && m_push_desc_mod->is_enabled()) {
-        m_push_desc_mod->on_post_create_descriptor_set_layout(device, pCreateInfo, res, (res == VK_SUCCESS && pSetLayout) ? *pSetLayout : VK_NULL_HANDLE);
+        m_push_desc_mod->on_post_create_descriptor_set_layout(device, pCreateInfo, modInfo, res,
+            (res == VK_SUCCESS && pSetLayout) ? *pSetLayout : VK_NULL_HANDLE);
     }
 
     return res;
@@ -1536,7 +1737,7 @@ VkResult LayerManager::dispatch_create_pipeline_layout(
     if (res != VK_SUCCESS) return res; // Failure output handles are undefined.
     if (!pPipelineLayout || !*pPipelineLayout) return VK_ERROR_INITIALIZATION_FAILED;
     try {
-        if (pCreateInfo && !internal_multiview && uses_software_multiview(device)) {
+        if (pCreateInfo && !internal_multiview && uses_render_pass_replay(device)) {
             const auto status = vkfix::MultiviewPipelineLayouts::get().remember(device, *pPipelineLayout, *pCreateInfo,
                 multiview_layout_create, multiview_layout_destroy);
             if (status != VK_SUCCESS) {
@@ -1660,7 +1861,9 @@ void LayerManager::notify_command_buffers_freed(VkDevice device, uint32_t count,
                                                 const VkCommandBuffer* commands) {
     if (!commands || count == 0) return;
     for (uint32_t i = 0; i < count; ++i) vkfix::MultiviewCommands::get().forget(commands[i]);
+    for (uint32_t i = 0; i < count; ++i) vkfix::ImageTypeCopy::get().forget(commands[i]);
     for (uint32_t i = 0; i < count; ++i) TBDRBarrierOptimizer::get().on_cmd_free(commands[i]);
+    for (uint32_t i = 0; i < count; ++i) vkfix::DiscardStateRepair::get().forget_command(commands[i]);
     for (auto& module : m_modules)
         if (module->is_enabled()) module->on_free_command_buffers(device, count, commands);
 }
@@ -1670,6 +1873,7 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     const VkCommandBufferBeginInfo* pBeginInfo
 ) {
     VertexStoreEmulator::get().clear_commands(commandBuffer);
+    vkfix::DiscardStateRepair::get().forget_command(commandBuffer);
 
     TBDRBarrierOptimizer::get().on_cmd_begin(commandBuffer);
 
@@ -1684,25 +1888,65 @@ VkResult LayerManager::dispatch_begin_command_buffer(
     VkCommandBufferBeginInfo modBeginInfo = *pBeginInfo;
     VkCommandBufferInheritanceInfo modInheritanceInfo{};
     bool has_mod_inheritance = false;
+    VkCommandBufferBeginInfo ownedBeginInfo = *pBeginInfo;
+    VkCommandBufferInheritanceInfo ownedInheritance{};
+    vkfix::InputPNextCopy inheritanceChain;
+    const auto* input = pBeginInfo;
+    if (uses_render_pass_replay(device) && pBeginInfo->pInheritanceInfo &&
+        vku::has_pnext(pBeginInfo->pInheritanceInfo->pNext, VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO)) {
+        const auto result = inheritanceChain.copy(pBeginInfo->pInheritanceInfo->pNext,
+            vkfix::InputChainKind::CommandInheritance);
+        if (result != VK_SUCCESS) { vkfix::MultiviewCommands::get().forget(commandBuffer); return result; }
+        ownedInheritance = *pBeginInfo->pInheritanceInfo;
+        ownedInheritance.pNext = inheritanceChain.head();
+        ownedBeginInfo.pInheritanceInfo = &ownedInheritance;
+        input = &ownedBeginInfo;
+    }
 
     for (auto& module : m_modules)
         if (module->is_enabled()) module->on_begin_command_buffer(commandBuffer, pBeginInfo);
     if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
-        m_dyn_rendering_mod->on_pre_begin_command_buffer(commandBuffer, pBeginInfo, modBeginInfo, modInheritanceInfo, has_mod_inheritance);
+        m_dyn_rendering_mod->on_pre_begin_command_buffer(commandBuffer, input, modBeginInfo, modInheritanceInfo, has_mod_inheritance);
     }
 
-    if (uses_software_multiview(device)) {
-        VkCommandPool pool{};
+    const auto* begin = has_mod_inheritance ? &modBeginInfo : input;
+    VkCommandPool pool{};
+    const bool emulate_copy = !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1);
+    if (uses_render_pass_replay(device) || emulate_copy) {
         { std::shared_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
           const auto found = m_cmd_devices.find((uint64_t)(uintptr_t)commandBuffer);
           if (found != m_cmd_devices.end()) pool = found->second.pool; }
-        const auto status = vkfix::MultiviewCommands::get().begin(device, commandBuffer, pool, *pBeginInfo,
+    }
+    if (uses_render_pass_replay(device)) {
+        const auto status = vkfix::MultiviewCommands::get().begin(device, commandBuffer, pool, *begin,
             (get_device_spirv_extensions(device) & vkfix::NativeInputAttachmentAspects) != 0,
-            {multiview_begin_native, multiview_end_native, multiview_barrier_native});
+            {multiview_begin_native, multiview_end_native, multiview_barrier_native,
+                should_repair_msaa_array_resolve(device) && dt.CmdResolveImage ? multiview_resolve_native : nullptr,
+                get_physical_device_for(device),attachment_requirements});
         if (status != VK_SUCCESS) return status;
     }
-    const auto result = dt.BeginCommandBuffer(commandBuffer, has_mod_inheritance ? &modBeginInfo : pBeginInfo);
-    if (result != VK_SUCCESS) vkfix::MultiviewCommands::get().forget(commandBuffer);
+    VkCommandBufferBeginInfo replay_begin{};
+    VkCommandBufferInheritanceInfo replay_inheritance{};
+    if (uses_render_pass_replay(device) && (begin->flags & VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) && begin->pInheritanceInfo) {
+        replay_begin = *begin; replay_inheritance = *begin->pInheritanceInfo;
+        replay_inheritance.framebuffer = VK_NULL_HANDLE;
+        replay_begin.pInheritanceInfo = &replay_inheritance; begin = &replay_begin;
+    }
+    VkCommandBufferBeginInfo native_begin{}; vkfix::InputPNextCopy group_chain;
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup)) {
+        const auto status = vkfix::lower_singleton_group(*begin,native_begin,group_chain);
+        if (status != VK_SUCCESS) { vkfix::MultiviewCommands::get().forget(commandBuffer); return status; }
+        begin = &native_begin;
+    }
+    if (emulate_copy) {
+        const auto status = vkfix::ImageTypeCopy::get().begin(device,commandBuffer,pool);
+        if (status != VK_SUCCESS) { vkfix::MultiviewCommands::get().forget(commandBuffer); return status; }
+    }
+    const auto result = dt.BeginCommandBuffer(commandBuffer, begin);
+    if (result != VK_SUCCESS) {
+        vkfix::MultiviewCommands::get().forget(commandBuffer);
+        vkfix::ImageTypeCopy::get().forget(commandBuffer);
+    }
     return result;
 }
 
@@ -1711,6 +1955,7 @@ VkResult LayerManager::dispatch_reset_command_buffer(
     VkCommandBufferResetFlags flags
 ) {
     VertexStoreEmulator::get().clear_commands(commandBuffer);
+    vkfix::DiscardStateRepair::get().forget_command(commandBuffer);
 
     TBDRBarrierOptimizer::get().on_cmd_reset(commandBuffer);
 
@@ -1721,7 +1966,10 @@ VkResult LayerManager::dispatch_reset_command_buffer(
     const auto& dt = get_dispatch_table(device);
     if (dt.ResetCommandBuffer) {
         const auto result = dt.ResetCommandBuffer(commandBuffer, flags);
-        if (result == VK_SUCCESS) vkfix::MultiviewCommands::get().forget(commandBuffer);
+        if (result == VK_SUCCESS) {
+            vkfix::MultiviewCommands::get().forget(commandBuffer);
+            vkfix::ImageTypeCopy::get().forget(commandBuffer);
+        }
         return result;
     }
     return VK_ERROR_INITIALIZATION_FAILED;
@@ -1734,8 +1982,9 @@ VkResult LayerManager::dispatch_create_descriptor_update_template(
     VkDescriptorUpdateTemplate* pDescriptorUpdateTemplate
 ) {
     if (!pCreateInfo || !pDescriptorUpdateTemplate) return VK_ERROR_INITIALIZATION_FAILED;
+    *pDescriptorUpdateTemplate = VK_NULL_HANDLE;
     auto complete = [&](VkResult result) {
-        if (result == VK_SUCCESS && !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+        if (result == VK_SUCCESS && (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview) || uses_render_pass_replay(device))) {
             try { vkfix::MultiviewDescriptors::get().remember_template(device, *pDescriptorUpdateTemplate, *pCreateInfo); }
             catch (const std::bad_alloc&) {
                 dispatch_destroy_descriptor_update_template(device, *pDescriptorUpdateTemplate, pAllocator);
@@ -1755,17 +2004,15 @@ VkResult LayerManager::dispatch_create_descriptor_update_template(
 
     VkResult res = VK_SUCCESS;
     if (m_desc_template_mod && m_desc_template_mod->is_enabled()) {
+        const auto& table = get_dispatch_table(device);
+        const auto allocator = pAllocator ? pAllocator : table.allocationCallbacks ? &*table.allocationCallbacks : nullptr;
         if (m_desc_template_mod->on_create_descriptor_update_template(
-                device, &modInfo, pAllocator, pDescriptorUpdateTemplate, res)) {
+                device, &modInfo, allocator, pDescriptorUpdateTemplate, res)) {
             return complete(res);
         }
     }
 
-    PFN_vkCreateDescriptorUpdateTemplate real_fn =
-        (PFN_vkCreateDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkCreateDescriptorUpdateTemplate");
-    if (!real_fn) {
-        real_fn = (PFN_vkCreateDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkCreateDescriptorUpdateTemplateKHR");
-    }
+    const auto real_fn = get_dispatch_table(device).CreateDescriptorUpdateTemplate;
     if (real_fn) {
         return complete(real_fn(device, &modInfo, pAllocator, pDescriptorUpdateTemplate));
     }
@@ -1789,17 +2036,15 @@ void LayerManager::dispatch_destroy_descriptor_update_template(
         }
     }
 
-    PFN_vkDestroyDescriptorUpdateTemplate real_fn =
-        (PFN_vkDestroyDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorUpdateTemplate");
-    if (!real_fn) {
-        real_fn = (PFN_vkDestroyDescriptorUpdateTemplate) get_real_proc(get_last_instance(), device, "vkDestroyDescriptorUpdateTemplateKHR");
-    }
+    const auto real_fn = get_dispatch_table(device).DestroyDescriptorUpdateTemplate;
     if (real_fn) {
         real_fn(device, descriptorUpdateTemplate, pAllocator);
     }
 }
 
 VkResult LayerManager::command_recording_error(VkCommandBuffer cmd) {
+    const auto copy = vkfix::ImageTypeCopy::get().error(cmd);
+    if (copy != VK_SUCCESS) return copy;
     const auto multiview = vkfix::MultiviewCommands::get().error(cmd);
     if (multiview != VK_SUCCESS) return multiview;
     if (m_dispatch_base_mod && m_dispatch_base_mod->is_enabled()) {
@@ -1816,12 +2061,24 @@ void LayerManager::track_descriptor_binding(VkCommandBuffer cmd, VkPipelineBindP
         m_push_desc_mod->on_cmd_bind_descriptor_sets(cmd, point, layout, first, count);
 }
 
+void LayerManager::remember_command_pool_family(VkDevice device, VkCommandPool pool, uint32_t family) {
+    try {
+        std::unique_lock lock(m_cmd_device_rw_mutex);
+        m_pool_families.insert_or_assign(vkfix::DeviceObjectKey::make(device, pool), family);
+    } catch (const std::bad_alloc &) {
+        // Unknown pool families leave copy commands on the native path.
+    }
+}
+
 void LayerManager::track_command_pool_reset(VkDevice device, VkCommandPool pool, bool destroyed) {
+    vkfix::ImageTypeCopy::get().forget_pool(device,pool);
     vkfix::MultiviewCommands::get().forget_pool(device, pool);
     std::vector<VkCommandBuffer> commands;
     {
         std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
-        auto tracked = m_pool_commands.find(vkfix::DeviceObjectKey::make(device, pool));
+        const auto key = vkfix::DeviceObjectKey::make(device, pool);
+        if (destroyed) m_pool_families.erase(key);
+        auto tracked = m_pool_commands.find(key);
         if (tracked == m_pool_commands.end()) return;
         commands.reserve(tracked->second.size());
         for (auto key : tracked->second) {
@@ -1836,6 +2093,7 @@ void LayerManager::track_command_pool_reset(VkDevice device, VkCommandPool pool,
         notify_command_buffers_freed(device, uint32_t(commands.size()), commands.data());
     } else {
         for (auto cmd : commands) {
+            vkfix::DiscardStateRepair::get().forget_command(cmd);
             TBDRBarrierOptimizer::get().on_cmd_reset(cmd);
             for (auto& module : m_modules)
                 if (module->is_enabled()) module->on_reset_command_buffer(cmd, 0);
@@ -1868,6 +2126,11 @@ void LayerManager::dispatch_cmd_push_descriptor_set(
     }
 }
 
+static VKAPI_ATTR void VKAPI_CALL push_template_writes(VkCommandBuffer command, VkPipelineBindPoint point,
+    VkPipelineLayout layout, uint32_t set, uint32_t count, const VkWriteDescriptorSet* writes) {
+    LayerManager::get().dispatch_cmd_push_descriptor_set(command, point, layout, set, count, writes);
+}
+
 void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
     VkCommandBuffer commandBuffer,
     VkDescriptorUpdateTemplate descriptorUpdateTemplate,
@@ -1886,6 +2149,9 @@ void LayerManager::dispatch_cmd_push_descriptor_set_with_template(
     }
 
     VkDevice device = get_device_for_cmd(commandBuffer);
+    if (m_desc_template_mod && m_desc_template_mod->is_enabled() &&
+        static_cast<DescriptorUpdateTemplateModule*>(m_desc_template_mod)->push_emulated_template(
+            device, commandBuffer, descriptorUpdateTemplate, layout, set, pData, push_template_writes)) return;
     PFN_vkCmdPushDescriptorSetWithTemplateKHR real_fn =
         (PFN_vkCmdPushDescriptorSetWithTemplateKHR) get_real_proc(get_last_instance(), device, "vkCmdPushDescriptorSetWithTemplateKHR");
     if (real_fn) {
@@ -1906,10 +2172,43 @@ VkResult LayerManager::dispatch_create_image(
     }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
-    VkResult res = real_fn(device, pCreateInfo, pAllocator, pImage);
+    const auto* native_info = pCreateInfo; VkImageCreateInfo singleton_info{};
+    if (pCreateInfo && !(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup)) {
+        singleton_info = *pCreateInfo; singleton_info.flags &= ~VK_IMAGE_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT;
+        native_info = &singleton_info;
+    }
+    VkImageCreateInfo resolve_info{}, resolve_source_info{};
+    VkImageCreateInfo volume_info{}; bool volume_attachment = false;
+    if (native_info && !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1)) {
+        volume_info = *native_info;
+        volume_attachment = vkfix::lower_volume_image(volume_info);
+        if (volume_attachment) {
+            const auto* external = vku::find_pnext<VkExternalMemoryImageCreateInfo>(volume_info.pNext,VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO);
+            if (external && external->handleTypes) { if (pImage) *pImage = VK_NULL_HANDLE; return VK_ERROR_FORMAT_NOT_SUPPORTED; }
+        }
+        if (volume_attachment) native_info = &volume_info;
+    }
+    if (native_info && uses_software_multiview(device) && should_repair_msaa_array_resolve(device)) {
+        const auto physical = get_physical_device_for(device);
+        auto instance = vkfix::native_instance_for_physical(physical);
+        if (!instance) instance = get_last_instance();
+        const auto query = (PFN_vkGetPhysicalDeviceImageFormatProperties)get_real_proc(instance,VK_NULL_HANDLE,
+            "vkGetPhysicalDeviceImageFormatProperties");
+        resolve_source_info = *native_info;
+        const auto prepared = vkfix::prepare_msaa_resolve_image(physical,query,resolve_source_info,resolve_info);
+        if (prepared != VK_SUCCESS) { if (pImage) *pImage = VK_NULL_HANDLE; return prepared; }
+        native_info = &resolve_info;
+    }
+    const auto image_requirements = native_info == &resolve_info &&
+        ((resolve_source_info.usage ^ resolve_info.usage) & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT) ?
+        (PFN_vkGetImageMemoryRequirements)get_real_proc(VK_NULL_HANDLE,device,"vkGetImageMemoryRequirements") : nullptr;
+    VkResult res = native_info == &resolve_info ? vkfix::create_msaa_resolve_image(device,resolve_source_info,
+        resolve_info,pAllocator,pImage,real_fn,dt.DestroyImage,image_requirements) :
+        real_fn(device,native_info,pAllocator,pImage);
     if (res == VK_SUCCESS && pCreateInfo && pImage && *pImage &&
-        !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
-        try { vkfix::MultiviewAttachments::get().remember_image(device, *pImage, *pCreateInfo); }
+        (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview) ||
+         !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1))) {
+        try { vkfix::MultiviewAttachments::get().remember_image(device, *pImage, *native_info,volume_attachment); }
         catch (const std::bad_alloc&) {
             dispatch_destroy_image(device, *pImage, pAllocator);
             *pImage = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -1917,6 +2216,14 @@ VkResult LayerManager::dispatch_create_image(
     }
     if (res == VK_SUCCESS) VertexStoreEmulator::get().image(device, *pImage, pCreateInfo);
     if (res == VK_SUCCESS && pCreateInfo && pImage && *pImage != VK_NULL_HANDLE) {
+        using ImageKind = vkfix::ImageSliceCopyRepair::ImageKind;
+        const auto kind = vkfix::ImageSliceCopyRepair::image_kind(*native_info);
+        if (kind != ImageKind::Other) {
+            const auto physical = kind == ImageKind::Volume ? get_physical_device_for(device) : VK_NULL_HANDLE;
+            const auto instance = physical ? vkfix::native_instance_for_physical(physical) : VK_NULL_HANDLE;
+            vkfix::ImageSliceCopyRepair::get().remember_image(device, *pImage, kind, native_info->arrayLayers,
+                                                             instance, physical, get_real_instance_proc_addr());
+        }
         if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
             m_dyn_rendering_mod->on_post_create_image(device, pCreateInfo, res, *pImage);
         }
@@ -1930,6 +2237,7 @@ void LayerManager::dispatch_destroy_image(
     const VkAllocationCallbacks* pAllocator
 ) {
     vkfix::MultiviewAttachments::get().forget_image(device, image);
+    vkfix::ImageSliceCopyRepair::get().forget_image(device, image);
     VertexStoreEmulator::get().erase_image(device, image);
 
     if (m_dyn_rendering_mod && m_dyn_rendering_mod->is_enabled()) {
@@ -1961,10 +2269,37 @@ VkResult LayerManager::dispatch_create_image_view(
     }
     if (!real_fn) return VK_ERROR_INITIALIZATION_FAILED;
 
-    VkResult res = real_fn(device, pCreateInfo, pAllocator, pView);
+    std::shared_ptr<vkfix::VolumeAttachment> placeholder;
+    VkImageViewCreateInfo native_view{};
+    try {
+    if (pCreateInfo && !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1) &&
+        (pCreateInfo->viewType == VK_IMAGE_VIEW_TYPE_2D || pCreateInfo->viewType == VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
+        auto image = vkfix::MultiviewAttachments::get().acquire_image(device,pCreateInfo->image);
+        if (image && image->emulated_attachment) {
+            vkfix::VolumeAttachmentPlan plan;
+            auto status = vkfix::VolumeAttachmentPlan::capture(*image,*pCreateInfo,{1,1},1,plan);
+            if (status != VK_SUCCESS) { if (pView) *pView = VK_NULL_HANDLE; return status; }
+            std::unique_ptr<vkfix::VolumeAttachment> owned;
+            status = vkfix::VolumeAttachment::create(device,get_physical_device_for(device),plan,owned,attachment_requirements);
+            if (status != VK_SUCCESS) { if (pView) *pView = VK_NULL_HANDLE; return status; }
+            placeholder = std::move(owned);
+            native_view = *pCreateInfo; native_view.image = placeholder->image().handle;
+            native_view.subresourceRange = {pCreateInfo->subresourceRange.aspectMask,0,1,0,1};
+        }
+    }
+    } catch (const std::bad_alloc&) { if (pView) *pView = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY; }
+    const auto* view_info = placeholder ? &native_view : pCreateInfo;
+    vkfix::InputPNextCopy view_chain;
+    if (view_info && !(get_device_spirv_extensions(device) & vkfix::NativeInputAttachmentAspects) &&
+        vku::has_pnext(view_info->pNext,VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO)) {
+        const auto status = view_chain.copy(view_info->pNext,vkfix::InputChainKind::ImageViewCreate,false,VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO);
+        if (status != VK_SUCCESS) { if (pView) *pView = VK_NULL_HANDLE; return status; }
+        native_view = *view_info; native_view.pNext = view_chain.head(); view_info = &native_view;
+    }
+    VkResult res = real_fn(device, view_info, pAllocator, pView);
     if (res == VK_SUCCESS && pCreateInfo && pView && *pView &&
-        !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
-        try { vkfix::MultiviewAttachments::get().remember_view(device, *pView, *pCreateInfo); }
+        (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview) || uses_render_pass_replay(device))) {
+        try { vkfix::MultiviewAttachments::get().remember_view(device, *pView, *pCreateInfo,placeholder); }
         catch (const std::bad_alloc&) {
             dispatch_destroy_image_view(device, *pView, pAllocator);
             *pView = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -1984,6 +2319,7 @@ void LayerManager::dispatch_destroy_image_view(
     VkImageView imageView,
     const VkAllocationCallbacks* pAllocator
 ) {
+    auto retained_view = vkfix::MultiviewAttachments::get().acquire_view(device,imageView);
     vkfix::MultiviewAttachments::get().forget_view(device, imageView);
     VertexStoreEmulator::get().erase_view(device, imageView);
 
@@ -2096,6 +2432,7 @@ void LayerManager::dispatch_destroy_pipeline(
     const VkAllocationCallbacks* pAllocator
 ) {
     vkfix::MultiviewPipelines::get().forget(device, pipeline);
+    vkfix::DiscardStateRepair::get().forget_pipeline(device, pipeline);
     VertexStoreEmulator::get().erase_pipeline(device, pipeline);
 
     if (m_divisor_mod && m_divisor_mod->is_enabled()) {
@@ -2141,8 +2478,13 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     // identical barriers separated only by binds can still be deduplicated.
 
     if (__builtin_expect(m_single_device_bypass.load(std::memory_order_acquire) & kBypassDraw, 1)) {
-        const auto& primary_dt = get_dispatch_table(get_device_for_cmd(commandBuffer));
+        const auto dev = get_device_for_cmd(commandBuffer);
+        const auto& primary_dt = get_dispatch_table(dev);
         primary_dt.CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
+        if (vkfix::DiscardStateRepair::get().enabled(dev))
+            vkfix::DiscardStateRepair::get().bound(dev, commandBuffer, pipelineBindPoint, pipeline,
+                (PFN_vkCmdSetViewport)get_real_proc(get_last_instance(), dev, "vkCmdSetViewport"),
+                (PFN_vkCmdSetScissor)get_real_proc(get_last_instance(), dev, "vkCmdSetScissor"));
         return;
     }
 
@@ -2153,6 +2495,10 @@ void LayerManager::dispatch_cmd_bind_pipeline(
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdBindPipeline) {
         dt.CmdBindPipeline(commandBuffer, pipelineBindPoint, pipeline);
+        if (vkfix::DiscardStateRepair::get().enabled(device))
+            vkfix::DiscardStateRepair::get().bound(device, commandBuffer, pipelineBindPoint, pipeline,
+                (PFN_vkCmdSetViewport)get_real_proc(get_last_instance(), device, "vkCmdSetViewport"),
+                (PFN_vkCmdSetScissor)get_real_proc(get_last_instance(), device, "vkCmdSetScissor"));
     }
 }
 
@@ -2176,7 +2522,10 @@ void LayerManager::dispatch_cmd_set_viewport(
     }
     auto real = (PFN_vkCmdSetViewport)get_real_proc(
         get_last_instance(), device, "vkCmdSetViewport");
-    if (real) real(commandBuffer, firstViewport, viewportCount, pViewports);
+    if (real) {
+        real(commandBuffer, firstViewport, viewportCount, pViewports);
+        vkfix::DiscardStateRepair::get().viewport(device, commandBuffer, firstViewport, viewportCount, pViewports);
+    }
 }
 
 void LayerManager::dispatch_cmd_bind_vertex_buffers(
@@ -2488,6 +2837,12 @@ void LayerManager::dispatch_cmd_begin_render_pass(
         begin = &resolved;
     }
 
+    VkRenderPassBeginInfo native_begin{}; vkfix::SingletonRenderPassBeginChain group_chain;
+    if (begin && !(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup)) {
+        const auto status = vkfix::lower_singleton_group(*begin,native_begin,group_chain);
+        if (status != VK_SUCCESS) { LOGE("vkCmdBeginRenderPass: device-group input lowering failed (%d)",status); return; }
+        begin = &native_begin;
+    }
     if (dt.CmdBeginRenderPass) {
         if (m_dyn_rendering_mod)
             m_dyn_rendering_mod->begin_legacy_rendering(commandBuffer, begin, contents);
@@ -2578,9 +2933,29 @@ void LayerManager::dispatch_cmd_copy_image(
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
     VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1) &&
+        vkfix::ImageTypeCopy::get().copy(device,get_physical_device_for(device),commandBuffer,srcImage,
+            LayoutCompat::sanitize(srcImageLayout),dstImage,LayoutCompat::sanitize(dstImageLayout),regionCount,pRegions)) return;
     if (dt.CmdCopyImage) {
+        std::vector<VkImageCopy> slices;
+        if (pRegions && std::any_of(pRegions, pRegions + regionCount,
+                                   [](const VkImageCopy &region) { return region.extent.depth > 1; })) {
+            std::optional<uint32_t> family;
+            {
+                std::shared_lock lock(m_cmd_device_rw_mutex);
+                auto command = m_cmd_devices.find((uint64_t)(uintptr_t)commandBuffer);
+                if (command != m_cmd_devices.end() && command->second.device == device) {
+                    const auto pool = m_pool_families.find(vkfix::DeviceObjectKey::make(device, command->second.pool));
+                    if (pool != m_pool_families.end()) family = pool->second;
+                }
+            }
+            if (family) slices = vkfix::ImageSliceCopyRepair::get().split_regions(device, *family, srcImage, dstImage,
+                                                                                regionCount, pRegions);
+        }
         dt.CmdCopyImage(commandBuffer, srcImage, LayoutCompat::sanitize(srcImageLayout),
-                        dstImage, LayoutCompat::sanitize(dstImageLayout), regionCount, pRegions);
+                        dstImage, LayoutCompat::sanitize(dstImageLayout),
+                        slices.empty() ? regionCount : static_cast<uint32_t>(slices.size()),
+                        slices.empty() ? pRegions : slices.data());
     }
 }
 
@@ -2670,6 +3045,7 @@ void LayerManager::dispatch_cmd_execute_commands(
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdExecuteCommands) {
         dt.CmdExecuteCommands(commandBuffer, commandBufferCount, pCommandBuffers);
+        vkfix::DiscardStateRepair::get().forget_command(commandBuffer);
     }
 }
 
@@ -2702,40 +3078,14 @@ void LayerManager::dispatch_get_device_queue2(
     const VkDeviceQueueInfo2* pQueueInfo,
     VkQueue* pQueue
 ) {
+    if (!pQueue) return;
+    *pQueue = VK_NULL_HANDLE;
+    if (!pQueueInfo) return;
     const auto& dt = get_dispatch_table(device);
-    PFN_vkGetDeviceQueue2 real_fn = dt.GetDeviceQueue2;
-    if (!real_fn) {
-        real_fn = (PFN_vkGetDeviceQueue2) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue2");
-    }
-    bool resolved = false;
-    if (real_fn) {
-        real_fn(device, pQueueInfo, pQueue);
-        resolved = pQueue && *pQueue != VK_NULL_HANDLE;
-    }
-    if (!resolved) {
-        auto khr = (PFN_vkGetDeviceQueue2) get_real_proc(
-            get_last_instance(), device, "vkGetDeviceQueue2KHR");
-        if (khr && khr != real_fn) {
-            khr(device, pQueueInfo, pQueue);
-            resolved = pQueue && *pQueue != VK_NULL_HANDLE;
-        }
-    }
-    if (pQueueInfo && pQueue && pQueueInfo->flags == 0) {
-        // Vulkan defines flags==0 as equivalent to vkGetDeviceQueue. Use the
-        // legacy handle both as a fallback for a null result and as a repair
-        // when the 1.1 entry point returns a different handle.
-        PFN_vkGetDeviceQueue real_get =
-            (PFN_vkGetDeviceQueue) get_real_proc(get_last_instance(), device, "vkGetDeviceQueue");
-        if (real_get) {
-            VkQueue legacy = VK_NULL_HANDLE;
-            real_get(device, pQueueInfo->queueFamilyIndex, pQueueInfo->queueIndex, &legacy);
-            if (legacy != VK_NULL_HANDLE && legacy != *pQueue) {
-                if (resolved)
-                    LOGW("vkGetDeviceQueue2(flags=0) returned a different handle; using vkGetDeviceQueue");
-                *pQueue = legacy;
-            }
-        }
-    }
+    auto legacy = dt.GetDeviceQueue;
+    if (!pQueueInfo->flags && !legacy)
+        legacy = (PFN_vkGetDeviceQueue)get_real_proc(get_last_instance(), device, "vkGetDeviceQueue");
+    *pQueue = vkfix::get_created_queue(device, *pQueueInfo, legacy, dt.GetDeviceQueue2);
 
     if (pQueue && *pQueue != VK_NULL_HANDLE && pQueueInfo) {
         std::unique_lock<std::shared_mutex> lock(m_cmd_device_rw_mutex);
@@ -2843,6 +3193,9 @@ void LayerManager::dispatch_cmd_pipeline_barrier(
         imageMemoryBarrierCount, pImageMemoryBarriers,
         (get_device_spirv_extensions(get_device_for_cmd(commandBuffer)) & vkfix::NativeDeviceGroup) != 0,
         multiview_barrier_native)) return;
+    const auto device = get_device_for_cmd(commandBuffer);
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup))
+        dependencyFlags &= ~VK_DEPENDENCY_DEVICE_GROUP_BIT;
     if (__builtin_expect(TBDRBarrierOptimizer::get().is_enabled(), 0)) {
         static thread_local TBDRBarrierOptimizer::ScratchStorage1 storage;
         if (!TBDRBarrierOptimizer::get().optimize_pipeline_barrier1(
@@ -2855,20 +3208,30 @@ void LayerManager::dispatch_cmd_pipeline_barrier(
         }
     }
 
-    VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
 
     const VkImageMemoryBarrier* image_barriers = pImageMemoryBarriers;
     static thread_local std::vector<VkImageMemoryBarrier> sanitized_barriers;
     sanitized_barriers.clear();
-    if (LayoutCompat::get().any_emulated() && imageMemoryBarrierCount > 0 && pImageMemoryBarriers != nullptr) {
+    const bool volume_layouts = uses_render_pass_replay(device) && !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1);
+    if (volume_layouts) {
+        srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | (srcStageMask & VK_PIPELINE_STAGE_HOST_BIT);
+        dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | (dstStageMask & VK_PIPELINE_STAGE_HOST_BIT);
+    }
+    try {
+    if ((LayoutCompat::get().any_emulated() || volume_layouts) && imageMemoryBarrierCount > 0 && pImageMemoryBarriers != nullptr) {
         sanitized_barriers.assign(pImageMemoryBarriers, pImageMemoryBarriers + imageMemoryBarrierCount);
         for (auto& barrier : sanitized_barriers) {
             barrier.oldLayout = LayoutCompat::sanitize(barrier.oldLayout);
             barrier.newLayout = LayoutCompat::sanitize(barrier.newLayout);
+            if (volume_layouts) {
+                const auto image = vkfix::MultiviewAttachments::get().acquire_image(device,barrier.image);
+                if (image) vkfix::lower_volume_barrier(*image,barrier);
+            }
         }
         image_barriers = sanitized_barriers.data();
     }
+    } catch (const std::bad_alloc&) { multiview.record_error(commandBuffer,VK_ERROR_OUT_OF_HOST_MEMORY); return; }
 
     if (dt.CmdPipelineBarrier) {
         dt.CmdPipelineBarrier(
@@ -2889,6 +3252,9 @@ void LayerManager::dispatch_cmd_pipeline_barrier2(
     VkCommandBuffer commandBuffer,
     const VkDependencyInfo* pDependencyInfo
 ) {
+    const auto attachment_device = get_device_for_cmd(commandBuffer);
+    if (uses_render_pass_replay(attachment_device) && !(get_device_spirv_extensions(attachment_device) & vkfix::NativeMaintenance1) &&
+        m_sync2_mod && m_sync2_mod->is_enabled() && m_sync2_mod->on_cmd_pipeline_barrier2(commandBuffer,pDependencyInfo)) return;
     if (vkfix::MultiviewCommands::get().unsupported(commandBuffer)) return;
     const VkDependencyInfo* pInfoToUse = pDependencyInfo;
     static thread_local TBDRBarrierOptimizer::ScratchStorage2 storage;
@@ -2958,6 +3324,29 @@ VkResult LayerManager::dispatch_queue_submit2(
     const VkSubmitInfo2* pSubmits,
     VkFence fence
 ) {
+    const auto attachment_device = get_device_for_queue(queue);
+    std::vector<VkSubmitInfo2> attachment_submits;
+    std::vector<std::vector<VkSemaphoreSubmitInfo>> attachment_waits, attachment_signals;
+    if (uses_render_pass_replay(attachment_device) && !(get_device_spirv_extensions(attachment_device) & vkfix::NativeMaintenance1) && submitCount && pSubmits) {
+        try {
+            attachment_submits.assign(pSubmits,pSubmits + submitCount);
+            attachment_waits.resize(submitCount); attachment_signals.resize(submitCount);
+            for (uint32_t i = 0; i < submitCount; ++i) {
+                auto& submit = attachment_submits[i];
+                if (submit.waitSemaphoreInfoCount) {
+                    attachment_waits[i].assign(submit.pWaitSemaphoreInfos,submit.pWaitSemaphoreInfos + submit.waitSemaphoreInfoCount);
+                    for (auto& wait : attachment_waits[i]) wait.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                    submit.pWaitSemaphoreInfos = attachment_waits[i].data();
+                }
+                if (submit.signalSemaphoreInfoCount) {
+                    attachment_signals[i].assign(submit.pSignalSemaphoreInfos,submit.pSignalSemaphoreInfos + submit.signalSemaphoreInfoCount);
+                    for (auto& signal : attachment_signals[i]) signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                    submit.pSignalSemaphoreInfos = attachment_signals[i].data();
+                }
+            }
+            pSubmits = attachment_submits.data();
+        } catch (const std::bad_alloc&) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
+    }
     VkResult res = VK_SUCCESS;
     if (m_sync2_mod && m_sync2_mod->is_enabled()) {
         if (m_sync2_mod->on_queue_submit2(queue, submitCount, pSubmits, fence, res)) {
@@ -2989,6 +3378,24 @@ VkResult LayerManager::dispatch_queue_submit(
     const VkSubmitInfo* pSubmits,
     VkFence fence
 ) {
+    VkDevice device = get_device_for_queue(queue);
+    std::vector<VkSubmitInfo> attachment_submits;
+    std::vector<std::vector<VkPipelineStageFlags>> attachment_waits;
+    if (uses_render_pass_replay(device) && !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1) && submitCount && pSubmits) {
+        try {
+            attachment_submits.assign(pSubmits,pSubmits + submitCount); attachment_waits.resize(submitCount);
+            for (uint32_t i = 0; i < submitCount; ++i) if (pSubmits[i].waitSemaphoreCount) {
+                attachment_waits[i].assign(pSubmits[i].waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+                attachment_submits[i].pWaitDstStageMask = attachment_waits[i].data();
+            }
+            pSubmits = attachment_submits.data();
+        } catch (const std::bad_alloc&) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
+    }
+    vkfix::SingletonGroupBatch group_batch;
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup)) {
+        const auto status = group_batch.submits(submitCount,pSubmits,pSubmits);
+        if (status != VK_SUCCESS) return status;
+    }
     VkResult res = VK_SUCCESS;
     if (vkfix::TimelineScheduler::get().submit(queue, submitCount, pSubmits, fence, res)) return res;
     if (m_timeline_mod && m_timeline_mod->is_enabled()) {
@@ -2997,7 +3404,6 @@ VkResult LayerManager::dispatch_queue_submit(
         }
     }
 
-    VkDevice device = get_device_for_queue(queue);
     const auto& dt = get_dispatch_table(device);
     if (dt.QueueSubmit) {
         return dt.QueueSubmit(queue, submitCount, pSubmits, fence);
@@ -3042,6 +3448,10 @@ bool LayerManager::is_timeline_semaphore(VkDevice device, VkSemaphore semaphore)
         return m_timeline_mod->is_timeline_semaphore(device, semaphore);
     }
     return false;
+}
+
+bool LayerManager::has_native_timeline_submit(VkDevice device) {
+    return m_timeline_mod && m_timeline_mod->is_enabled() && m_timeline_mod->is_device_native(device);
 }
 
 VkResult LayerManager::dispatch_create_semaphore(
@@ -3220,10 +3630,17 @@ VkResult LayerManager::dispatch_create_render_pass2(
     VkRenderPass* pRenderPass
 ) {
     const auto routes = get_device_spirv_extensions(device);
-    if (!(routes & vkfix::NativeMultiview) && get_device_max_spirv_version(device)) {
+    if ((!(routes & vkfix::NativeMultiview) || !(routes & vkfix::NativeMaintenance1)) && get_device_max_spirv_version(device)) {
         VkResult result = VK_SUCCESS;
         if (vkfix::MultiviewRenderPasses::get().create_fallback(device, pCreateInfo, pAllocator,
-            pRenderPass, (routes & vkfix::NativeInputAttachmentAspects) != 0, result)) return result;
+            pRenderPass, (routes & vkfix::NativeInputAttachmentAspects) != 0, result,
+            (routes & vkfix::NativeDeviceGroup) != 0,!(routes & vkfix::NativeMaintenance1))) return result;
+    }
+    VkRenderPassCreateInfo2 native_info{}; std::vector<VkSubpassDependency2> native_dependencies;
+    if (pCreateInfo && !(routes & vkfix::NativeDeviceGroup)) {
+        try { vkfix::lower_singleton_dependencies(*pCreateInfo,native_info,native_dependencies); }
+        catch (const std::bad_alloc&) { if (pRenderPass) *pRenderPass = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY; }
+        pCreateInfo = &native_info;
     }
     auto tracked = [&](VkResult result) {
         if (result != VK_SUCCESS || !pRenderPass || !*pRenderPass) return result;
@@ -3279,6 +3696,13 @@ void LayerManager::dispatch_cmd_begin_render_pass2(
         begin = &resolved;
     }
 
+    const auto device = get_device_for_cmd(commandBuffer);
+    VkRenderPassBeginInfo native_begin{}; vkfix::SingletonRenderPassBeginChain group_chain;
+    if (begin && !(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup)) {
+        const auto status = vkfix::lower_singleton_group(*begin,native_begin,group_chain);
+        if (status != VK_SUCCESS) { LOGE("vkCmdBeginRenderPass2: device-group input lowering failed (%d)",status); return; }
+        begin = &native_begin;
+    }
     if (m_dyn_rendering_mod) {
         m_dyn_rendering_mod->begin_legacy_rendering(commandBuffer, begin,
             pSubpassBeginInfo ? pSubpassBeginInfo->contents : VK_SUBPASS_CONTENTS_INLINE);
@@ -3290,7 +3714,6 @@ void LayerManager::dispatch_cmd_begin_render_pass2(
             return;
         }
     }
-    VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdBeginRenderPass2) {
         dt.CmdBeginRenderPass2(commandBuffer, begin, pSubpassBeginInfo);
@@ -3487,6 +3910,11 @@ VkResult LayerManager::dispatch_bind_buffer_memory2(
     uint32_t bindInfoCount,
     const VkBindBufferMemoryInfo* pBindInfos
 ) {
+    vkfix::SingletonGroupBatch group_batch;
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup)) {
+        const auto status = group_batch.buffers(bindInfoCount,pBindInfos,pBindInfos);
+        if (status != VK_SUCCESS) return status;
+    }
     VkResult res = VK_SUCCESS;
     if (m_bind_mem2_mod && m_bind_mem2_mod->is_enabled()) {
         if (m_bind_mem2_mod->on_bind_buffer_memory2(device, bindInfoCount, pBindInfos, res)) {
@@ -3494,11 +3922,7 @@ VkResult LayerManager::dispatch_bind_buffer_memory2(
         }
     }
 
-    PFN_vkBindBufferMemory2 real_fn =
-        (PFN_vkBindBufferMemory2) get_real_proc(get_last_instance(), device, "vkBindBufferMemory2");
-    if (!real_fn) {
-        real_fn = (PFN_vkBindBufferMemory2) get_real_proc(get_last_instance(), device, "vkBindBufferMemory2KHR");
-    }
+    const auto real_fn = get_dispatch_table(device).BindBufferMemory2;
     if (real_fn) {
         return real_fn(device, bindInfoCount, pBindInfos);
     }
@@ -3529,6 +3953,11 @@ VkResult LayerManager::dispatch_bind_image_memory2(
     uint32_t bindInfoCount,
     const VkBindImageMemoryInfo* pBindInfos
 ) {
+    vkfix::SingletonGroupBatch group_batch;
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup)) {
+        const auto status = group_batch.images(bindInfoCount,pBindInfos,pBindInfos);
+        if (status != VK_SUCCESS) return status;
+    }
     VkResult res = VK_SUCCESS;
     if (m_bind_mem2_mod && m_bind_mem2_mod->is_enabled()) {
         if (m_bind_mem2_mod->on_bind_image_memory2(device, bindInfoCount, pBindInfos, res)) {
@@ -3536,11 +3965,7 @@ VkResult LayerManager::dispatch_bind_image_memory2(
         }
     }
 
-    PFN_vkBindImageMemory2 real_fn =
-        (PFN_vkBindImageMemory2) get_real_proc(get_last_instance(), device, "vkBindImageMemory2");
-    if (!real_fn) {
-        real_fn = (PFN_vkBindImageMemory2) get_real_proc(get_last_instance(), device, "vkBindImageMemory2KHR");
-    }
+    const auto real_fn = get_dispatch_table(device).BindImageMemory2;
     if (real_fn) {
         return real_fn(device, bindInfoCount, pBindInfos);
     }
@@ -3554,7 +3979,7 @@ VkResult LayerManager::dispatch_bind_image_memory2(
         const auto* group = vku::find_pnext<VkBindImageMemoryDeviceGroupInfo>(
             pBindInfos[i].pNext, VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_DEVICE_GROUP_INFO);
         if (group != nullptr &&
-            (group->deviceIndexCount > 1 || group->splitInstanceBindRegionCount > 0 ||
+            (group->deviceIndexCount > 1 || group->splitInstanceBindRegionCount > 1 ||
              (group->deviceIndexCount == 1 && group->pDeviceIndices != nullptr &&
               group->pDeviceIndices[0] != 0))) {
             LOGW("vkBindImageMemory2: multi-device binding is not supported on this driver");
@@ -3577,11 +4002,10 @@ void LayerManager::dispatch_get_buffer_memory_requirements2(
         }
     }
 
-    PFN_vkGetBufferMemoryRequirements2 real_fn =
-        (PFN_vkGetBufferMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetBufferMemoryRequirements2");
-    if (!real_fn) {
-        real_fn = (PFN_vkGetBufferMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetBufferMemoryRequirements2KHR");
-    }
+    if (pMemoryRequirements)
+        if (auto dedicated = vku::find_pnext_mut<VkMemoryDedicatedRequirements>(pMemoryRequirements->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS))
+            dedicated->prefersDedicatedAllocation = dedicated->requiresDedicatedAllocation = VK_FALSE;
+    const auto real_fn = get_dispatch_table(device).GetBufferMemoryRequirements2;
     if (real_fn) {
         real_fn(device, pInfo, pMemoryRequirements);
         if (pInfo && pInfo->pNext == nullptr)
@@ -3616,11 +4040,10 @@ void LayerManager::dispatch_get_image_memory_requirements2(
         }
     }
 
-    PFN_vkGetImageMemoryRequirements2 real_fn =
-        (PFN_vkGetImageMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetImageMemoryRequirements2");
-    if (!real_fn) {
-        real_fn = (PFN_vkGetImageMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetImageMemoryRequirements2KHR");
-    }
+    if (pMemoryRequirements)
+        if (auto dedicated = vku::find_pnext_mut<VkMemoryDedicatedRequirements>(pMemoryRequirements->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS))
+            dedicated->prefersDedicatedAllocation = dedicated->requiresDedicatedAllocation = VK_FALSE;
+    const auto real_fn = get_dispatch_table(device).GetImageMemoryRequirements2;
     if (real_fn) {
         real_fn(device, pInfo, pMemoryRequirements);
         if (pInfo && pInfo->pNext == nullptr)
@@ -3655,11 +4078,7 @@ void LayerManager::dispatch_get_image_sparse_memory_requirements2(
         }
     }
 
-    PFN_vkGetImageSparseMemoryRequirements2 real_fn =
-        (PFN_vkGetImageSparseMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetImageSparseMemoryRequirements2");
-    if (!real_fn) {
-        real_fn = (PFN_vkGetImageSparseMemoryRequirements2) get_real_proc(get_last_instance(), device, "vkGetImageSparseMemoryRequirements2KHR");
-    }
+    const auto real_fn = get_dispatch_table(device).GetImageSparseMemoryRequirements2;
     if (real_fn) {
         real_fn(device, pInfo, pSparseMemoryRequirementCount, pSparseMemoryRequirements);
         return;
@@ -3697,11 +4116,7 @@ void LayerManager::dispatch_update_descriptor_set_with_template(
         }
     }
 
-    PFN_vkUpdateDescriptorSetWithTemplate real_fn =
-        (PFN_vkUpdateDescriptorSetWithTemplate) get_real_proc(get_last_instance(), device, "vkUpdateDescriptorSetWithTemplate");
-    if (!real_fn) {
-        real_fn = (PFN_vkUpdateDescriptorSetWithTemplate) get_real_proc(get_last_instance(), device, "vkUpdateDescriptorSetWithTemplateKHR");
-    }
+    const auto real_fn = get_dispatch_table(device).UpdateDescriptorSetWithTemplate;
     if (real_fn) {
         real_fn(device, descriptorSet, descriptorUpdateTemplate, pData);
     }
@@ -3721,29 +4136,20 @@ void LayerManager::dispatch_get_descriptor_set_layout_support(
     if (!pSupport) return;
     // Query the same native layout that creation would use, without publishing
     // temporary objects in the renderer's descriptor/vertex-emulation metadata.
-    VkDescriptorSetLayoutCreateInfo nativeInfo{};
-    std::vector<VkDescriptorSetLayoutBinding> computeBindings;
+    vkfix::DescriptorLayoutQuery query;
     if (pCreateInfo) {
-        nativeInfo = *pCreateInfo;
-        if (VertexStoreEmulator::get().enabled(device) && nativeInfo.bindingCount) {
-            computeBindings.assign(nativeInfo.pBindings, nativeInfo.pBindings + nativeInfo.bindingCount);
-            for (auto& binding : computeBindings)
-                if (binding.stageFlags & VK_SHADER_STAGE_VERTEX_BIT)
-                    binding.stageFlags |= VK_SHADER_STAGE_COMPUTE_BIT;
-            nativeInfo.pBindings = computeBindings.data();
+        if (query.prepare(*pCreateInfo, VertexStoreEmulator::get().enabled(device)) != VK_SUCCESS) {
+            pSupport->supported = VK_FALSE;
+            return;
         }
         if (m_push_desc_mod && m_push_desc_mod->is_enabled())
-            m_push_desc_mod->on_pre_create_descriptor_set_layout(device, nativeInfo);
-        pCreateInfo = &nativeInfo;
+            m_push_desc_mod->on_pre_create_descriptor_set_layout(device, query.info());
+        pCreateInfo = &query.info();
     }
     if (m_maintenance_mod && m_maintenance_mod->is_enabled() &&
         m_maintenance_mod->on_get_descriptor_set_layout_support(device, pCreateInfo, pSupport)) return;
 
-    auto nativeQuery = (PFN_vkGetDescriptorSetLayoutSupport)get_real_proc(
-        get_last_instance(), device, "vkGetDescriptorSetLayoutSupport");
-    if (!nativeQuery)
-        nativeQuery = (PFN_vkGetDescriptorSetLayoutSupport)get_real_proc(
-            get_last_instance(), device, "vkGetDescriptorSetLayoutSupportKHR");
+    const auto nativeQuery = get_dispatch_table(device).GetDescriptorSetLayoutSupport;
     if (nativeQuery) {
         nativeQuery(device, pCreateInfo, pSupport);
         return;
@@ -3831,25 +4237,7 @@ VkResult LayerManager::dispatch_enumerate_physical_device_groups(
         }
     }
 
-    VkInstance inst = (instance != VK_NULL_HANDLE) ? instance : get_last_instance();
-    PFN_vkEnumeratePhysicalDeviceGroups real_fn =
-        (PFN_vkEnumeratePhysicalDeviceGroups) get_real_proc(inst, VK_NULL_HANDLE, "vkEnumeratePhysicalDeviceGroups");
-    if (!real_fn) {
-        real_fn = (PFN_vkEnumeratePhysicalDeviceGroups) get_real_proc(inst, VK_NULL_HANDLE, "vkEnumeratePhysicalDeviceGroupsKHR");
-    }
-    if (real_fn) {
-        return real_fn(inst, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
-    }
-
-    // Vulkan 1.0 fallback: expose every physical device as a single-device
-    // group. This is the only valid device-group topology on a 1.0 driver.
-    if (!pPhysicalDeviceGroupCount) return VK_ERROR_INITIALIZATION_FAILED;
-    PFN_vkEnumeratePhysicalDevices real_enum =
-        (PFN_vkEnumeratePhysicalDevices) get_real_proc(inst, VK_NULL_HANDLE, "vkEnumeratePhysicalDevices");
-    if (!real_enum) return VK_ERROR_INITIALIZATION_FAILED;
-
-    return vkfix::enumerate_singleton_device_groups(
-        inst, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties, real_enum);
+    return vkfix::enumerate_layer_device_groups(instance,pPhysicalDeviceGroupCount,pPhysicalDeviceGroupProperties);
 }
 
 void LayerManager::dispatch_trim_command_pool(
@@ -3861,11 +4249,7 @@ void LayerManager::dispatch_trim_command_pool(
         if (m_maintenance_mod->on_trim_command_pool(device, commandPool, flags)) return;
     }
 
-    PFN_vkTrimCommandPool real_fn =
-        (PFN_vkTrimCommandPool) get_real_proc(get_last_instance(), device, "vkTrimCommandPool");
-    if (!real_fn) {
-        real_fn = (PFN_vkTrimCommandPool) get_real_proc(get_last_instance(), device, "vkTrimCommandPoolKHR");
-    }
+    const auto real_fn = get_dispatch_table(device).TrimCommandPool;
     if (real_fn) {
         real_fn(device, commandPool, flags);
     }
@@ -3875,14 +4259,13 @@ void LayerManager::dispatch_cmd_set_device_mask(
     VkCommandBuffer commandBuffer,
     uint32_t deviceMask
 ) {
+    const auto device = get_device_for_cmd(commandBuffer);
+    // A singleton mask of one is implicit in native Vulkan1.0. Function
+    // pointer presence alone does not mean its core/KHR route was enabled.
+    if (!(get_device_spirv_extensions(device) & vkfix::NativeDeviceGroup)) return;
     if (vkfix::MultiviewCommands::get().capture(commandBuffer, true, [=] {
         return [=](VkCommandBuffer cmd, uint32_t) { LayerManager::get().dispatch_cmd_set_device_mask(cmd, deviceMask); return VK_SUCCESS; };
     })) return;
-    if (m_device_group_mod && m_device_group_mod->is_enabled()) {
-        if (m_device_group_mod->on_cmd_set_device_mask(commandBuffer, deviceMask)) return;
-    }
-
-    VkDevice device = get_device_for_cmd(commandBuffer);
     const auto& dt = get_dispatch_table(device);
     if (dt.CmdSetDeviceMask) {
         dt.CmdSetDeviceMask(commandBuffer, deviceMask);
@@ -3903,13 +4286,9 @@ void LayerManager::dispatch_get_device_group_peer_memory_features(
         }
     }
 
-    PFN_vkGetDeviceGroupPeerMemoryFeatures real_fn =
-        (PFN_vkGetDeviceGroupPeerMemoryFeatures) get_real_proc(get_last_instance(), device, "vkGetDeviceGroupPeerMemoryFeatures");
-    if (!real_fn) {
-        real_fn = (PFN_vkGetDeviceGroupPeerMemoryFeatures) get_real_proc(get_last_instance(), device, "vkGetDeviceGroupPeerMemoryFeaturesKHR");
-    }
-    if (real_fn) {
-        real_fn(device, heapIndex, localDeviceIndex, remoteDeviceIndex, pPeerMemoryFeatures);
+    const auto& dt = get_dispatch_table(device);
+    if (dt.GetDeviceGroupPeerMemoryFeatures) {
+        dt.GetDeviceGroupPeerMemoryFeatures(device, heapIndex, localDeviceIndex, remoteDeviceIndex, pPeerMemoryFeatures);
         return;
     }
     if (pPeerMemoryFeatures) {
@@ -3931,7 +4310,8 @@ VkResult LayerManager::dispatch_create_swapchain(
     if (m_swapchain_mod && m_swapchain_mod->is_enabled()) {
         if (m_swapchain_mod->on_create_swapchain(device, pCreateInfo, pAllocator, pSwapchain, res)) {
             if (res == VK_SUCCESS && pSwapchain && *pSwapchain != VK_NULL_HANDLE && pCreateInfo) {
-                if (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+                if (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview) ||
+                    !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1)) {
                     try { vkfix::MultiviewAttachments::get().remember_swapchain(device, *pSwapchain, *pCreateInfo); }
                     catch (const std::bad_alloc&) {
                         dispatch_destroy_swapchain(device, *pSwapchain, pAllocator);
@@ -3977,7 +4357,8 @@ VkResult LayerManager::dispatch_create_swapchain(
         }
     }
     if (res == VK_SUCCESS && pSwapchain && *pSwapchain != VK_NULL_HANDLE && pCreateInfo) {
-        if (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+        if (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview) ||
+            !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1)) {
             try { vkfix::MultiviewAttachments::get().remember_swapchain(device, *pSwapchain, *pCreateInfo); }
             catch (const std::bad_alloc&) {
                 dispatch_destroy_swapchain(device, *pSwapchain, pAllocator);
@@ -4061,7 +4442,8 @@ VkResult LayerManager::dispatch_get_swapchain_images(
     }
 
     if ((res == VK_SUCCESS || res == VK_INCOMPLETE) && pSwapchainImages && pSwapchainImageCount &&
-        !(get_device_spirv_extensions(device) & vkfix::NativeMultiview)) {
+        (!(get_device_spirv_extensions(device) & vkfix::NativeMultiview) ||
+         !(get_device_spirv_extensions(device) & vkfix::NativeMaintenance1))) {
         try { vkfix::MultiviewAttachments::get().remember_swapchain_images(device, swapchain, *pSwapchainImageCount, pSwapchainImages); }
         catch (const std::bad_alloc&) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
     }

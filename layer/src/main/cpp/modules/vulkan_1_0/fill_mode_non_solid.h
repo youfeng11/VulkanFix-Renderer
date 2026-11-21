@@ -8,8 +8,8 @@
 #include <atomic>
 
 /**
- * Emulates the Vulkan core feature 'fillModeNonSolid' (VK_POLYGON_MODE_LINE, VK_POLYGON_MODE_POINT)
- * on devices whose hardware drivers (e.g. ARM Mali, PowerVR) do not natively support it.
+ * Preserves native fillModeNonSolid support and provides an explicit legacy
+ * compatibility substitution of FILL for unsupported LINE/POINT modes.
  */
 class FillModeNonSolidModule : public IVulkanLayerModule {
 public:

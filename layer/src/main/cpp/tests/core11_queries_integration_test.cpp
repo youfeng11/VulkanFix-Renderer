@@ -38,6 +38,12 @@ int main() {
     app.apiVersion = VK_API_VERSION_1_1;
     VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     info.pApplicationInfo = &app;
+    const char* extensions[] = {VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_FENCE_CAPABILITIES_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME};
+    info.enabledExtensionCount = 4;
+    info.ppEnabledExtensionNames = extensions;
     VkInstance a{}, b{};
     check(create(&info, nullptr, &a) == VK_SUCCESS, "create primary instance for Core 1.1 queries");
     auto enumerate = (PFN_vkEnumeratePhysicalDevices)gipa(a, "vkEnumeratePhysicalDevices");
@@ -49,17 +55,18 @@ int main() {
     check(create(&info, nullptr, &b) == VK_SUCCESS && a != b,
           "a later instance changes the global last-instance handle");
     const char* selected_route=getenv("VKFIX_CORE11_QUERY_ROUTE");
-    if (!selected_route || strcmp(selected_route,"1")) {
+    {
+        const uint32_t subgroup_size = selected_route && !strcmp(selected_route, "core") ? 8u : 1u;
         for (const char* suffix:{"","KHR"}) {
             auto properties=load<PFN_vkGetPhysicalDeviceProperties2>(gipa,a,"vkGetPhysicalDeviceProperties2",suffix);
             if (!properties) return 1;
             VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
             VkPhysicalDeviceProperties2 output{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,&subgroup};
             properties(physical,&output);
-            check(subgroup.subgroupSize==1 && subgroup.supportedStages==VK_SHADER_STAGE_COMPUTE_BIT &&
+            check(subgroup.subgroupSize==subgroup_size && subgroup.supportedStages==VK_SHADER_STAGE_COMPUTE_BIT &&
                   subgroup.supportedOperations==VK_SUBGROUP_FEATURE_BASIC_BIT && !subgroup.quadOperationsInAllStages &&
                   output.pNext==&subgroup && !subgroup.pNext,
-                  "legacy subgroup query uses the owning instance and preserves the application chain");
+                  "native or software subgroup query uses the authorized route and preserves the application chain");
         }
     }
 
@@ -200,6 +207,33 @@ int main() {
         check(!bo.externalMemoryProperties.externalMemoryFeatures && !fo.externalFenceFeatures && !so.externalSemaphoreFeatures,
               "external capabilities: unsupported handles are initialized deterministically");
     }
+    auto legacy_format = load<PFN_vkGetPhysicalDeviceFormatProperties>(gipa, a, "vkGetPhysicalDeviceFormatProperties", "");
+    if (!legacy_format) return 1;
+    for (const char* mode : {"legacy", "native-khr", "modern", "zero", "enum-error"}) {
+        setenv("VKFIX_CORE11_QUERY_FORMAT_MODE", mode, 1);
+        const bool native = !strcmp(mode,"native-khr") || !strcmp(mode,"modern");
+        const bool old = !selected_route || strcmp(selected_route,"core");
+        const bool implicit = old && !strcmp(mode,"legacy");
+        VkFormatProperties expected{}; expected.bufferFeatures = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
+        if (strcmp(mode,"zero")) {
+            expected.linearTilingFeatures = VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+            expected.optimalTilingFeatures = VK_FORMAT_FEATURE_BLIT_DST_BIT;
+            if (native) { expected.linearTilingFeatures |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT; expected.optimalTilingFeatures |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT; }
+            if (implicit) { expected.linearTilingFeatures |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT; expected.optimalTilingFeatures |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT; }
+        }
+        VkFormatProperties actual{}; legacy_format(physical,VK_FORMAT_R8G8B8A8_UNORM,&actual);
+        check(!memcmp(&actual,&expected,sizeof actual), "legacy format query promotes only established implicit transfers and preserves buffer bits");
+        for (const char* suffix : {"", "KHR"}) {
+            auto modern_format = load<PFN_vkGetPhysicalDeviceFormatProperties2>(gipa,a,"vkGetPhysicalDeviceFormatProperties2",suffix);
+            if (!modern_format) return 1;
+            VkFormatProperties3 sentinel{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3}; sentinel.bufferFeatures = 0x12345678;
+            VkFormatProperties2 result{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,&sentinel};
+            modern_format(physical,VK_FORMAT_R8G8B8A8_UNORM,&result);
+            check(!memcmp(&result.formatProperties,&expected,sizeof expected) && result.pNext == &sentinel && sentinel.bufferFeatures == 0x12345678,
+                "Core/KHR Properties2 agrees with legacy format transfer bits and retains the output chain");
+        }
+    }
+    unsetenv("VKFIX_CORE11_QUERY_FORMAT_MODE");
     check(mismatches() == 0, "all native query dispatches use the physical device's owning instance");
     auto destroy = (PFN_vkDestroyInstance)gipa(a, "vkDestroyInstance");
     destroy(b, nullptr); destroy(a, nullptr);

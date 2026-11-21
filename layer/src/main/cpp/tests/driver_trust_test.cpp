@@ -26,19 +26,19 @@ int main() {
     std::atomic<unsigned> calls{0};
     std::atomic<bool> start{false};
     std::vector<std::thread> threads;
-    std::vector<DriverTrustReport> reports(16);
+    std::vector<DriverProbeAssessment> reports(16);
     for (unsigned i=0;i<16;++i) threads.emplace_back([&,i] {
         while (!start.load()) std::this_thread::yield();
-        reports[i]=cache.get(id,[&]{ ++calls; DriverTrustReport result; result.sampler_aliases=assess_driver_probe(true,false,true); return result; });
+        reports[i]=cache.get(id,[&]{ ++calls; return assess_driver_probe(true,false,true); });
     });
     start=true;
     for (auto &thread:threads) thread.join();
     check(calls==1 && cache.size()==1,"sixteen concurrent callers run exactly one probe");
     bool same=true;
-    for (const auto &report:reports) same &= report.sampler_aliases.verdict==DriverProbeVerdict::RepairConfirmed;
+    for (const auto &report:reports) same &= report.verdict==DriverProbeVerdict::RepairConfirmed;
     check(same,"all waiters receive the published measurement");
     auto distinct=[&](DriverIdentity other) {
-        cache.get(other,[&]{ ++calls; return DriverTrustReport{}; });
+        cache.get(other,[&]{ ++calls; return DriverProbeAssessment{}; });
     };
     for (unsigned field=0;field<8;++field) {
         auto other=id;
@@ -52,15 +52,46 @@ int main() {
     }
     check(calls==9 && cache.size()==9,"device/driver/API/UUID/revision/physical/provider changes invalidate reuse");
     DriverTrustCache recursion;
-    auto nested=recursion.get(id,[&]{ return recursion.get(id,[]{ throw std::runtime_error("must not run nested factory"); return DriverTrustReport{}; }); });
-    check(nested.sampler_aliases.verdict==DriverProbeVerdict::Inconclusive,"recursive probe does not deadlock or fabricate health");
+    auto nested=recursion.get(id,[&]{ return recursion.get(id,[]{ throw std::runtime_error("must not run nested factory"); return DriverProbeAssessment{}; }); });
+    check(nested.verdict==DriverProbeVerdict::Inconclusive,"recursive probe does not deadlock or fabricate health");
     DriverTrustCache throwing;
-    auto failed=throwing.get(id,[]{ throw std::runtime_error("setup failed"); return DriverTrustReport{}; });
-    auto repeated=throwing.get(id,[]{ throw std::runtime_error("must not retry"); return DriverTrustReport{}; });
-    check(failed.sampler_aliases.detail=="setup failed" && repeated.sampler_aliases.detail=="setup failed","failed setup is inconclusive and memoized");
+    auto failed=throwing.get(id,[]{ throw std::runtime_error("setup failed"); return DriverProbeAssessment{}; });
+    auto repeated=throwing.get(id,[]{ throw std::runtime_error("must not retry"); return DriverProbeAssessment{}; });
+    check(failed.detail=="setup failed" && repeated.detail=="setup failed","failed setup is inconclusive and memoized");
     DriverTrustCache bounded(2);
-    for (unsigned i=0;i<20;++i) { auto key=id; key.driver=i; bounded.get(key,[]{ return DriverTrustReport{}; }); }
-    check(bounded.size()==2,"cache growth is bounded");
+    unsigned bounded_calls = 0;
+    const auto measure = [&] { ++bounded_calls; return assess_driver_probe(true,true,true); };
+    for (unsigned i=0;i<20;++i) { auto key=id; key.driver=i; bounded.get(key,measure); }
+    check(bounded.size()==2 && bounded_calls==20, "new devices still run probes after the cache fills");
+    auto recent = id, old = id, newcomer = id;
+    recent.driver = 18;
+    old.driver = 19;
+    newcomer.driver = 20;
+    bounded.get(recent, measure);
+    bounded.get(newcomer, measure);
+    bounded.get(recent, measure);
+    check(bounded_calls==21, "a recently used result survives eviction");
+    bounded.get(old, measure);
+    check(bounded_calls==22, "least recently used result is measured again");
+
+    DriverTrustCache busy(1);
+    std::promise<void> entered, finish;
+    auto finish_signal = finish.get_future();
+    std::thread running([&] {
+        busy.get(id, [&] {
+            entered.set_value();
+            finish_signal.wait();
+            return assess_driver_probe(true,true,true);
+        });
+    });
+    entered.get_future().wait();
+    bool ran_new = false;
+    const auto full = busy.get(newcomer, [&] { ran_new = true; return measure(); });
+    check(!ran_new && full.verdict==DriverProbeVerdict::Inconclusive, "a running probe is never evicted");
+    finish.set_value();
+    running.join();
+    check(busy.get(newcomer, measure).verdict==DriverProbeVerdict::Healthy && bounded_calls==23,
+          "finishing the running probe makes capacity available again");
     std::printf("Driver trust regression: %u failure(s)\n",failures);
     return failures?1:0;
 }

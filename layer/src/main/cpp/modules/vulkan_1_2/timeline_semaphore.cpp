@@ -1,8 +1,11 @@
 #include "timeline_semaphore.h"
 #include "driver_loader.h"
+#include "driver_trust.h"
 #include "input_pnext_copy.h"
 #include "timeline_scheduler.h"
 #include "layer_manager.h"
+#include "native_instance_state.h"
+#include "promoted_features.h"
 #include "vk_pnext.h"
 #include <algorithm>
 #include <chrono>
@@ -72,21 +75,18 @@ bool TimelineSemaphoreModule::query_native_support(VkPhysicalDevice physDev) {
         return true;
     }
 
+    auto instance = vkfix::native_instance_for_physical(physDev);
+    if (!instance) instance = get_last_instance();
     PFN_vkGetPhysicalDeviceProperties real_props = (PFN_vkGetPhysicalDeviceProperties)get_real_proc(
-        get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+        instance, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
     if (!real_props)
         return false;
     VkPhysicalDeviceProperties props{};
     real_props(physDev, &props);
 
-    PFN_vkGetPhysicalDeviceFeatures2 real_feat2 = (PFN_vkGetPhysicalDeviceFeatures2)get_real_proc(
-        get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2");
-    if (!real_feat2) {
-        real_feat2 = (PFN_vkGetPhysicalDeviceFeatures2)get_real_proc(
-            get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2KHR");
-    }
+    const auto real_feat2 = native_features2_proc(physDev);
 
-    if (props.apiVersion >= VK_API_VERSION_1_2 && real_feat2) {
+    if (vkfix::limit_native_device_api(physDev, props.apiVersion) >= VK_API_VERSION_1_2 && real_feat2) {
         VkPhysicalDeviceVulkan12Features v12Feat{};
         v12Feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
         VkPhysicalDeviceFeatures2 f2{};
@@ -100,7 +100,7 @@ bool TimelineSemaphoreModule::query_native_support(VkPhysicalDevice physDev) {
 
     PFN_vkEnumerateDeviceExtensionProperties real_enum =
         (PFN_vkEnumerateDeviceExtensionProperties)get_real_proc(
-            get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+            instance, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
     if (real_enum) {
         uint32_t count = 0;
         if (real_enum(physDev, NULL, &count, NULL) == VK_SUCCESS && count > 0) {
@@ -191,13 +191,15 @@ void TimelineSemaphoreModule::on_pre_create_device(VkPhysicalDevice physicalDevi
         pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR);
     bool appRequestedInTsFeat = (tsFeat && tsFeat->timelineSemaphore);
 
+    auto instance = vkfix::native_instance_for_physical(physicalDevice);
+    if (!instance) instance = get_last_instance();
     PFN_vkGetPhysicalDeviceProperties real_props = (PFN_vkGetPhysicalDeviceProperties)get_real_proc(
-        get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+        instance, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
     uint32_t realApiVer = VK_API_VERSION_1_0;
     if (real_props) {
         VkPhysicalDeviceProperties props{};
         real_props(physicalDevice, &props);
-        realApiVer = props.apiVersion;
+        realApiVer = vkfix::limit_native_device_api(physicalDevice, props.apiVersion);
     }
 
     bool deviceCanBeNative = false;
@@ -209,7 +211,28 @@ void TimelineSemaphoreModule::on_pre_create_device(VkPhysicalDevice physicalDevi
         }
     }
 
+    const auto mode = parse_emulation_mode("VULKAN_FIX_EMULATE_TIMELINE_SEMAPHORE",
+                                           "FORCE_EMULATE_TIMELINE_SEMAPHORE");
+    const char *async = getenv("VULKAN_FIX_TIMELINE_ASYNC");
+    // The scheduler implements host release of queued waits. Its software
+    // counters cannot be shared through native external semaphore handles.
+    if (deviceCanBeNative && (appRequestedInV12 || appRequestedInTsFeat) && mode == EmulationMode::Auto &&
+        (!async || strcmp(async, "0")) &&
+        std::none_of(enabledExtensions.begin(), enabledExtensions.end(), [](const char *extension) {
+            return strcmp(extension, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME) == 0 ||
+                   strcmp(extension, "VK_KHR_external_semaphore_win32") == 0 ||
+                   strcmp(extension, "VK_FUCHSIA_external_semaphore") == 0;
+        })) {
+        const vkfix::NativeDriverProbes probes(instance, physicalDevice, get_real_instance_proc_addr());
+        const auto assessment = probes.measure(vkfix::DriverProbe::TimelineQueue);
+        deviceCanBeNative = assessment.verdict != vkfix::DriverProbeVerdict::DefectObserved;
+        LOGI("Driver probe timeline queue: %s (%s); native=%u",
+             vkfix::driver_probe_verdict_name(assessment.verdict), assessment.detail.c_str(),
+             unsigned(deviceCanBeNative));
+    }
+
     if (!deviceCanBeNative) {
+        if (v12Feat) v12Feat->timelineSemaphore = VK_FALSE;
         for (auto it = enabledExtensions.begin(); it != enabledExtensions.end();) {
             if (strcmp(*it, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) == 0) {
                 it = enabledExtensions.erase(it);

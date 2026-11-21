@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 namespace vkfix::nativeprobe {
+enum class Sync2Route { Legacy, Core, KHR };
 inline void check(VkResult result, const char *operation) {
     if (result != VK_SUCCESS) throw std::runtime_error(std::string(operation) + ": VkResult " + std::to_string(result));
 }
@@ -64,28 +65,67 @@ template<class Context> struct Resources {
         VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE}; range.memory = b.memory; range.size = VK_WHOLE_SIZE;
         check(p.template dev<PFN_vkInvalidateMappedMemoryRanges>("vkInvalidateMappedMemoryRanges")(p.device, 1, &range), "invalidate probe buffer");
     }
-    Image image(VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
+    VkImage create_image(const VkImageCreateInfo &ci) {
         auto destroy_image = p.template dev<PFN_vkDestroyImage>("vkDestroyImage");
+        VkImage image{};
+        check(p.template dev<PFN_vkCreateImage>("vkCreateImage")(p.device, &ci, nullptr, &image), "create probe image");
+        objects.push_back([=] { destroy_image(p.device, image, nullptr); });
+        VkMemoryRequirements mr{};
+        p.template dev<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(p.device, image, &mr);
+        auto memory = allocate(mr, 0);
+        check(p.template dev<PFN_vkBindImageMemory>("vkBindImageMemory")(p.device, image, memory, 0), "bind probe image");
+        return image;
+    }
+    VkImageView view(VkImage image, VkFormat format, VkImageAspectFlags aspects) {
         auto destroy_view = p.template dev<PFN_vkDestroyImageView>("vkDestroyImageView");
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = image; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = format;
+        vi.subresourceRange = {aspects, 0, 1, 0, 1};
+        VkImageView handle{};
+        check(p.template dev<PFN_vkCreateImageView>("vkCreateImageView")(p.device, &vi, nullptr, &handle), "create probe view");
+        objects.push_back([=] { destroy_view(p.device, handle, nullptr); });
+        return handle;
+    }
+    Image image(VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
         VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ci.imageType = VK_IMAGE_TYPE_2D; ci.format = VK_FORMAT_R8G8B8A8_UNORM; ci.extent = {16,16,1};
         ci.mipLevels = ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT;
         ci.tiling = VK_IMAGE_TILING_OPTIMAL; ci.usage = usage;
-        Image image{};
-        check(p.template dev<PFN_vkCreateImage>("vkCreateImage")(p.device, &ci, nullptr, &image.handle), "create probe image");
-        auto handle = image.handle;
-        objects.push_back([=] { destroy_image(p.device, handle, nullptr); });
-        VkMemoryRequirements mr{};
-        p.template dev<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(p.device, handle, &mr);
-        auto memory = allocate(mr, 0);
-        check(p.template dev<PFN_vkBindImageMemory>("vkBindImageMemory")(p.device, handle, memory, 0), "bind probe image");
-        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        vi.image = handle; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = ci.format;
-        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        check(p.template dev<PFN_vkCreateImageView>("vkCreateImageView")(p.device, &vi, nullptr, &image.view), "create probe view");
-        auto view = image.view;
-        objects.push_back([=] { destroy_view(p.device, view, nullptr); });
-        return image;
+        const auto handle = create_image(ci);
+        return {handle, view(handle, ci.format, VK_IMAGE_ASPECT_COLOR_BIT)};
+    }
+    VkFramebuffer framebuffer(VkRenderPass pass, uint32_t count, const VkImageView *views, VkExtent2D extent) {
+        auto destroy = p.template dev<PFN_vkDestroyFramebuffer>("vkDestroyFramebuffer");
+        VkFramebufferCreateInfo ci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        ci.renderPass = pass;
+        ci.attachmentCount = count;
+        ci.pAttachments = views;
+        ci.width = extent.width;
+        ci.height = extent.height;
+        ci.layers = 1;
+        VkFramebuffer target{};
+        check(p.template dev<PFN_vkCreateFramebuffer>("vkCreateFramebuffer")(p.device, &ci, nullptr, &target),
+              "create probe framebuffer");
+        objects.push_back([=] { destroy(p.device, target, nullptr); });
+        return target;
+    }
+    VkFramebuffer framebuffer(VkRenderPass pass, VkImageView view) {
+        return framebuffer(pass, 1, &view, {16, 16});
+    }
+    VkPipelineShaderStageCreateInfo shader_stage(VkShaderStageFlagBits stage, const uint32_t *code, size_t bytes) {
+        auto destroy = p.template dev<PFN_vkDestroyShaderModule>("vkDestroyShaderModule");
+        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        ci.codeSize = bytes;
+        ci.pCode = code;
+        VkShaderModule module{};
+        check(p.template dev<PFN_vkCreateShaderModule>("vkCreateShaderModule")(p.device, &ci, nullptr, &module),
+              "create probe shader");
+        objects.push_back([=] { destroy(p.device, module, nullptr); });
+        VkPipelineShaderStageCreateInfo result{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        result.stage = stage;
+        result.module = module;
+        result.pName = "main";
+        return result;
     }
     VkCommandBuffer begin() {
         auto destroy = p.template dev<PFN_vkDestroyCommandPool>("vkDestroyCommandPool");
@@ -101,13 +141,13 @@ template<class Context> struct Resources {
         check(p.template dev<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(cb, &bi), "begin probe commands");
         return cb;
     }
-    void submit(VkCommandBuffer cb, bool sync2 = false) {
+    void submit(VkCommandBuffer cb, bool sync2 = false, VkQueue queue = VK_NULL_HANDLE) {
         auto destroy = p.template dev<PFN_vkDestroyFence>("vkDestroyFence");
         check(p.template dev<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(cb), "end probe commands");
         VkFenceCreateInfo ci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; VkFence fence{};
         check(p.template dev<PFN_vkCreateFence>("vkCreateFence")(p.device, &ci, nullptr, &fence), "create probe fence");
         objects.push_back([=] { destroy(p.device, fence, nullptr); });
-        VkQueue queue{}; p.template dev<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(p.device, family, 0, &queue);
+        if (!queue) p.template dev<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(p.device, family, 0, &queue);
         if (sync2) {
             VkCommandBufferSubmitInfo command{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO}; command.commandBuffer = cb;
             VkSubmitInfo2 info{VK_STRUCTURE_TYPE_SUBMIT_INFO_2}; info.commandBufferInfoCount = 1; info.pCommandBufferInfos = &command;

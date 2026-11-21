@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 #include <vector>
+#include "input_pnext_copy.h"
 
 namespace vkfix {
 // Private modules live through all pipeline modifiers and their post callbacks.
@@ -10,8 +11,10 @@ namespace vkfix {
 class SpecializedShaderStages {
 public:
     SpecializedShaderStages(VkDevice device, PFN_vkCreateShaderModule create, PFN_vkDestroyShaderModule destroy,
-                            std::optional<uint32_t> view = std::nullopt, bool native_device_group = false)
-        : device_(device), create_(create), destroy_(destroy), view_(view), native_device_group_(native_device_group) {}
+                            std::optional<uint32_t> view = std::nullopt, bool native_device_group = false,
+                            bool native_tessellation_origin = true)
+        : device_(device), create_(create), destroy_(destroy), view_(view), native_device_group_(native_device_group),
+          native_tessellation_origin_(native_tessellation_origin) {}
     ~SpecializedShaderStages();
     SpecializedShaderStages(const SpecializedShaderStages&)=delete;
     SpecializedShaderStages& operator=(const SpecializedShaderStages&)=delete;
@@ -25,15 +28,18 @@ public:
     }
 private:
     std::shared_ptr<const std::vector<uint32_t>> source(VkShaderModule, std::optional<uint32_t>) const;
-    VkResult stage(VkPipelineShaderStageCreateInfo&, std::optional<uint32_t>, bool from_device = false);
+    VkResult stage(VkPipelineShaderStageCreateInfo&, std::optional<uint32_t>, bool from_device = false, bool lower_origin = false);
     VkDevice device_;
     PFN_vkCreateShaderModule create_;
     PFN_vkDestroyShaderModule destroy_;
     std::optional<uint32_t> view_;
     bool native_device_group_;
+    bool native_tessellation_origin_;
     std::vector<VkShaderModule> modules_;
     std::vector<VkGraphicsPipelineCreateInfo> graphics_;
     std::vector<std::vector<VkPipelineShaderStageCreateInfo>> stages_;
     std::vector<VkComputePipelineCreateInfo> compute_;
+    std::vector<VkPipelineTessellationStateCreateInfo> tessellations_;
+    std::vector<InputPNextCopy> tessellation_chains_;
 };
 }

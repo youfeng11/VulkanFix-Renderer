@@ -9,6 +9,7 @@ void main() {
         vec2( 3.0, -1.0),
         vec2(-1.0,  3.0));
     gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
-    color = gl_ViewIndex == 0 ? vec4(1.0, 0.0, 0.0, 1.0)
-                              : vec4(0.0, 1.0, 0.0, 1.0);
+    int code = gl_ViewIndex + 1;
+    color = vec4(float(code) / 32.0, float(code & 1),
+                 float((code >> 1) & 1), 1.0);
 }

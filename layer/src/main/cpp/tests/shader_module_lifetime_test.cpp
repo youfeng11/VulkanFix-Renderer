@@ -3,6 +3,8 @@
 #include "core/shader_module_cache.h"
 #include "core/specialized_shader_stages.h"
 #include "diagnostics/driver_post_shaders.h"
+#include "shader/tessellation_domain_origin.h"
+#include "shader/specialize_constants.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -28,11 +30,14 @@ unsigned fail_call = 0;
 bool null_success = false, fail_after_create = false, allocator_matches = true;
 const VkAllocationCallbacks* expected_allocator = nullptr;
 std::set<Key> live, metadata;
+bool capture_code = false;
+std::vector<uint32_t> last_code;
 void check(bool okay, const char* label) { printf("%s: %s\n",okay ? "PASS" : "FAIL",label); failures += !okay; }
-VKAPI_ATTR VkResult VKAPI_CALL create(VkDevice device, const VkShaderModuleCreateInfo*, const VkAllocationCallbacks* allocator, VkShaderModule* out) {
+VKAPI_ATTR VkResult VKAPI_CALL create(VkDevice device, const VkShaderModuleCreateInfo* info, const VkAllocationCallbacks* allocator, VkShaderModule* out) {
     ++calls; allocator_matches &= allocator == expected_allocator;
     if (calls == fail_call) { *out = handle<VkShaderModule>(0xdead); return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
     if (null_success) { *out = VK_NULL_HANDLE; return VK_SUCCESS; }
+    if (capture_code) last_code.assign(info->pCode, info->pCode + info->codeSize / 4);
     *out = handle<VkShaderModule>(++serial); live.insert(key(device,*out)); ++created;
     if (fail_after_create) fail_new = true;
     return VK_SUCCESS;
@@ -130,6 +135,65 @@ int main() {
         "all successful modules are retired once and no failed output reaches cleanup");
     check(ShaderModuleCache::get().acquire_deferred(device,vertex) && ShaderModuleCache::get().acquire_deferred(device,fragment),
         "temporary module retirement does not erase original shader-cache entries");
+    const auto evaluation = handle<VkShaderModule>(0x600);
+    std::vector<uint32_t> evaluation_code(post_viewport_stage_tese, post_viewport_stage_tese + sizeof post_viewport_stage_tese / 4);
+    const auto original_evaluation = evaluation_code;
+    auto reversed_evaluation = evaluation_code;
+    check(lower_tessellation_domain_origin(reversed_evaluation, "main") && reversed_evaluation != original_evaluation &&
+          lower_tessellation_domain_origin(reversed_evaluation, "main") && reversed_evaluation == original_evaluation,
+          "domain origin reverses TES winding without changing coordinates or other instructions");
+    auto missing_entry = original_evaluation;
+    check(!lower_tessellation_domain_origin(missing_entry, "missing") && missing_entry == original_evaluation,
+          "a missing TES entry point leaves shader bytes unchanged");
+    VkShaderModuleCreateInfo evaluation_ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    evaluation_ci.pCode = evaluation_code.data(); evaluation_ci.codeSize = evaluation_code.size() * 4;
+    ShaderModuleCache::get().remember(device, evaluation, &evaluation_ci);
+    VkPipelineShaderStageCreateInfo evaluation_stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    evaluation_stage.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT; evaluation_stage.module = evaluation; evaluation_stage.pName = "main";
+    VkPipelineTessellationDomainOriginStateCreateInfo origin{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO};
+    origin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+    VkPipelineTessellationStateCreateInfo tessellation{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, &origin};
+    tessellation.patchControlPoints = 3;
+    VkGraphicsPipelineCreateInfo domain_pipeline{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    domain_pipeline.stageCount = 1; domain_pipeline.pStages = &evaluation_stage; domain_pipeline.pTessellationState = &tessellation;
+    const auto saved_origin = origin; const auto saved_tessellation = tessellation;
+    reset_faults(); capture_code = true;
+    {
+        SpecializedShaderStages prepared(device,create,destroy,std::nullopt,false,false);
+        check(prepared.prepare(1,&domain_pipeline) == VK_SUCCESS && live.size() == 1,
+              "legacy domain origin creates one owned TES variant");
+        const auto* lowered = prepared.graphics(&domain_pipeline);
+        check(lowered->pTessellationState != &tessellation && !lowered->pTessellationState->pNext &&
+              lowered->pTessellationState->patchControlPoints == 3 && lowered->pStages[0].module != evaluation &&
+              !std::memcmp(&origin,&saved_origin,sizeof origin) && !std::memcmp(&tessellation,&saved_tessellation,sizeof tessellation),
+              "legacy pipeline strips only its owned domain-origin node and preserves caller inputs");
+        auto specialized_original = original_evaluation;
+        std::string specialization_error;
+        check(specialize_constants(specialized_original,nullptr,specialization_error) &&
+              lower_tessellation_domain_origin(last_code,"main") && last_code == specialized_original,
+              "the actual private module contains the reversed winding");
+    }
+    check(live.empty() && created == destroyed && !invalid_destroy, "domain variants are retired after pipeline preparation");
+    {
+        SpecializedShaderStages prepared(device,create,destroy,std::nullopt,false,true);
+        check(prepared.prepare(1,&domain_pipeline) == VK_SUCCESS && prepared.graphics(&domain_pipeline) == &domain_pipeline && live.empty(),
+              "an authorized native maintenance2 route receives the original origin and shader");
+    }
+    origin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT;
+    {
+        SpecializedShaderStages prepared(device,create,destroy,std::nullopt,false,false);
+        check(prepared.prepare(1,&domain_pipeline) == VK_SUCCESS && !prepared.graphics(&domain_pipeline)->pTessellationState->pNext &&
+              prepared.graphics(&domain_pipeline)->pStages[0].module == evaluation && live.empty(),
+              "legacy upper-left default removes the unsupported node without rewriting its shader");
+    }
+    origin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+    reset_faults(); fail_call = 1;
+    {
+        SpecializedShaderStages prepared(device,create,destroy,std::nullopt,false,false);
+        check(prepared.prepare(1,&domain_pipeline) == VK_ERROR_OUT_OF_DEVICE_MEMORY && live.empty() && !invalid_destroy,
+              "domain variant creation failure propagates without adopting a failed handle");
+    }
+    capture_code = false;
     ShaderModuleCache::get().forget_device(device);
     printf("Shader module lifetime failures: %u\n",failures); return failures ? 1 : 0;
 }

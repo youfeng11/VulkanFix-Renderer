@@ -20,6 +20,9 @@ def generate(glslc, validator):
             "parameters.vert": "vulkan1.0",
             "stores.vert": "vulkan1.0",
             "sampler.frag": "vulkan1.0",
+            "volume_sample.comp": "vulkan1.0",
+            "volume_input.vert": "vulkan1.0",
+            "volume_input.frag": "vulkan1.0",
             "storage16.comp": "vulkan1.1",
             "multiview.vert": "vulkan1.1",
             "multiview.frag": "vulkan1.1",
@@ -62,7 +65,7 @@ def generate(glslc, validator):
 def generate_assembly(assembler, validator):
     headers = {}
     with tempfile.TemporaryDirectory(prefix="vulkanfix-post-assembly-") as temporary:
-        for stem in ("variable_pointers", "variable_pointers_storage", "storage_arrays", "storage_arrays_static", "subgroup_basic"):
+        for stem in ("variable_pointers", "variable_pointers_storage", "storage_arrays", "storage_arrays_static", "subgroup_basic", "relaxed_layout"):
             source = DIRECTORY / "shaders" / f"{stem}.spvasm"
             output = Path(temporary) / "shader.spv"
             subprocess.run([str(assembler), "--target-env", "vulkan1.1", str(source), "-o", str(output)], check=True)

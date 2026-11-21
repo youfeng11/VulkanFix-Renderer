@@ -1,7 +1,11 @@
 #include "synchronization2.h"
 #include "driver_loader.h"
+#include "driver_trust.h"
 #include "layer_manager.h"
+#include "native_instance_state.h"
 #include "timeline_scheduler.h"
+#include "volume_attachment.h"
+#include "shader/spirv_extensions.h"
 #include "vk_pnext.h"
 #include <string.h>
 #include <strings.h>
@@ -10,6 +14,10 @@
 #include <algorithm>
 
 REGISTER_LAYER_MODULE(Synchronization2Module);
+static bool attachment_sync(VkDevice device) {
+    return LayerManager::get().uses_render_pass_replay(device) &&
+        !(LayerManager::get().get_device_spirv_extensions(device) & vkfix::NativeMaintenance1);
+}
 
 static inline VkPipelineStageFlags stage_flags2_to_stage_flags(VkPipelineStageFlags2 flags2, bool is_dst = false) {
     // Bits 0..16 match standard VkPipelineStageFlagBits in Vulkan 1.0:
@@ -133,9 +141,11 @@ bool Synchronization2Module::is_phys_device_native(VkPhysicalDevice physDev) {
         return true;
     }
 
+    auto instance = vkfix::native_instance_for_physical(physDev);
+    if (!instance) instance = get_last_instance();
     bool native = false;
     PFN_vkEnumerateDeviceExtensionProperties real_ext_fn =
-        (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+        (PFN_vkEnumerateDeviceExtensionProperties) get_real_proc(instance, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
     if (real_ext_fn) {
         uint32_t count = 0;
         if (real_ext_fn(physDev, NULL, &count, NULL) == VK_SUCCESS && count > 0) {
@@ -154,13 +164,13 @@ bool Synchronization2Module::is_phys_device_native(VkPhysicalDevice physDev) {
     // Also check if Vulkan 1.3 synchronization2 feature is natively enabled
     if (!native) {
         PFN_vkGetPhysicalDeviceProperties real_props_fn =
-            (PFN_vkGetPhysicalDeviceProperties) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
+            (PFN_vkGetPhysicalDeviceProperties) get_real_proc(instance, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
         if (real_props_fn) {
             VkPhysicalDeviceProperties props{};
             real_props_fn(physDev, &props);
             if (props.apiVersion >= VK_API_VERSION_1_3) {
                 PFN_vkGetPhysicalDeviceFeatures2 real_gpf2 =
-                    (PFN_vkGetPhysicalDeviceFeatures2) get_real_proc(get_last_instance(), VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2");
+                    (PFN_vkGetPhysicalDeviceFeatures2) get_real_proc(instance, VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2");
                 if (real_gpf2) {
                     VkPhysicalDeviceVulkan13Features v13Features{};
                     v13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -196,11 +206,22 @@ bool Synchronization2Module::is_device_native(VkDevice device) {
         return m_primary_native.load(std::memory_order_relaxed);
     }
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_device_needs_emulation.find((uint64_t)(uintptr_t)device);
-    if (it != m_device_needs_emulation.end()) {
-        return !it->second;
-    }
-    return false;
+    auto it = m_device_routes.find(device);
+    return it != m_device_routes.end() && it->second.native;
+}
+
+bool Synchronization2Module::prefers_legacy(VkDevice device, LegacyRoute route) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it = m_device_routes.find(device);
+    return it != m_device_routes.end() && (it->second.legacy & route);
+}
+
+bool Synchronization2Module::prefers_legacy_submit(VkDevice device) {
+    return prefers_legacy(device, LegacySubmit);
+}
+
+bool Synchronization2Module::prefers_legacy_reset(VkDevice device) {
+    return prefers_legacy(device, LegacyReset);
 }
 
 void Synchronization2Module::on_enumerate_device_extensions(
@@ -272,7 +293,36 @@ void Synchronization2Module::on_pre_create_device(
     void*& pUserData
 ) {
     pUserData = nullptr;
-    if (is_phys_device_native(physicalDevice) || !pCreateInfo) return;
+    if (!pCreateInfo) return;
+    if (is_phys_device_native(physicalDevice)) {
+        const auto mode = parse_emulation_mode("VULKAN_FIX_EMULATE_SYNCHRONIZATION2",
+                                               "FORCE_EMULATE_SYNCHRONIZATION2");
+        const auto *feature = vku::find_pnext<VkPhysicalDeviceSynchronization2Features>(
+            pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES);
+        const auto *core = vku::find_pnext<VkPhysicalDeviceVulkan13Features>(
+            pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
+        const auto *group = vku::find_pnext<VkDeviceGroupDeviceCreateInfo>(
+            pCreateInfo->pNext, VK_STRUCTURE_TYPE_DEVICE_GROUP_DEVICE_CREATE_INFO);
+        if (mode == EmulationMode::Auto && (!group || group->physicalDeviceCount <= 1) &&
+            ((feature && feature->synchronization2) || (core && core->synchronization2))) {
+            auto instance = vkfix::native_instance_for_physical(physicalDevice);
+            if (!instance) instance = get_last_instance();
+            const vkfix::NativeDriverProbes probes(instance, physicalDevice, get_real_instance_proc_addr());
+            const auto measurement = probes.measure(vkfix::DriverProbe::Sync2Submit);
+            const bool use_legacy = measurement.verdict == vkfix::DriverProbeVerdict::DefectObserved;
+            uintptr_t routes = use_legacy ? LegacySubmit : 0;
+            LOGI("Driver probe synchronization2 submit: %s (%s); prefer legacy=%u",
+                 vkfix::driver_probe_verdict_name(measurement.verdict), measurement.detail.c_str(),
+                 unsigned(use_legacy));
+            const auto events = probes.measure(vkfix::DriverProbe::Sync2Events);
+            const bool use_legacy_reset = events.verdict == vkfix::DriverProbeVerdict::RepairConfirmed;
+            if (use_legacy_reset) routes |= LegacyReset;
+            LOGI("Driver probe synchronization2 events: %s (%s); prefer legacy reset=%u",
+                 vkfix::driver_probe_verdict_name(events.verdict), events.detail.c_str(), unsigned(use_legacy_reset));
+            pUserData = reinterpret_cast<void *>(routes);
+        }
+        return;
+    }
 
     // 1. Strip extension from enabledExtensions
     if (vku::strip_extension(enabledExtensions, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
@@ -280,8 +330,7 @@ void Synchronization2Module::on_pre_create_device(
     }
 
     // 2. Unlink VkPhysicalDeviceSynchronization2FeaturesKHR from pCreateInfo->pNext
-    pUserData = vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR);
-    if (pUserData) {
+    if (vku::unlink_pnext(pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR)) {
         LOGI("vkCreateDevice: unlinked VkPhysicalDeviceSynchronization2FeaturesKHR from pNext");
     }
 
@@ -304,7 +353,7 @@ void Synchronization2Module::on_post_create_device(
         bool native = is_phys_device_native(physicalDevice);
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            m_device_needs_emulation[(uint64_t)(uintptr_t)device] = !native;
+            m_device_routes[device] = {native, native ? reinterpret_cast<uintptr_t>(pUserData) : 0};
         }
         m_primary_dev.store(device, std::memory_order_release);
         m_primary_native.store(native, std::memory_order_release);
@@ -314,7 +363,7 @@ void Synchronization2Module::on_post_create_device(
 
 void Synchronization2Module::on_destroy_device(VkDevice device) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_device_needs_emulation.erase((uint64_t)(uintptr_t)device);
+    m_device_routes.erase(device);
     if (m_primary_dev.load(std::memory_order_relaxed) == device) {
         m_primary_dev.store(VK_NULL_HANDLE, std::memory_order_release);
         m_primary_native.store(false, std::memory_order_release);
@@ -327,7 +376,7 @@ bool Synchronization2Module::on_cmd_set_event2(
     const VkDependencyInfo* pDependencyInfo
 ) {
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
-    if (is_device_native(device)) return false;
+    if (is_device_native(device) && !attachment_sync(device)) return false;
 
     static std::atomic<uint64_t> emulated_set_event2{0};
     const uint64_t set_index = emulated_set_event2.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -354,6 +403,7 @@ bool Synchronization2Module::on_cmd_set_event2(
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     if (dt.CmdSetEvent) {
+        if (attachment_sync(device)) combinedSrc = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         dt.CmdSetEvent(commandBuffer, event, combinedSrc);
     }
     return true;
@@ -365,7 +415,13 @@ bool Synchronization2Module::on_cmd_reset_event2(
     VkPipelineStageFlags2 stageMask
 ) {
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
-    if (is_device_native(device)) return false;
+    const auto& dt = LayerManager::get().get_dispatch_table(device);
+    const VkPipelineStageFlags legacy_stage = stage_flags2_to_stage_flags(stageMask, false);
+    if (is_device_native(device) && !attachment_sync(device)) {
+        // Only use the measured repair when the stage scope survives exactly.
+        if (!prefers_legacy_reset(device) || !dt.CmdResetEvent || !stageMask || legacy_stage != stageMask)
+            return false;
+    }
 
     static std::atomic<uint64_t> emulated_reset_event2{0};
     const uint64_t reset_index = emulated_reset_event2.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -374,14 +430,9 @@ bool Synchronization2Module::on_cmd_reset_event2(
              static_cast<unsigned long long>(reset_index));
     }
 
-    VkPipelineStageFlags stage = stage_flags2_to_stage_flags(stageMask, false);
-    if (stage == 0) {
-        stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    }
-
-    const auto& dt = LayerManager::get().get_dispatch_table(device);
     if (dt.CmdResetEvent) {
-        dt.CmdResetEvent(commandBuffer, event, stage);
+        dt.CmdResetEvent(commandBuffer, event, attachment_sync(device) ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT :
+            legacy_stage ? legacy_stage : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     }
     return true;
 }
@@ -393,7 +444,7 @@ bool Synchronization2Module::on_cmd_wait_events2(
     const VkDependencyInfo* pDependencyInfos
 ) {
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
-    if (is_device_native(device)) return false;
+    if (is_device_native(device) && !attachment_sync(device)) return false;
 
     if (eventCount == 0 || !pEvents) return true;
 
@@ -503,6 +554,15 @@ bool Synchronization2Module::on_cmd_wait_events2(
     if (combinedSrc == 0) combinedSrc = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     if (combinedDst == 0) combinedDst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 
+    if (attachment_sync(device)) {
+        combinedSrc = combinedSrc == VK_PIPELINE_STAGE_HOST_BIT ? combinedSrc : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | (combinedSrc & VK_PIPELINE_STAGE_HOST_BIT);
+        combinedDst = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | (combinedDst & VK_PIPELINE_STAGE_HOST_BIT);
+        for (uint32_t i = 0; i < curImg; ++i) {
+            const auto image = vkfix::MultiviewAttachments::get().acquire_image(device,pImgData[i].image);
+            if (image) vkfix::lower_volume_barrier(*image,pImgData[i]);
+        }
+    }
+
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     PFN_vkCmdWaitEvents real_fn = dt.CmdWaitEvents;
     if (real_fn) {
@@ -528,7 +588,7 @@ bool Synchronization2Module::on_cmd_pipeline_barrier2(
     const VkDependencyInfo* pDependencyInfo
 ) {
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
-    if (is_device_native(device)) {
+    if (is_device_native(device) && !attachment_sync(device)) {
         const auto& dt = LayerManager::get().get_dispatch_table(device);
         if (dt.CmdPipelineBarrier2) {
             return false;
@@ -641,6 +701,12 @@ bool Synchronization2Module::on_cmd_pipeline_barrier2(
 
     const auto& dt = LayerManager::get().get_dispatch_table(device);
     if (dt.CmdPipelineBarrier) {
+        if (attachment_sync(device)) {
+            LayerManager::get().dispatch_cmd_pipeline_barrier(commandBuffer,combinedSrc,combinedDst,pDependencyInfo->dependencyFlags,
+                pDependencyInfo->memoryBarrierCount,v1MemBarriers,pDependencyInfo->bufferMemoryBarrierCount,v1BufBarriers,
+                pDependencyInfo->imageMemoryBarrierCount,v1ImgBarriers);
+            return true;
+        }
         dt.CmdPipelineBarrier(
             commandBuffer,
             combinedSrc,
@@ -693,6 +759,30 @@ bool Synchronization2Module::on_cmd_write_timestamp2(
     return true;
 }
 
+// An optional measured repair only takes batches whose scopes can be
+// represented by legacy submission on a single physical device.
+static bool can_use_legacy_submit(uint32_t count, const VkSubmitInfo2 *submits) {
+    for (uint32_t s = 0; s < count; ++s) {
+        const auto &batch = submits[s];
+        if (batch.pNext || batch.flags) return false;
+        for (uint32_t i = 0; i < batch.commandBufferInfoCount; ++i) {
+            const auto &command = batch.pCommandBufferInfos[i];
+            if (command.pNext || command.deviceMask > 1) return false;
+        }
+        for (uint32_t i = 0; i < batch.waitSemaphoreInfoCount; ++i) {
+            const auto &wait = batch.pWaitSemaphoreInfos[i];
+            if (wait.pNext || wait.deviceIndex || !wait.stageMask ||
+                stage_flags2_to_stage_flags(wait.stageMask) != wait.stageMask) return false;
+        }
+        for (uint32_t i = 0; i < batch.signalSemaphoreInfoCount; ++i) {
+            const auto &signal = batch.pSignalSemaphoreInfos[i];
+            if (signal.pNext || signal.deviceIndex ||
+                signal.stageMask != VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) return false;
+        }
+    }
+    return true;
+}
+
 bool Synchronization2Module::on_queue_submit2(
     VkQueue queue,
     uint32_t submitCount,
@@ -711,14 +801,18 @@ bool Synchronization2Module::on_queue_submit2(
                 emulated_timeline |= LayerManager::get().is_timeline_semaphore(
                     device, pSubmits[s].pSignalSemaphoreInfos[i].semaphore);
         }
-    if (is_device_native(device) && !emulated_timeline && !vkfix::TimelineScheduler::get().active(device)) {
+    const bool native_sync2 = is_device_native(device);
+    const bool measured_fallback = native_sync2 && prefers_legacy_submit(device) &&
+        (!submitCount || (pSubmits && can_use_legacy_submit(submitCount, pSubmits)));
+    if (native_sync2 && !emulated_timeline && !vkfix::TimelineScheduler::get().active(device)) {
         const auto &dt = LayerManager::get().get_dispatch_table(device);
         if (dt.QueueSubmit2) {
-            return false;
+            if (!measured_fallback) return false;
+        } else {
+            LOGW("synchronization2: device %p claimed native support but dt.QueueSubmit2 is null, "
+                 "falling back to emulation",
+                 device);
         }
-        LOGW("synchronization2: device %p claimed native support but dt.QueueSubmit2 is null, "
-             "falling back to emulation",
-             device);
     }
 
     if (submitCount == 0 || !pSubmits) {
@@ -741,6 +835,7 @@ bool Synchronization2Module::on_queue_submit2(
 
     std::vector<SubmitStorage> storages(submitCount);
     std::vector<VkSubmitInfo> v1Submits(submitCount);
+    const bool include_native_values = measured_fallback && LayerManager::get().has_native_timeline_submit(device);
 
     for (uint32_t s = 0; s < submitCount; ++s) {
         const auto& sub2 = pSubmits[s];
@@ -757,7 +852,8 @@ bool Synchronization2Module::on_queue_submit2(
                 if (stage == 0) stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
                 storage.waitDstStageMask.push_back(stage);
                 storage.waitValues.push_back(w.value);
-                if (w.value != 0 || LayerManager::get().is_timeline_semaphore(device, w.semaphore)) storage.hasTimelineValues = true;
+                if ((!measured_fallback && w.value != 0) ||
+                    LayerManager::get().is_timeline_semaphore(device, w.semaphore)) storage.hasTimelineValues = true;
             }
         }
 
@@ -775,7 +871,8 @@ bool Synchronization2Module::on_queue_submit2(
                 const auto& sig = sub2.pSignalSemaphoreInfos[i];
                 storage.signalSemaphores.push_back(sig.semaphore);
                 storage.signalValues.push_back(sig.value);
-                if (sig.value != 0 || LayerManager::get().is_timeline_semaphore(device, sig.semaphore)) storage.hasTimelineValues = true;
+                if ((!measured_fallback && sig.value != 0) ||
+                    LayerManager::get().is_timeline_semaphore(device, sig.semaphore)) storage.hasTimelineValues = true;
             }
         }
 
@@ -798,7 +895,11 @@ bool Synchronization2Module::on_queue_submit2(
             sub1.pNext = &storage.protectedInfo;
         }
 
-        if (storage.hasTimelineValues) {
+        // Native timeline semaphore waits may have value zero. Include aligned
+        // values for measured conversions whenever the driver enabled timeline
+        // semaphores. Binary semaphore values in that structure are ignored.
+        if (storage.hasTimelineValues || (include_native_values &&
+            (!storage.waitValues.empty() || !storage.signalValues.empty()))) {
             storage.timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
             storage.timelineInfo.pNext = sub1.pNext;
             storage.timelineInfo.waitSemaphoreValueCount = (uint32_t)storage.waitValues.size();

@@ -1,4 +1,5 @@
 #include "negative_viewport.h"
+#include "core/discard_state_repair.h"
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "shader/shader_rewriter.h"
@@ -418,6 +419,7 @@ bool NegativeViewportModule::on_cmd_set_viewport(VkCommandBuffer commandBuffer,
         get_last_instance(), device, "vkCmdSetViewport");
     if (!real) return false;
     real(commandBuffer, firstViewport, count, adjusted.data());
+    vkfix::DiscardStateRepair::get().viewport(device, commandBuffer, firstViewport, count, adjusted.data());
     std::lock_guard<std::mutex> lock(m_mutex);
     const auto key = (uint64_t)(uintptr_t)commandBuffer;
     m_cmd_devices[key] = device;

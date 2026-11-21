@@ -86,6 +86,68 @@ int main() {
     check(ShaderRewriter::get().rewrite(plain, 0x10000) && legacy.Validate(plain),
           "ordinary storage-buffer compute shader validates against Vulkan 1.0");
     spvtools::SpirvTools later(SPV_ENV_VULKAN_1_2);
+    std::vector<uint32_t> local_readonly;
+    const char* local_readonly_text = R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %private %storage
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %private NonWritable
+OpDecorate %local NonWritable
+OpDecorate %storage NonWritable
+OpDecorate %storage DescriptorSet 0
+OpDecorate %storage Binding 0
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%bool = OpTypeBool
+%float = OpTypeFloat 32
+%v3 = OpTypeVector %float 3
+%m2x3 = OpTypeMatrix %v3 2
+%yes = OpConstantTrue %bool
+%f0 = OpConstant %float 0
+%f1 = OpConstant %float 1
+%v0 = OpConstantComposite %v3 %f0 %f0 %f0
+%v1 = OpConstantComposite %v3 %f1 %f1 %f1
+%m0 = OpConstantComposite %m2x3 %v0 %v1
+%m1 = OpConstantComposite %m2x3 %v1 %v0
+%uint = OpTypeInt 32 0
+%zero = OpConstant %uint 0
+%private_ptr = OpTypePointer Private %uint
+%local_ptr = OpTypePointer Function %uint
+%block = OpTypeStruct %uint
+%storage_ptr = OpTypePointer StorageBuffer %block
+%private = OpVariable %private_ptr Private %zero
+%storage = OpVariable %storage_ptr StorageBuffer
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%local = OpVariable %local_ptr Function %zero
+%value1 = OpLoad %uint %local
+%value2 = OpLoad %uint %private
+%value3 = OpLoad %block %storage
+%selected = OpSelect %m2x3 %yes %m0 %m1
+OpReturn
+OpFunctionEnd
+)";
+    const bool local_rewritten = later.Assemble(local_readonly_text, &local_readonly) &&
+        later.Validate(local_readonly) && ShaderRewriter::get().rewrite(local_readonly, 0x10300) &&
+        modern.Validate(local_readonly);
+    unsigned readonly_decorations = 0;
+    unsigned column_selects = 0;
+    if (local_rewritten) {
+        for (size_t at = 5; at < local_readonly.size(); at += local_readonly[at] >> 16) {
+            const auto word = local_readonly[at];
+            if ((word & 0xffffu) == spv::OpDecorate && (word >> 16) == 3 &&
+                local_readonly[at + 2] == spv::DecorationNonWritable)
+                ++readonly_decorations;
+            if ((word & 0xffffu) == spv::OpSelect) ++column_selects;
+        }
+    }
+    check(local_rewritten && readonly_decorations == 1,
+          "Vulkan 1.1 downgrade removes local NonWritable decorations and retains the storage binding annotation");
+    check(local_rewritten && column_selects == 2,
+          "Vulkan 1.1 downgrade selects and reconstructs both columns of a rectangular matrix");
     auto text=storage_buffer_fixture(false,false,true);
     auto where=text.find("OpEntryPoint GLCompute %main \"main\"");
     text.replace(where, std::string("OpEntryPoint GLCompute %main \"main\"").size(),

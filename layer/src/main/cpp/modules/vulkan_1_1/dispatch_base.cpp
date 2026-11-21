@@ -1,7 +1,6 @@
 #include "dispatch_base.h"
 #include "layer_manager.h"
 #include "driver_loader.h"
-#include "native_instance_state.h"
 #include "shader/shader_rewriter.h"
 #include "shader_module_cache.h"
 #include "vk_common.h"
@@ -12,46 +11,33 @@
 
 REGISTER_LAYER_MODULE(DispatchBaseModule);
 
-bool DispatchBaseModule::native_support(VkPhysicalDevice physicalDevice) const {
+void DispatchBaseModule::set_native_route(VkDevice device, bool available) {
     const char *force = getenv("VULKAN_FIX_EMULATE_DISPATCH_BASE");
     if (force && (!strcmp(force, "1") || strcasecmp(force, "true") == 0 ||
                   strcasecmp(force, "force") == 0))
-        return false;
-    VkInstance instance = vkfix::native_instance_for_physical(physicalDevice);
-    if (instance == VK_NULL_HANDLE) instance = get_last_instance();
-    auto properties = (PFN_vkGetPhysicalDeviceProperties)get_real_proc(
-        instance, VK_NULL_HANDLE, "vkGetPhysicalDeviceProperties");
-    if (properties) {
-        VkPhysicalDeviceProperties props{};
-        properties(physicalDevice, &props);
-        if (props.apiVersion >= VK_API_VERSION_1_1) return true;
-    }
-    auto enumerate = (PFN_vkEnumerateDeviceExtensionProperties)get_real_proc(
-        instance, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
-    if (!enumerate) return false;
-    uint32_t count = 0;
-    if (enumerate(physicalDevice, nullptr, &count, nullptr) != VK_SUCCESS || !count)
-        return false;
-    std::vector<VkExtensionProperties> extensions(count);
-    if (enumerate(physicalDevice, nullptr, &count, extensions.data()) != VK_SUCCESS)
-        return false;
-    for (const auto &extension : extensions)
-        if (!strcmp(extension.extensionName, "VK_KHR_device_group")) return true;
-    return false;
+        available = false;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_emulate[device] = !available;
 }
 
 void DispatchBaseModule::on_post_create_device(VkPhysicalDevice physicalDevice,
                                                VkDevice device, VkResult result,
                                                void *) {
     if (result != VK_SUCCESS || device == VK_NULL_HANDLE) return;
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_emulate[device] = !native_support(physicalDevice);
+    // Conservative until LayerManager installs the actual enabled route.
+    set_native_route(device, false);
 }
 
 bool DispatchBaseModule::is_emulating(VkDevice device) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_emulate.find(device);
     return it != m_emulate.end() && it->second;
+}
+
+bool DispatchBaseModule::is_device_native(VkDevice device) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it = m_emulate.find(device);
+    return it != m_emulate.end() && !it->second;
 }
 
 DispatchBaseModule::RetainedLayout::~RetainedLayout() {

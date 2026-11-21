@@ -3,6 +3,7 @@
 #include "driver_loader.h"
 #include "vk_pnext.h"
 #include "legacy_query_array.h"
+#include "device_group_routes.h"
 #include <algorithm>
 
 REGISTER_LAYER_MODULE(DeviceGroupModule);
@@ -50,14 +51,6 @@ bool DeviceGroupModule::on_cmd_set_device_mask(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
-    PFN_vkCmdSetDeviceMask real_fn =
-        (PFN_vkCmdSetDeviceMask) get_real_proc(get_last_instance(), device, "vkCmdSetDeviceMask");
-    if (!real_fn) {
-        real_fn = (PFN_vkCmdSetDeviceMask) get_real_proc(get_last_instance(), device, "vkCmdSetDeviceMaskKHR");
-    }
-    if (real_fn) {
-        real_fn(commandBuffer, deviceMask);
-    }
     // Singleton fallback: the only valid mask is 1, already implicit in 1.0.
     return true;
 }
@@ -70,16 +63,6 @@ bool DeviceGroupModule::on_get_device_group_peer_memory_features(
     VkPeerMemoryFeatureFlags* pPeerMemoryFeatures
 ) {
     if (is_device_native(device)) return false;
-
-    PFN_vkGetDeviceGroupPeerMemoryFeatures real_fn =
-        (PFN_vkGetDeviceGroupPeerMemoryFeatures) get_real_proc(get_last_instance(), device, "vkGetDeviceGroupPeerMemoryFeatures");
-    if (!real_fn) {
-        real_fn = (PFN_vkGetDeviceGroupPeerMemoryFeatures) get_real_proc(get_last_instance(), device, "vkGetDeviceGroupPeerMemoryFeaturesKHR");
-    }
-    if (real_fn) {
-        real_fn(device, heapIndex, localDeviceIndex, remoteDeviceIndex, pPeerMemoryFeatures);
-        return true;
-    }
 
     if (pPeerMemoryFeatures) {
         *pPeerMemoryFeatures = 0;
@@ -99,16 +82,6 @@ bool DeviceGroupModule::on_cmd_dispatch_base(
     VkDevice device = LayerManager::get().get_device_for_cmd(commandBuffer);
     if (is_device_native(device)) return false;
 
-    PFN_vkCmdDispatchBase real_fn =
-        (PFN_vkCmdDispatchBase) get_real_proc(get_last_instance(), device, "vkCmdDispatchBase");
-    if (!real_fn) {
-        real_fn = (PFN_vkCmdDispatchBase) get_real_proc(get_last_instance(), device, "vkCmdDispatchBaseKHR");
-    }
-    if (real_fn) {
-        real_fn(commandBuffer, baseGroupX, baseGroupY, baseGroupZ, groupCountX, groupCountY, groupCountZ);
-        return true;
-    }
-
     if (baseGroupX == 0 && baseGroupY == 0 && baseGroupZ == 0) {
         PFN_vkCmdDispatch real_disp =
             (PFN_vkCmdDispatch) get_real_proc(get_last_instance(), device, "vkCmdDispatch");
@@ -126,25 +99,6 @@ bool DeviceGroupModule::on_enumerate_physical_device_groups(
     VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties,
     VkResult& outResult
 ) {
-    VkInstance inst = (instance != VK_NULL_HANDLE) ? instance : get_last_instance();
-    PFN_vkEnumeratePhysicalDeviceGroups real_fn =
-        (PFN_vkEnumeratePhysicalDeviceGroups) get_real_proc(inst, VK_NULL_HANDLE, "vkEnumeratePhysicalDeviceGroups");
-    if (!real_fn) {
-        real_fn = (PFN_vkEnumeratePhysicalDeviceGroups) get_real_proc(inst, VK_NULL_HANDLE, "vkEnumeratePhysicalDeviceGroupsKHR");
-    }
-    if (real_fn) {
-        outResult = real_fn(inst, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties);
-        return true;
-    }
-
-    PFN_vkEnumeratePhysicalDevices real_epd =
-        (PFN_vkEnumeratePhysicalDevices) get_real_proc(inst, VK_NULL_HANDLE, "vkEnumeratePhysicalDevices");
-    if (!real_epd) {
-        outResult = VK_ERROR_INITIALIZATION_FAILED;
-        return true;
-    }
-
-    outResult = vkfix::enumerate_singleton_device_groups(
-        inst, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties, real_epd);
+    outResult = vkfix::enumerate_layer_device_groups(instance,pPhysicalDeviceGroupCount,pPhysicalDeviceGroupProperties);
     return true;
 }

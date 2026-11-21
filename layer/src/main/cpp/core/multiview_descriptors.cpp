@@ -1,6 +1,7 @@
 #include "multiview_descriptors.h"
 #include "driver_loader.h"
 #include "layout_compat.h"
+#include "volume_attachment.h"
 #include <algorithm>
 #include <limits>
 
@@ -8,6 +9,10 @@ namespace vkfix {
 namespace {
 template<class T> T proc(VkDevice device, const char* name) {
     return reinterpret_cast<T>(get_real_proc(get_last_instance(), device, name));
+}
+bool image_descriptor(VkDescriptorType type) {
+    return type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+        type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE || type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
 }
 // Advance in binding-number order, skipping reserved and absent bindings.
 // Valid consecutive writes/copies already require matching binding properties.
@@ -31,6 +36,7 @@ MultiviewDescriptorLayout::MultiviewDescriptorLayout(const VkDescriptorSetLayout
     for (uint32_t i = 0; i < info.bindingCount; ++i) {
         Binding b; b.info = info.pBindings[i]; b.info.pImmutableSamplers = nullptr;
         has_inputs |= b.info.descriptorType == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT && b.info.descriptorCount;
+        has_images |= image_descriptor(b.info.descriptorType) && b.info.descriptorCount;
         if (b.info.descriptorCount)
             core_only &= b.info.descriptorType >= VK_DESCRIPTOR_TYPE_SAMPLER && b.info.descriptorType <= VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
         if (b.info.descriptorCount && info.pBindings[i].pImmutableSamplers &&
@@ -83,13 +89,16 @@ VkResult MultiviewDescriptors::allocate(VkDevice device, const VkDescriptorSetAl
             const bool core_pool = pool == pools_.end() || !(pool->second & ~VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
             for (uint32_t i = 0; i < info->descriptorSetCount; ++i) {
                 const auto layout = layouts_.find(DeviceObjectKey::make(device, info->pSetLayouts[i]));
-                if (layout == layouts_.end() || !layout->second->has_inputs) continue;
+                if (layout == layouts_.end() || (!layout->second->has_inputs && !layout->second->has_images)) continue;
                 auto record = std::make_shared<MultiviewDescriptorSet>();
                 record->device = device; record->pool = info->descriptorPool; record->layout = layout->second;
                 record->core_only = core_pool && !info->pNext && layout->second->core_only;
                 for (const auto& b : layout->second->bindings)
                     if (b.info.descriptorType == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT)
                         record->inputs[b.info.binding].resize(b.info.descriptorCount);
+                size_t images = 0;
+                for (const auto& b : layout->second->bindings) if (image_descriptor(b.info.descriptorType)) images += b.info.descriptorCount;
+                record->image_scratch.resize(images);
                 prepared.emplace(DeviceObjectKey{device, i}, std::move(record));
             }
         }
@@ -111,6 +120,30 @@ VkResult MultiviewDescriptors::allocate(VkDevice device, const VkDescriptorSetAl
     }
 }
 void MultiviewDescriptors::revised(MultiviewDescriptorSet& set) { if (!++set.revision) set.tracked = false; }
+bool MultiviewDescriptors::update_native_layouts(VkDevice device, uint32_t wc, const VkWriteDescriptorSet* writes,
+    uint32_t cc, const VkCopyDescriptorSet* copies, PFN_vkUpdateDescriptorSets update) {
+    if (!update) return false;
+    if (!wc || std::none_of(writes,writes + wc,[](const auto& write) { return image_descriptor(write.descriptorType) && write.descriptorCount; })) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Validate ownership before issuing any part of the update batch.
+    for (uint32_t w = 0; w < wc; ++w) if (image_descriptor(writes[w].descriptorType) && writes[w].descriptorCount) {
+        const auto found = sets_.find(DeviceObjectKey::make(device,writes[w].dstSet));
+        if (found == sets_.end() || !found->second->alive || found->second->image_scratch.size() < writes[w].descriptorCount) return false;
+    }
+    for (uint32_t w = 0; w < wc; ++w) {
+        auto native = writes[w];
+        if (image_descriptor(native.descriptorType) && native.descriptorCount) {
+            auto& scratch = sets_.find(DeviceObjectKey::make(device,native.dstSet))->second->image_scratch;
+            std::memcpy(scratch.data(),native.pImageInfo,sizeof(VkDescriptorImageInfo) * native.descriptorCount);
+            for (uint32_t i = 0; i < native.descriptorCount; ++i)
+                scratch[i].imageLayout = attachment_descriptor_layout(device,scratch[i].imageView,scratch[i].imageLayout);
+            native.pImageInfo = scratch.data();
+        }
+        update(device,1,&native,0,nullptr);
+    }
+    if (cc) update(device,0,nullptr,cc,copies);
+    return true;
+}
 void MultiviewDescriptors::retire_locked(const std::shared_ptr<MultiviewDescriptorSet>& set) {
     set->alive = false;
     const auto found = arenas_.find(set->device);
@@ -232,7 +265,7 @@ VkResult MultiviewDescriptorArena::select(VkDevice device, VkDescriptorSet sourc
     std::lock_guard<std::mutex> lock(mutex_);
     return select_locked(device, source, view, used, result);
 }
-VkResult MultiviewDescriptorArena::select_all(VkDevice device, VkDescriptorSet source, uint32_t view, VkDescriptorSet& result) {
+VkResult MultiviewDescriptorArena::select_all(VkDevice device, VkDescriptorSet source, uint32_t view, VkDescriptorSet& result, bool whole) {
     auto& registry = MultiviewDescriptors::get();
     std::lock_guard<std::mutex> state_lock(registry.mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
@@ -242,11 +275,11 @@ VkResult MultiviewDescriptorArena::select_all(VkDevice device, VkDescriptorSet s
         if (found != registry.sets_.end())
             for (const auto& binding : found->second->inputs)
                 for (uint32_t i = 0; i < binding.second.size(); ++i) selection.emplace_back(binding.first, i);
-        return select_locked(device, source, view, selection, result);
+        return select_locked(device, source, view, selection, result,whole);
     } catch (const std::bad_alloc&) { result = VK_NULL_HANDLE; return VK_ERROR_OUT_OF_HOST_MEMORY; }
 }
 VkResult MultiviewDescriptorArena::select_locked(VkDevice device, VkDescriptorSet source, uint32_t view,
-    const MultiviewInputSelection& used, VkDescriptorSet& result) {
+    const MultiviewInputSelection& used, VkDescriptorSet& result, bool whole) {
     result = VK_NULL_HANDLE;
     auto& registry = MultiviewDescriptors::get();
     if (retired_ || (device_ && device_ != device) || view >= 32) return VK_ERROR_FEATURE_NOT_PRESENT;
@@ -261,7 +294,8 @@ VkResult MultiviewDescriptorArena::select_locked(VkDevice device, VkDescriptorSe
         auto selection = used; std::sort(selection.begin(), selection.end());
         selection.erase(std::unique(selection.begin(), selection.end()), selection.end());
         for (const auto& cached : native_)
-            if (cached.source == set && cached.revision == set->revision && cached.view == view && cached.inputs == selection) {
+            if (cached.source == set && cached.revision == set->revision && cached.view == view && cached.inputs == selection && cached.whole == whole &&
+                cached.attachments == AttachmentReplayScope::current()) {
                 result = cached.handle; return VK_SUCCESS;
             }
         auto create_layout = proc<PFN_vkCreateDescriptorSetLayout>(device, "vkCreateDescriptorSetLayout");
@@ -297,8 +331,9 @@ VkResult MultiviewDescriptorArena::select_locked(VkDevice device, VkDescriptorSe
             // Leave incompatible unused inputs unchanged instead of rejecting
             // an otherwise valid binding of a layout with unused entries.
             if (!input.view || !input.view->covers_view(view)) continue;
+            if (input.view->image() && input.view->image()->emulated_attachment && !AttachmentReplayScope::lookup(input.view.get())) continue;
             VkImageView slice{};
-            const auto status = input.view->slice(view, 0, slice);
+            const auto status = whole ? input.view->whole(0,slice) : input.view->slice(view, 0, slice);
             if (status != VK_SUCCESS) return status;
             auto layout = input.layout;
             if (LayoutCompat::get().is_emulated(device)) layout = LayoutCompat::sanitize(layout);
@@ -351,7 +386,7 @@ VkResult MultiviewDescriptorArena::select_locked(VkDevice device, VkDescriptorSe
         if (!copies.empty()) update(device, 0, nullptr, uint32_t(copies.size()), copies.data());
         if (!writes.empty()) update(device, uint32_t(writes.size()), writes.data(), 0, nullptr);
         device_ = device;
-        native_.push_back({set, set->revision, view, std::move(selection), pool, shadow});
+        native_.push_back({set, set->revision, view, std::move(selection), pool, shadow,whole,AttachmentReplayScope::current()});
         result = shadow; return VK_SUCCESS;
     } catch (const std::bad_alloc&) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
 }

@@ -1,6 +1,7 @@
 #include "timeline_scheduler.h"
 #include "driver_loader.h"
 #include "input_pnext_copy.h"
+#include "native_queue_route.h"
 #include "vk_pnext.h"
 #include <algorithm>
 #include <chrono>
@@ -550,15 +551,11 @@ VkResult TimelineScheduler::start(VkDevice device, const VkDeviceCreateInfo &inf
         for (uint32_t i = 0; i < info.queueCreateInfoCount; ++i)
             for (uint32_t n = 0; n < info.pQueueCreateInfos[i].queueCount; ++n) {
                 auto &q = info.pQueueCreateInfos[i];
-                VkQueue handle{};
-                if (q.flags && get2) {
-                    VkDeviceQueueInfo2 qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};
-                    qi.flags = q.flags;
-                    qi.queueFamilyIndex = q.queueFamilyIndex;
-                    qi.queueIndex = n;
-                    get2(device, &qi, &handle);
-                } else if (!q.flags && get)
-                    get(device, q.queueFamilyIndex, n, &handle);
+                VkDeviceQueueInfo2 qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};
+                qi.flags = q.flags;
+                qi.queueFamilyIndex = q.queueFamilyIndex;
+                qi.queueIndex = n;
+                const auto handle = get_created_queue(device, qi, get, get2);
                 if (!handle)
                     return VK_ERROR_INITIALIZATION_FAILED;
                 if (seen.insert(handle).second)

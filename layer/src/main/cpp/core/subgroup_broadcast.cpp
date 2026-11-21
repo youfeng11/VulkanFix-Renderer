@@ -25,6 +25,7 @@ SubgroupBroadcastSupport subgroup_broadcast_support(VkPhysicalDevice physical) {
         return {};
     VkPhysicalDeviceProperties base{};
     props(physical, &base);
+    base.apiVersion = limit_native_device_api(physical,base.apiVersion);
     if (base.apiVersion < VK_API_VERSION_1_1 || base.apiVersion >= VK_API_VERSION_1_2)
         return {};
     auto query = native_properties2_proc(physical);

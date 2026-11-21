@@ -80,6 +80,14 @@ void restore_links(const Links &links) {
 
 PFN_vkGetPhysicalDeviceProperties2
 native_properties2_proc(VkPhysicalDevice physical) {
+  if (auto context = vkfix::native_physical_query_context(physical)) {
+    if (context->query2 == vkfix::NativeQuery2Route::Legacy) return nullptr;
+    const auto* name = context->query2 == vkfix::NativeQuery2Route::Core
+        ? "vkGetPhysicalDeviceProperties2" : "vkGetPhysicalDeviceProperties2KHR";
+    if (auto gipa = get_real_instance_proc_addr())
+      return (PFN_vkGetPhysicalDeviceProperties2)gipa(context->instance,name);
+    return (PFN_vkGetPhysicalDeviceProperties2)get_real_proc(context->instance,VK_NULL_HANDLE,name);
+  }
   auto instance = vkfix::native_instance_for_physical(physical);
   if (!instance)
     instance = get_last_instance();
@@ -125,7 +133,7 @@ struct PromotedPropertyQuery::State {
     if (props) {
       VkPhysicalDeviceProperties native{};
       props(physical, &native);
-      api = native.apiVersion;
+      api = vkfix::limit_native_device_api(physical,native.apiVersion);
     }
     if (api >= VK_API_VERSION_1_2)
       return;

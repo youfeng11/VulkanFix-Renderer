@@ -10,6 +10,7 @@ public:
   PromotedFeatureQuery(VkPhysicalDevice physical,
                        VkPhysicalDeviceFeatures2 *features);
   ~PromotedFeatureQuery();
+  void query_native();
   PromotedFeatureQuery(const PromotedFeatureQuery &) = delete;
   PromotedFeatureQuery &operator=(const PromotedFeatureQuery &) = delete;
 

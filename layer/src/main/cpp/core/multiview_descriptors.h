@@ -9,7 +9,7 @@ struct MultiviewDescriptorLayout {
         VkDescriptorSetLayoutBinding info{};
         std::vector<VkSampler> immutable;
     };
-    bool core_only = true, has_inputs = false;
+    bool core_only = true, has_inputs = false, has_images = false;
     std::vector<Binding> bindings; // Sorted by binding, including reserved entries.
     explicit MultiviewDescriptorLayout(const VkDescriptorSetLayoutCreateInfo&);
 };
@@ -23,6 +23,7 @@ struct MultiviewDescriptorSet {
     VkDescriptorPool pool{};
     std::shared_ptr<const MultiviewDescriptorLayout> layout;
     std::map<uint32_t, std::vector<Input>> inputs;
+    std::vector<VkDescriptorImageInfo> image_scratch;
     uint64_t revision = 0;
     bool alive = true, core_only = true, tracked = true;
 };
@@ -40,6 +41,10 @@ public:
     // successful allocation with vkFreeDescriptorSets is illegal for some pools.
     VkResult allocate(VkDevice, const VkDescriptorSetAllocateInfo*, VkDescriptorSet*, PFN_vkAllocateDescriptorSets);
     void update(VkDevice, uint32_t, const VkWriteDescriptorSet*, uint32_t, const VkCopyDescriptorSet*);
+    // Scratch is reserved before the native set allocation. A void update
+    // must not need a new allocation to translate virtual volume layouts.
+    bool update_native_layouts(VkDevice, uint32_t, const VkWriteDescriptorSet*, uint32_t,
+                               const VkCopyDescriptorSet*, PFN_vkUpdateDescriptorSets);
     void remember_template(VkDevice, VkDescriptorUpdateTemplate, const VkDescriptorUpdateTemplateCreateInfo&);
     void forget_template(VkDevice, VkDescriptorUpdateTemplate);
     void update_template(VkDevice, VkDescriptorSet, VkDescriptorUpdateTemplate, const void*);
@@ -73,13 +78,13 @@ public:
     ~MultiviewDescriptorArena();
     VkResult select(VkDevice, VkDescriptorSet source, uint32_t view,
         const MultiviewInputSelection& used_inputs, VkDescriptorSet& result);
-    VkResult select_all(VkDevice, VkDescriptorSet source, uint32_t view, VkDescriptorSet& result);
+    VkResult select_all(VkDevice, VkDescriptorSet source, uint32_t view, VkDescriptorSet& result, bool whole = false);
     void release();
 private:
     friend class MultiviewDescriptors;
     void release_locked();
     void invalidate_locked(const std::shared_ptr<MultiviewDescriptorSet>&);
-    VkResult select_locked(VkDevice, VkDescriptorSet, uint32_t, const MultiviewInputSelection&, VkDescriptorSet&);
+    VkResult select_locked(VkDevice, VkDescriptorSet, uint32_t, const MultiviewInputSelection&, VkDescriptorSet&, bool whole = false);
     struct Native {
         std::shared_ptr<MultiviewDescriptorSet> source;
         uint64_t revision;
@@ -87,6 +92,8 @@ private:
         MultiviewInputSelection inputs;
         VkDescriptorPool pool;
         VkDescriptorSet handle;
+        bool whole;
+        const AttachmentReplayScope::Bindings* attachments;
     };
     std::mutex mutex_;
     VkDevice device_{};

@@ -17,6 +17,7 @@ const char *driver_probe_verdict_name(DriverProbeVerdict verdict) {
     switch (verdict) {
     case DriverProbeVerdict::Healthy: return "healthy";
     case DriverProbeVerdict::RepairConfirmed: return "repair-confirmed";
+    case DriverProbeVerdict::DefectObserved: return "defect-observed";
     default: return "inconclusive";
     }
 }
@@ -45,9 +46,9 @@ size_t DriverIdentityHash::operator()(const DriverIdentity &id) const {
     for (auto byte:id.pipeline_uuid) append(byte);
     return hash;
 }
-DriverTrustReport DriverTrustCache::get(const DriverIdentity &id, const std::function<DriverTrustReport()> &probe) {
-    std::shared_future<DriverTrustReport> future;
-    std::shared_ptr<std::promise<DriverTrustReport>> promise;
+DriverProbeAssessment DriverTrustCache::get(const DriverIdentity &id, const std::function<DriverProbeAssessment()> &probe) {
+    std::shared_future<DriverProbeAssessment> future;
+    std::shared_ptr<std::promise<DriverProbeAssessment>> promise;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it=entries_.find(id);
@@ -56,18 +57,29 @@ DriverTrustReport DriverTrustCache::get(const DriverIdentity &id, const std::fun
             if (it->second.owner==std::this_thread::get_id() &&
                 future.wait_for(std::chrono::seconds(0))!=std::future_status::ready)
                 return {};
+            it->second.last_use = ++access_count_;
         } else {
-            if (entries_.size()>=capacity_) return {};
-            promise=std::make_shared<std::promise<DriverTrustReport>>();
+            if (entries_.size() >= capacity_) {
+                auto oldest = entries_.end();
+                for (auto candidate = entries_.begin(); candidate != entries_.end(); ++candidate) {
+                    if (candidate->second.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready &&
+                        (oldest == entries_.end() || candidate->second.last_use < oldest->second.last_use))
+                        oldest = candidate;
+                }
+                if (oldest == entries_.end())
+                    return {DriverProbeVerdict::Inconclusive, "probe cache has no completed entry to replace"};
+                entries_.erase(oldest);
+            }
+            promise=std::make_shared<std::promise<DriverProbeAssessment>>();
             future=promise->get_future().share();
-            entries_.emplace(id,Entry{future,std::this_thread::get_id()});
+            entries_.emplace(id,Entry{future,std::this_thread::get_id(),++access_count_});
         }
     }
     if (promise) {
-        DriverTrustReport result;
+        DriverProbeAssessment result;
         try { result=probe(); }
-        catch (const std::exception &error) { result.sampler_aliases.detail=std::string(error.what()).substr(0,4096); }
-        catch (...) { result.sampler_aliases.detail="probe failed without a result"; }
+        catch (const std::exception &error) { result.detail=std::string(error.what()).substr(0,4096); }
+        catch (...) { result.detail="probe failed without a result"; }
         promise->set_value(std::move(result));
     }
     return future.get();

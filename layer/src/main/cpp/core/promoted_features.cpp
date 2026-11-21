@@ -2,6 +2,7 @@
 #include "driver_loader.h"
 #include "native_instance_state.h"
 #include "subgroup_broadcast.h"
+#include "software_multiview.h"
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
@@ -92,7 +93,7 @@ struct NativeFeatures {
     if (properties) {
       VkPhysicalDeviceProperties p{};
       properties(physical, &p);
-      api = p.apiVersion;
+      api = vkfix::limit_native_device_api(physical,p.apiVersion);
     }
     auto enumerate = (PFN_vkEnumerateDeviceExtensionProperties)get_real_proc(
         instance, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
@@ -174,6 +175,9 @@ struct NativeFeatures {
   }
 };
 bool emulated(const FeatureGroup &group, const FeatureField &field) {
+  if (group.type == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES &&
+      field.member == offsetof(VkPhysicalDeviceMultiviewFeatures, multiview))
+    return vkfix::software_multiview_enabled();
   return group.version == 12 &&
          (field.aggregate ==
               offsetof(VkPhysicalDeviceVulkan12Features, timelineSemaphore) ||
@@ -191,6 +195,16 @@ void add_extension(std::vector<const char *> &extensions, const char *name) {
 
 PFN_vkGetPhysicalDeviceFeatures2
 native_features2_proc(VkPhysicalDevice physical) {
+  if (auto context = vkfix::native_physical_query_context(physical)) {
+    if (context->query2 == vkfix::NativeQuery2Route::Legacy) return nullptr;
+    const auto* name = context->query2 == vkfix::NativeQuery2Route::Core
+        ? "vkGetPhysicalDeviceFeatures2" : "vkGetPhysicalDeviceFeatures2KHR";
+    if (auto gipa = get_real_instance_proc_addr())
+      return (PFN_vkGetPhysicalDeviceFeatures2)gipa(context->instance,name);
+    return (PFN_vkGetPhysicalDeviceFeatures2)get_real_proc(context->instance,VK_NULL_HANDLE,name);
+  }
+  // Untracked internal/mock handles retain their prior lookup behavior.
+  // Physical devices returned through either public enumeration have context.
   auto instance = vkfix::native_instance_for_physical(physical);
   if (!instance)
     instance = get_last_instance();
@@ -212,6 +226,7 @@ native_features2_proc(VkPhysicalDevice physical) {
 }
 
 struct PromotedFeatureQuery::State {
+  VkPhysicalDevice physical;
   VkPhysicalDeviceFeatures2 *root;
   NativeFeatures native;
   std::vector<std::pair<VkBaseOutStructure *, VkBaseOutStructure *>> links;
@@ -219,7 +234,7 @@ struct PromotedFeatureQuery::State {
   VkPhysicalDeviceVulkan11Features *v11 = nullptr;
   VkPhysicalDeviceVulkan12Features *v12 = nullptr;
   State(VkPhysicalDevice physical, VkPhysicalDeviceFeatures2 *output)
-      : root(output), native(physical) {
+      : physical(physical), root(output), native(physical) {
     if (!root || native.api >= VK_API_VERSION_1_2)
       return;
     auto node = (VkBaseOutStructure *)root->pNext;
@@ -254,6 +269,41 @@ struct PromotedFeatureQuery::State {
       root->pNext = feature;
     }
   }
+  void query_native() {
+    if (!root) return;
+    using Link = std::pair<VkBaseOutStructure*,VkBaseOutStructure*>;
+    std::vector<Link> links;
+    for (auto node = (VkBaseOutStructure*)root->pNext; node; node = node->pNext)
+      links.emplace_back(node,node->pNext);
+    // Collect before mutating, so preparation OOM cannot damage the chain.
+    struct Restore {
+      VkPhysicalDeviceFeatures2* root;
+      void* head;
+      std::vector<Link>& links;
+      ~Restore() {
+        for (const auto& link : links) link.first->pNext = link.second;
+        root->pNext = head;
+      }
+    } restore{root,root->pNext,links};
+    VkBaseOutStructure* head = nullptr;
+    auto tail = &head;
+    for (const auto& link : links) {
+      const auto* group = group_for(link.first->sType);
+      if (native.api >= VK_API_VERSION_1_2 || !group || native.native(*group)) {
+        *tail = link.first;
+        tail = &link.first->pNext;
+      }
+    }
+    *tail = nullptr;
+    root->pNext = head;
+    if (auto query = native_features2_proc(physical)) query(physical,root);
+    else {
+      auto instance = vkfix::native_instance_for_physical(physical);
+      if (!instance) instance = get_last_instance();
+      if (auto query = (PFN_vkGetPhysicalDeviceFeatures)get_real_proc(instance,VK_NULL_HANDLE,"vkGetPhysicalDeviceFeatures"))
+        query(physical,&root->features);
+    }
+  }
   ~State() {
     if (!root || links.empty())
       return;
@@ -283,6 +333,7 @@ PromotedFeatureQuery::PromotedFeatureQuery(VkPhysicalDevice physical,
                                            VkPhysicalDeviceFeatures2 *features)
     : state(std::make_unique<State>(physical, features)) {}
 PromotedFeatureQuery::~PromotedFeatureQuery() = default;
+void PromotedFeatureQuery::query_native() { state->query_native(); }
 
 struct PromotedDeviceFeatures::State {
   NativeFeatures native;

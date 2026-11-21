@@ -41,9 +41,11 @@ bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
         return true;
     }
 
+    auto owner = vkfix::native_instance_for_physical(physDev);
+    if (!owner) owner = get_last_instance();
     PFN_vkEnumerateDeviceExtensionProperties real_fn =
         (PFN_vkEnumerateDeviceExtensionProperties)get_real_proc(
-            get_last_instance(), VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+            owner, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
     bool native = false;
     if (real_fn) {
         uint32_t count = 0;
@@ -66,12 +68,11 @@ bool PushDescriptorModule::is_phys_device_native(VkPhysicalDevice physDev) {
     if (native) {
         auto instance=vkfix::native_instance_for_physical(physDev);
         if (!instance) instance=get_last_instance();
-        const auto trust=vkfix::native_driver_trust(instance,physDev,
-                                                   get_real_instance_proc_addr());
-        native=trust.push_descriptor.verdict==vkfix::DriverProbeVerdict::Healthy;
+        const vkfix::NativeDriverProbes probes(instance, physDev, get_real_instance_proc_addr());
+        const auto trust = probes.measure(vkfix::DriverProbe::PushDescriptor);
+        native=trust.verdict==vkfix::DriverProbeVerdict::Healthy;
         LOGI("Driver probe push descriptor: %s (%s); native=%u",
-             vkfix::driver_probe_verdict_name(trust.push_descriptor.verdict),
-             trust.push_descriptor.detail.c_str(),unsigned(native));
+             vkfix::driver_probe_verdict_name(trust.verdict), trust.detail.c_str(), unsigned(native));
     }
 
     {
@@ -244,7 +245,8 @@ PushDescriptorModule::SetLayout::~SetLayout() {
 }
 
 void PushDescriptorModule::on_post_create_descriptor_set_layout(
-    VkDevice device, const VkDescriptorSetLayoutCreateInfo *info, VkResult result,
+    VkDevice device, const VkDescriptorSetLayoutCreateInfo *info,
+    const VkDescriptorSetLayoutCreateInfo &native_info, VkResult result,
     VkDescriptorSetLayout handle) {
     if (is_device_native(device) || result != VK_SUCCESS || !info || !handle)
         return;
@@ -289,12 +291,12 @@ void PushDescriptorModule::on_post_create_descriptor_set_layout(
     if (info->flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR) {
         // Pipeline layouts may outlive the application's set-layout handle. Keep
         // a private allocation layout alive with pipeline/command metadata.
-        auto ci = *info;
-        ci.flags &= ~VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+        // Allocate from the same native definition used by the pipeline.
+        // Vertex-store emulation can add compute visibility to the bindings.
         auto create = (PFN_vkCreateDescriptorSetLayout)get_real_proc(get_last_instance(), device,
                                                                      "vkCreateDescriptorSetLayout");
         metadata->allocation_error =
-            create ? create(device, &ci, nullptr, &metadata->allocation_layout)
+            create ? create(device, &native_info, nullptr, &metadata->allocation_layout)
                    : VK_ERROR_FEATURE_NOT_PRESENT;
         if (metadata->allocation_error != VK_SUCCESS)
             LOGE("PushDescriptor: failed to create persistent allocation layout");

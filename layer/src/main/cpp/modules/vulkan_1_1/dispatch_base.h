@@ -14,6 +14,9 @@ public:
     DispatchBaseModule() = default;
     const char* get_name() const override { return "VK_FEATURE_dispatchBase"; }
     bool is_enabled() const override { return true; }
+    bool is_device_native(VkDevice device) override;
+    // Supplied after native device creation and Core/KHR route resolution.
+    void set_native_route(VkDevice device, bool available);
 
     void on_post_create_device(VkPhysicalDevice physicalDevice, VkDevice device,
                                VkResult result, void* pUserData) override;
@@ -70,7 +73,6 @@ private:
         std::vector<uint8_t> data;
     };
     bool is_emulating(VkDevice device) const;
-    bool native_support(VkPhysicalDevice physicalDevice) const;
     VkPipeline variant_for(VkDevice device, VkPipeline pipeline,
                            const uint32_t base[3], bool* no_offset, VkResult& result);
 

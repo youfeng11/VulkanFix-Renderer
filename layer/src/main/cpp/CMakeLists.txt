@@ -284,12 +284,12 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_link_options(logger_regression_test PRIVATE -Wl,--wrap=fopen)
     vkfix_sanitize_test(logger_regression_test)
     add_executable(descriptor_update_template_test EXCLUDE_FROM_ALL
-        tests/descriptor_update_template_test.cpp modules/vulkan_1_1/descriptor_update_template.cpp)
+        tests/descriptor_update_template_test.cpp modules/vulkan_1_1/descriptor_update_template.cpp core/native_instance_state.cpp)
     target_include_directories(descriptor_update_template_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(descriptor_update_template_test PRIVATE Vulkan::Headers ${LOG_LIB})
     vkfix_sanitize_test(descriptor_update_template_test)
-    add_executable(device_native_cache_test EXCLUDE_FROM_ALL tests/device_native_cache_test.cpp)
+    add_executable(device_native_cache_test EXCLUDE_FROM_ALL tests/device_native_cache_test.cpp core/native_instance_state.cpp)
     target_include_directories(device_native_cache_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(device_native_cache_test PRIVATE Vulkan::Headers ${LOG_LIB})
@@ -380,11 +380,25 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     add_executable(extension_dependencies_integration_test EXCLUDE_FROM_ALL tests/extension_dependencies_integration_test.cpp)
     target_link_libraries(extension_dependencies_integration_test PRIVATE Vulkan::Headers dl)
     add_library(core11_query_driver SHARED EXCLUDE_FROM_ALL tests/core11_query_driver.cpp)
-    target_link_libraries(core11_query_driver PRIVATE Vulkan::Headers)
+    target_link_libraries(core11_query_driver PRIVATE Vulkan::Headers dl)
     target_link_options(core11_query_driver PRIVATE "-Wl,-Bsymbolic-functions")
     add_executable(core11_queries_integration_test EXCLUDE_FROM_ALL tests/core11_queries_integration_test.cpp)
     target_link_libraries(core11_queries_integration_test PRIVATE Vulkan::Headers dl)
     vkfix_sanitize_test(core11_queries_integration_test)
+    add_executable(proc_address_integration_test EXCLUDE_FROM_ALL tests/proc_address_integration_test.cpp)
+    target_link_libraries(proc_address_integration_test PRIVATE Vulkan::Headers dl)
+    add_executable(public_proc_state_test EXCLUDE_FROM_ALL tests/public_proc_state_test.cpp core/public_proc_state.cpp)
+    target_include_directories(public_proc_state_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(public_proc_state_test PRIVATE Vulkan::Headers)
+    vkfix_sanitize_test(public_proc_state_test)
+    add_executable(descriptor_layout_query_test EXCLUDE_FROM_ALL tests/descriptor_layout_query_test.cpp core/descriptor_layout_query.cpp)
+    target_include_directories(descriptor_layout_query_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(descriptor_layout_query_test PRIVATE Vulkan::Headers)
+    vkfix_sanitize_test(descriptor_layout_query_test)
+    add_executable(feature_request_validation_test EXCLUDE_FROM_ALL tests/feature_request_validation_test.cpp core/feature_request_validation.cpp)
+    target_include_directories(feature_request_validation_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(feature_request_validation_test PRIVATE Vulkan::Headers)
+    vkfix_sanitize_test(feature_request_validation_test)
     add_executable(validation_driver_test EXCLUDE_FROM_ALL tests/validation_driver_test.cpp)
     target_link_libraries(validation_driver_test PRIVATE Vulkan::Headers dl)
     add_executable(push_descriptor_gpu_test EXCLUDE_FROM_ALL tests/push_descriptor_gpu_test.cpp)
@@ -434,11 +448,35 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_link_libraries(storage_buffer_lowering_test PRIVATE Vulkan::Headers
         ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
     vkfix_sanitize_test(storage_buffer_lowering_test)
+    add_executable(relaxed_block_layout_test EXCLUDE_FROM_ALL tests/relaxed_block_layout_test.cpp
+        shader/relaxed_block_layout.cpp shader/shader_rewriter.cpp shader/storage_buffer_lowering.cpp)
+    target_include_directories(relaxed_block_layout_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(relaxed_block_layout_test PRIVATE Vulkan::Headers
+        ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
+    vkfix_sanitize_test(relaxed_block_layout_test)
     add_executable(multiview_attachments_test EXCLUDE_FROM_ALL tests/multiview_attachments_test.cpp
         core/multiview_attachments.cpp core/multiview_render_pass.cpp core/layout_compat.cpp)
     target_include_directories(multiview_attachments_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(multiview_attachments_test PRIVATE Vulkan::Headers ${LOG_LIB})
     vkfix_sanitize_test(multiview_attachments_test)
+    add_executable(image_type_copy_test EXCLUDE_FROM_ALL tests/image_type_copy_test.cpp
+        core/image_type_copy.cpp core/multiview_attachments.cpp core/multiview_render_pass.cpp
+        core/layout_compat.cpp core/native_instance_state.cpp)
+    target_include_directories(image_type_copy_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(image_type_copy_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(image_type_copy_test)
+    add_executable(volume_attachment_test EXCLUDE_FROM_ALL tests/volume_attachment_test.cpp
+        core/volume_attachment.cpp core/image_type_copy.cpp core/multiview_attachments.cpp
+        core/multiview_render_pass.cpp core/layout_compat.cpp core/native_instance_state.cpp)
+    target_include_directories(volume_attachment_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(volume_attachment_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(volume_attachment_test)
+    add_executable(volume_attachment_gpu_test EXCLUDE_FROM_ALL tests/volume_attachment_gpu_test.cpp
+        core/volume_attachment.cpp core/image_type_copy.cpp core/multiview_attachments.cpp
+        core/multiview_render_pass.cpp core/layout_compat.cpp core/native_instance_state.cpp
+        core/multiview_commands.cpp core/multiview_descriptors.cpp core/multiview_pipeline_layouts.cpp)
+    target_include_directories(volume_attachment_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(volume_attachment_gpu_test PRIVATE Vulkan::Headers ${LOG_LIB} dl)
     add_executable(multiview_descriptors_test EXCLUDE_FROM_ALL tests/multiview_descriptors_test.cpp
         core/multiview_descriptors.cpp core/multiview_attachments.cpp core/multiview_render_pass.cpp core/layout_compat.cpp
         core/multiview_commands.cpp core/multiview_pipeline_layouts.cpp)
@@ -457,6 +495,9 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_include_directories(multiview_draw_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(multiview_draw_gpu_test PRIVATE Vulkan::Headers
         ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB} dl)
+    foreach(replay_test multiview_descriptors_test multiview_barrier_gpu_test multiview_draw_gpu_test)
+        target_sources(${replay_test} PRIVATE core/volume_attachment.cpp core/image_type_copy.cpp core/native_instance_state.cpp)
+    endforeach()
     add_executable(shader_module_lifetime_test EXCLUDE_FROM_ALL tests/shader_module_lifetime_test.cpp
         core/specialized_shader_stages.cpp core/shader_module_cache.cpp
         shader/constant_input_lowering.cpp shader/specialize_constants.cpp)
@@ -464,8 +505,30 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_link_libraries(shader_module_lifetime_test PRIVATE Vulkan::Headers
         ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
     vkfix_sanitize_test(shader_module_lifetime_test)
+    foreach(stage_test storage_buffer_lowering_test multiview_draw_gpu_test shader_module_lifetime_test)
+        target_sources(${stage_test} PRIVATE core/input_pnext_copy.cpp)
+    endforeach()
+    add_executable(singleton_device_group_test EXCLUDE_FROM_ALL tests/singleton_device_group_test.cpp
+        core/singleton_device_group.cpp core/input_pnext_copy.cpp)
+    target_include_directories(singleton_device_group_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(singleton_device_group_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(singleton_device_group_test)
+    add_executable(device_group_routes_test EXCLUDE_FROM_ALL tests/device_group_routes_test.cpp
+        core/device_group_routes.cpp core/native_instance_state.cpp core/singleton_device_group.cpp core/input_pnext_copy.cpp)
+    target_include_directories(device_group_routes_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(device_group_routes_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(device_group_routes_test)
+    add_library(singleton_group_test_driver SHARED EXCLUDE_FROM_ALL tests/singleton_group_test_driver.cpp)
+    target_link_libraries(singleton_group_test_driver PRIVATE Vulkan::Headers dl)
+    target_link_options(singleton_group_test_driver PRIVATE "-Wl,-Bsymbolic-functions")
+    add_executable(singleton_group_gpu_test EXCLUDE_FROM_ALL tests/singleton_group_gpu_test.cpp)
+    target_include_directories(singleton_group_gpu_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(singleton_group_gpu_test PRIVATE Vulkan::Headers dl)
     add_executable(constant_input_test EXCLUDE_FROM_ALL tests/constant_input_test.cpp
         shader/constant_input_lowering.cpp shader/shader_rewriter.cpp shader/storage_buffer_lowering.cpp)
+    foreach(rewriter_test subgroup_broadcast_test subgroup_basic_test viewport_rewrite_test storage_buffer_lowering_test constant_input_test)
+        target_sources(${rewriter_test} PRIVATE shader/relaxed_block_layout.cpp)
+    endforeach()
     target_include_directories(constant_input_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(constant_input_test PRIVATE Vulkan::Headers
         ${VKFIX_TEST_SPIRV_OPT_TARGET} ${VKFIX_BOUNDS_SPIRV_TARGET} ${LOG_LIB})
@@ -481,6 +544,17 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     add_library(dispatch_base_test_driver SHARED EXCLUDE_FROM_ALL tests/dispatch_base_test_driver.cpp)
     target_link_libraries(dispatch_base_test_driver PRIVATE Vulkan::Headers dl)
     target_link_options(dispatch_base_test_driver PRIVATE "-Wl,-Bsymbolic-functions")
+    add_library(multiview_test_driver SHARED EXCLUDE_FROM_ALL tests/multiview_test_driver.cpp core/extension_dependencies.cpp)
+    add_executable(msaa_resolve_probe_test EXCLUDE_FROM_ALL tests/msaa_resolve_probe_test.cpp)
+    add_executable(msaa_resolve_image_test EXCLUDE_FROM_ALL tests/msaa_resolve_image_test.cpp)
+    target_include_directories(msaa_resolve_image_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(msaa_resolve_image_test PRIVATE Vulkan::Headers)
+    vkfix_sanitize_test(msaa_resolve_image_test)
+    target_include_directories(msaa_resolve_probe_test BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(msaa_resolve_probe_test PRIVATE Vulkan::Headers dl)
+    target_include_directories(multiview_test_driver BEFORE PRIVATE $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
+    target_link_libraries(multiview_test_driver PRIVATE Vulkan::Headers ${VKFIX_BOUNDS_SPIRV_TARGET} dl)
+    target_link_options(multiview_test_driver PRIVATE "-Wl,-Bsymbolic-functions")
     add_executable(subgroup_broadcast_gpu_test EXCLUDE_FROM_ALL tests/subgroup_broadcast_gpu_test.cpp)
     target_include_directories(subgroup_broadcast_gpu_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
@@ -490,6 +564,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_include_directories(promoted_properties_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(promoted_properties_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(promoted_properties_test)
     add_executable(core_properties_gpu_test EXCLUDE_FROM_ALL tests/core_properties_gpu_test.cpp)
     target_include_directories(core_properties_gpu_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
@@ -500,6 +575,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
     target_include_directories(promoted_features_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
     target_link_libraries(promoted_features_test PRIVATE Vulkan::Headers ${LOG_LIB})
+    vkfix_sanitize_test(promoted_features_test)
     add_executable(core_features_gpu_test EXCLUDE_FROM_ALL tests/core_features_gpu_test.cpp)
     target_include_directories(core_features_gpu_test BEFORE PRIVATE
         $<TARGET_PROPERTY:vulkan_fix,INCLUDE_DIRECTORIES>)
@@ -515,6 +591,7 @@ if(VULKAN_FIX_BUILD_REGRESSION_TESTS)
         tests/divisor_pipeline_regression_cases.cpp
         tests/vertex_pipeline_cache_regression_cases.cpp
         tests/core11_regression_cases.cpp
+        tests/core11_native_routes_regression_cases.cpp
         tests/core11_pipeline_lifetime_cases.cpp
         tests/timeline_regression_cases.cpp
         tests/push_descriptor_regression_cases.cpp

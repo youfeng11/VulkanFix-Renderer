@@ -144,6 +144,8 @@ public:
 
 private:
     friend struct DynamicRenderingTestAccess;
+    friend class LayerManager;
+    VkResult prepare_software_multiview_pipeline(VkDevice, const VkGraphicsPipelineCreateInfo&, VkRenderPass&);
     bool is_phys_device_native(VkPhysicalDevice physDev);
     VkDevice get_device_for_cmd(VkCommandBuffer cmd);
 
@@ -154,7 +156,8 @@ private:
         VkFormat depthAttachmentFormat,
         VkFormat stencilAttachmentFormat,
         VkSampleCountFlagBits samples,
-        uint32_t viewMask
+        uint32_t viewMask,
+        VkResult* result = nullptr
     );
 
     struct ImageMeta {
@@ -200,6 +203,7 @@ private:
 
     struct DynamicRenderPassKey {
         VkDevice device{};
+        uint32_t viewMask = 0;
         struct AttachmentDesc {
             VkFormat format = VK_FORMAT_UNDEFINED;
             VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
@@ -232,7 +236,7 @@ private:
         uint32_t resolveAttachmentCount = 0;
 
         bool operator==(const DynamicRenderPassKey& o) const {
-            if (device != o.device || colorAttachmentCount != o.colorAttachmentCount ||
+            if (device != o.device || viewMask != o.viewMask || colorAttachmentCount != o.colorAttachmentCount ||
                 resolveAttachmentCount != o.resolveAttachmentCount ||
                 has_depth_stencil != o.has_depth_stencil) return false;
             if (has_depth_stencil && !(depthStencilAttachment == o.depthStencilAttachment)) return false;

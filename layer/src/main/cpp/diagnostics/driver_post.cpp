@@ -9,6 +9,9 @@ using PostWindow = ANativeWindow;
 #else
 struct PostWindow;
 #endif
+#ifdef VKFIX_POST_JNI
+#include <jni.h>
+#endif
 #include <vulkan/vulkan.h>
 #include <algorithm>
 #include <cstdio>
@@ -28,13 +31,20 @@ struct PostWindow;
 #include "../core/storage_buffer_array_probe.h"
 #include "../core/subgroup_basic_probe.h"
 #include "../core/driver_trust.h"
-#include "../core/driver_trust_shaders.h"
-#include "../core/driver_probe_process.h"
+#include "driver_post_trust.h"
 #include "driver_post_shaders.h"
 #include "core11_requirements.h"
+#include "query_reset_probe.h"
+#include "volume_attachment_probe.h"
+#include "volume_input_probe.h"
 
 namespace {
 thread_local std::string *report_sink = nullptr;
+#ifdef VKFIX_POST_JNI
+thread_local JNIEnv *progress_env = nullptr;
+thread_local jobject progress_receiver = nullptr;
+thread_local jmethodID progress_method = nullptr;
+#endif
 thread_local unsigned core11_passes = 0;
 thread_local unsigned core11_skips = 0;
 thread_local unsigned core11_failures = 0;
@@ -64,6 +74,15 @@ void row(const std::string &name, const char *status, const std::string &detail,
         ",\"evidence\":" + quote(evidence) + ",\"detail\":" + quote(detail) + "}\n";
     if (report_sink) *report_sink += line;
     else std::fputs(line.c_str(), stdout);
+#ifdef VKFIX_POST_JNI
+    if (progress_receiver) {
+        auto text = progress_env->NewStringUTF(line.c_str());
+        if (!text) throw std::runtime_error("cannot allocate progress row");
+        progress_env->CallVoidMethod(progress_receiver, progress_method, text);
+        progress_env->DeleteLocalRef(text);
+        if (progress_env->ExceptionCheck()) throw std::runtime_error("progress receiver failed");
+    }
+#endif
 }
 void require(VkResult result, const char *operation) {
     if (result != VK_SUCCESS)
@@ -300,7 +319,8 @@ void buffer_memory2_smoke(Probe &p, VkPhysicalDevice physical) {
         get1(p.device, buffer, &legacy);
         VkBufferMemoryRequirementsInfo2 info{VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2};
         info.buffer = buffer;
-        VkMemoryRequirements2 modern{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+        VkMemoryDedicatedRequirements dedicated_requirements{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkMemoryRequirements2 modern{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dedicated_requirements};
         get2(p.device, &info, &modern);
         if (modern.memoryRequirements.size != legacy.size ||
             modern.memoryRequirements.alignment != legacy.alignment ||
@@ -325,6 +345,9 @@ void buffer_memory2_smoke(Probe &p, VkPhysicalDevice physical) {
         }
         if (type == UINT32_MAX) throw ProbeMismatch("no memory type for buffer memory2");
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+        dedicated.buffer = buffer;
+        allocation.pNext = &dedicated;
         allocation.allocationSize = legacy.size;
         allocation.memoryTypeIndex = type;
         require(allocate(p.device, &allocation, nullptr, &memory), "allocate memory2 backing");
@@ -333,7 +356,7 @@ void buffer_memory2_smoke(Probe &p, VkPhysicalDevice physical) {
         bind.memory = memory;
         require(bind2(p.device, 1, &bind), "vkBindBufferMemory2");
         row("core11.bufferMemory2", "PASS",
-            "vkGetBufferMemoryRequirements2 matches legacy and vkBindBufferMemory2 succeeds",
+            "requirements2 matches legacy; dedicated buffer allocation and bindMemory2 succeeded",
             "functional");
     } catch (...) {
         if (buffer) destroy(p.device, buffer, nullptr);
@@ -378,7 +401,8 @@ void image_memory2_smoke(Probe &p, VkPhysicalDevice physical) {
         get1(p.device, image, &legacy);
         VkImageMemoryRequirementsInfo2 info{VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
         info.image = image;
-        VkMemoryRequirements2 modern{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+        VkMemoryDedicatedRequirements dedicated_requirements{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkMemoryRequirements2 modern{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dedicated_requirements};
         get2(p.device, &info, &modern);
         if (modern.memoryRequirements.size != legacy.size ||
             modern.memoryRequirements.alignment != legacy.alignment ||
@@ -403,6 +427,9 @@ void image_memory2_smoke(Probe &p, VkPhysicalDevice physical) {
         }
         if (type == UINT32_MAX) throw ProbeMismatch("no memory type for image memory2");
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+        dedicated.image = image;
+        allocation.pNext = &dedicated;
         allocation.allocationSize = legacy.size;
         allocation.memoryTypeIndex = type;
         require(allocate(p.device, &allocation, nullptr, &memory), "allocate memory2 image backing");
@@ -411,7 +438,7 @@ void image_memory2_smoke(Probe &p, VkPhysicalDevice physical) {
         bind.memory = memory;
         require(bind2(p.device, 1, &bind), "vkBindImageMemory2");
         row("core11.imageMemory2", "PASS",
-            "vkGetImageMemoryRequirements2 matches legacy and vkBindImageMemory2 succeeds",
+            "requirements2 matches legacy; dedicated image allocation and bindMemory2 succeeded",
             "functional");
     } catch (...) {
         if (image) destroy(p.device, image, nullptr);
@@ -565,7 +592,50 @@ void core11_query_chain(Probe &p, VkPhysicalDevice physical) {
         "functional");
 }
 
+void format_transfer_features_smoke(Probe& p, VkPhysicalDevice physical) {
+    const auto legacy = p.get<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
+    const auto modern = p.get<PFN_vkGetPhysicalDeviceFormatProperties2>("vkGetPhysicalDeviceFormatProperties2");
+    const auto alias = reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties2>(p.gipa(p.instance, "vkGetPhysicalDeviceFormatProperties2KHR"));
+    for (const auto format : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R32_UINT, VK_FORMAT_D16_UNORM, VK_FORMAT_UNDEFINED}) {
+        VkFormatProperties first{}; legacy(physical, format, &first);
+        VkFormatProperties2 second{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2}, third{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2};
+        modern(physical, format, &second);
+        if (alias) alias(physical, format, &third);
+        if (std::memcmp(&first, &second.formatProperties, sizeof first) || (alias && std::memcmp(&first, &third.formatProperties, sizeof first)))
+            throw ProbeMismatch("legacy/Core/KHR format feature queries disagree");
+        if (format == VK_FORMAT_UNDEFINED && (first.linearTilingFeatures || first.optimalTilingFeatures || first.bufferFeatures))
+            throw ProbeMismatch("VK_FORMAT_UNDEFINED reported nonzero format features");
+        if (format == VK_FORMAT_R8G8B8A8_UNORM) {
+            constexpr auto transfer = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+            if ((first.optimalTilingFeatures & transfer) != transfer)
+                throw ProbeMismatch("mandatory RGBA8 image transfer source/destination format features are missing");
+        }
+    }
+    row("core11.formatTransferFeatures", "PASS", "available legacy/Core/KHR queries agree; mandatory RGBA8 transfer bits and undefined-format zero features verified", "functional");
+}
+
+void input_attachment_aspects_smoke(Probe& p) {
+    VkAttachmentDescription attachment{};
+    attachment.format = VK_FORMAT_R8G8B8A8_UNORM; attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference input{0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.inputAttachmentCount = 1; subpass.pInputAttachments = &input;
+    VkInputAttachmentAspectReference aspect{0, 0, VK_IMAGE_ASPECT_COLOR_BIT};
+    VkRenderPassInputAttachmentAspectCreateInfo aspects{VK_STRUCTURE_TYPE_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO};
+    aspects.aspectReferenceCount = 1; aspects.pAspectReferences = &aspect;
+    VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, &aspects};
+    info.attachmentCount = 1; info.pAttachments = &attachment; info.subpassCount = 1; info.pSubpasses = &subpass;
+    VkRenderPass pass{};
+    require(p.dev<PFN_vkCreateRenderPass>("vkCreateRenderPass")(p.device, &info, nullptr, &pass), "create input-aspect render pass");
+    p.dev<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(p.device, pass, nullptr);
+    row("core11.inputAttachmentAspects", "PASS", "render pass creation accepts the explicit color input-aspect declaration", "functional");
+}
+
 void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t family) {
+    uint32_t view_count = 6;
     auto get2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
         p.gipa(p.instance, "vkGetPhysicalDeviceFeatures2"));
     if (!get2) get2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
@@ -583,14 +653,16 @@ void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t f
         p.gipa(p.instance, "vkGetPhysicalDeviceProperties2"));
     if (!get_props) get_props = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
         p.gipa(p.instance, "vkGetPhysicalDeviceProperties2KHR"));
-    if (get_props) {
+    if (!get_props) throw ProbeMismatch("multiview property query unavailable");
+    {
         VkPhysicalDeviceMultiviewProperties limits{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES};
         VkPhysicalDeviceProperties2 properties{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &limits};
         get_props(physical, &properties);
-        if (limits.maxMultiviewViewCount < 2)
-            throw ProbeMismatch("multiview feature reports fewer than two views");
+        if (limits.maxMultiviewViewCount < view_count)
+            throw ProbeMismatch("multiview feature reports fewer than six required views");
+        view_count = std::min(limits.maxMultiviewViewCount, 32u);
     }
     VkAttachmentDescription attachment{};
     attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -606,7 +678,7 @@ void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t f
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &color_ref;
-    uint32_t view_mask = 0x3u;
+    uint32_t view_mask = view_count == 32 ? ~0u : (1u << view_count) - 1;
     VkRenderPassMultiviewCreateInfo multiview{
         VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO};
     multiview.subpassCount = 1;
@@ -725,7 +797,7 @@ void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t f
     image_ci.format = VK_FORMAT_R8G8B8A8_UNORM;
     image_ci.extent = {16, 16, 1};
     image_ci.mipLevels = 1;
-    image_ci.arrayLayers = 2;
+    image_ci.arrayLayers = view_count;
     image_ci.samples = VK_SAMPLE_COUNT_1_BIT;
     image_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
     image_ci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -749,7 +821,7 @@ void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t f
     view_ci.image = image;
     view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     view_ci.format = VK_FORMAT_R8G8B8A8_UNORM;
-    view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 2};
+    view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, view_count};
     VkImageView image_view = VK_NULL_HANDLE;
     require(p.dev<PFN_vkCreateImageView>("vkCreateImageView")(
                 p.device, &view_ci, nullptr, &image_view), "create multiview image view");
@@ -765,7 +837,7 @@ void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t f
                 p.device, &framebuffer_ci, nullptr, &framebuffer), "create multiview framebuffer");
 
     VkBufferCreateInfo buffer_ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    buffer_ci.size = 2 * 16 * 16 * 4;
+    buffer_ci.size = view_count * 16 * 16 * 4;
     buffer_ci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     VkBuffer readback = VK_NULL_HANDLE;
     require(p.dev<PFN_vkCreateBuffer>("vkCreateBuffer")(
@@ -806,7 +878,7 @@ void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t f
     image_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     image_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     image_barrier.image = image;
-    image_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 2};
+    image_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, view_count};
     image_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     p.dev<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(
         cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -833,7 +905,7 @@ void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t f
         cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &image_barrier);
     VkBufferImageCopy copy{};
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 2};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, view_count};
     copy.imageExtent = {16, 16, 1};
     p.dev<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(
         cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &copy);
@@ -865,11 +937,27 @@ void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t f
     p.dev<PFN_vkInvalidateMappedMemoryRanges>("vkInvalidateMappedMemoryRanges")(
         p.device, 1, &invalidate);
     const auto *pixels = static_cast<const uint8_t *>(readback_ptr);
-    const auto pixel = [&](uint32_t layer) {
-        return pixels + layer * 16 * 16 * 4 + (8 * 16 + 8) * 4;
-    };
-    const bool view0_red = pixel(0)[0] > 200 && pixel(0)[1] < 50;
-    const bool view1_green = pixel(1)[0] < 50 && pixel(1)[1] > 200;
+    bool all_views_correct = true;
+    std::string mismatch_detail;
+    for (uint32_t view = 0; view < view_count; ++view) {
+        const uint32_t code = view + 1;
+        const uint8_t expected[]{uint8_t((code * 255 + 16) / 32),
+                                 uint8_t((code & 1) * 255), uint8_t(((code >> 1) & 1) * 255), 255};
+        for (uint32_t pixel = 0; pixel < 16 * 16; ++pixel) {
+            const auto actual = pixels + (view * 16 * 16 + pixel) * 4;
+            for (uint32_t channel = 0; channel < 4; ++channel) {
+                const bool matches = std::abs(int(actual[channel]) - int(expected[channel])) <= 1;
+                all_views_correct &= matches;
+                if (!matches && mismatch_detail.empty()) {
+                    char detail[128];
+                    std::snprintf(detail, sizeof detail,
+                        "multiview layer %u pixel (%u,%u) channel %u: got %u, expected %u",
+                        view, pixel % 16, pixel / 16, channel, unsigned(actual[channel]), unsigned(expected[channel]));
+                    mismatch_detail = detail;
+                }
+            }
+        }
+    }
     p.dev<PFN_vkDestroyFence>("vkDestroyFence")(p.device, fence, nullptr);
     p.dev<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(p.device, pool, nullptr);
     p.dev<PFN_vkUnmapMemory>("vkUnmapMemory")(p.device, readback_memory);
@@ -884,10 +972,11 @@ void multiview_render_pass_smoke(Probe &p, VkPhysicalDevice physical, uint32_t f
     p.dev<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(p.device, vertex, nullptr);
     p.dev<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(p.device, fragment, nullptr);
     p.dev<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(p.device, render_pass, nullptr);
-    if (!view0_red || !view1_green)
-        throw ProbeMismatch("multiview drawing did not select gl_ViewIndex per layer");
+    if (!all_views_correct)
+        throw ProbeMismatch(mismatch_detail);
     row("core11.multiviewRenderPass", "PASS",
-        "a two-view multiview render pass rendered gl_ViewIndex-selected colors into both layers",
+        "required six-view minimum and advertised " + std::to_string(view_count) +
+        " views verified; distinct gl_ViewIndex colors matched every pixel",
         "functional");
 }
 
@@ -1368,9 +1457,6 @@ void descriptor_set_layout_support_smoke(Probe &p) {
 void device_queue2_smoke(Probe &p, uint32_t family) {
     auto get2 = reinterpret_cast<PFN_vkGetDeviceQueue2>(
         p.gdpa(p.device, "vkGetDeviceQueue2"));
-    auto khr = reinterpret_cast<PFN_vkGetDeviceQueue2>(
-        p.gdpa(p.device, "vkGetDeviceQueue2KHR"));
-    if (!get2) get2 = khr;
     if (!get2) throw ProbeMismatch("vkGetDeviceQueue2 is unavailable");
     auto get1 = p.dev<PFN_vkGetDeviceQueue>("vkGetDeviceQueue");
     VkDeviceQueueInfo2 info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};
@@ -1379,10 +1465,10 @@ void device_queue2_smoke(Probe &p, uint32_t family) {
     VkQueue modern = VK_NULL_HANDLE;
     VkQueue legacy = VK_NULL_HANDLE;
     get2(p.device, &info, &modern);
-    if (!modern && khr && khr != get2) khr(p.device, &info, &modern);
     get1(p.device, family, 0, &legacy);
-    if (!modern || !legacy || modern != legacy)
-        throw ProbeMismatch("vkGetDeviceQueue2(flags=0) did not return the vkGetDeviceQueue handle");
+    if (!legacy) throw ProbeMismatch("vkGetDeviceQueue returned null for the created ordinary queue");
+    if (!modern) throw ProbeMismatch("vkGetDeviceQueue2(flags=0) returned null for the created ordinary queue");
+    if (modern != legacy) throw ProbeMismatch("vkGetDeviceQueue2(flags=0) returned a distinct handle");
     row("deviceQueue2.sameQueue", "PASS",
         "flags==0 returns the same native queue as vkGetDeviceQueue", "functional");
 }
@@ -1477,8 +1563,14 @@ int run(const char *library, PostWindow *window = nullptr) {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES};
         VkPhysicalDevice16BitStorageFeatures storage16{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
+        VkPhysicalDeviceMultiviewFeatures multiview_features{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};
+        VkPhysicalDeviceVariablePointersFeatures variable_features{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES};
         auto append = [&](auto &value) { value.pNext = features.pNext; features.pNext = &value; };
         if (api >= VK_API_VERSION_1_1) append(draw);
+        if (api >= VK_API_VERSION_1_1 || has("VK_KHR_multiview")) append(multiview_features);
+        if (api >= VK_API_VERSION_1_1 || has("VK_KHR_variable_pointers")) append(variable_features);
         if (api >= VK_API_VERSION_1_1 || has("VK_KHR_16bit_storage")) append(storage16);
         if (api >= VK_API_VERSION_1_1 || has("VK_KHR_sampler_ycbcr_conversion"))
             append(ycbcr_conversion);
@@ -1509,37 +1601,7 @@ int run(const char *library, PostWindow *window = nullptr) {
         feature("synchronization2", sync.synchronization2);
         feature("dynamicRendering", dynamic.dynamicRendering);
         feature("vertexAttributeInstanceRateDivisor", divisor.vertexAttributeInstanceRateDivisor);
-        const auto native_trust = vkfix::native_driver_trust(probe.instance,physical,native_gipa);
-        const auto &aliases = native_trust.sampler_aliases;
-        row("driverTrust.samplerAliases", aliases.verdict==vkfix::DriverProbeVerdict::Healthy ? "PASS" :
-            aliases.verdict==vkfix::DriverProbeVerdict::RepairConfirmed ? "WARN" : "SKIP",
-            std::string(vkfix::driver_probe_verdict_name(aliases.verdict))+": "+aliases.detail,
-            "functional");
-        const auto &uniform = native_trust.large_uniform;
-        row("driverTrust.largeUniform", uniform.verdict==vkfix::DriverProbeVerdict::Healthy ? "PASS" :
-            uniform.verdict==vkfix::DriverProbeVerdict::RepairConfirmed ? "WARN" : "SKIP",
-            std::string(vkfix::driver_probe_verdict_name(uniform.verdict))+": "+uniform.detail,
-            "functional");
-        const auto &push_trust = native_trust.push_descriptor;
-        row("driverTrust.pushDescriptor", push_trust.verdict==vkfix::DriverProbeVerdict::Healthy ? "PASS" :
-            push_trust.verdict==vkfix::DriverProbeVerdict::RepairConfirmed ? "WARN" : "SKIP",
-            std::string(vkfix::driver_probe_verdict_name(push_trust.verdict))+": "+push_trust.detail,
-            "functional");
-        const auto &tiler = native_trust.tiler_budget;
-        row("driverTrust.tilerPressure", tiler.verdict==vkfix::DriverProbeVerdict::Healthy ? "PASS" :
-            tiler.verdict==vkfix::DriverProbeVerdict::RepairConfirmed ? "WARN" : "SKIP",
-            std::string(vkfix::driver_probe_verdict_name(tiler.verdict))+": "+tiler.detail,
-            "functional");
-        if (native_gipa) {
-            auto raw_props=reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(native_gipa(probe.instance,"vkGetPhysicalDeviceProperties"));
-            if (raw_props) {
-                VkPhysicalDeviceProperties raw{}; raw_props(physical,&raw);
-                auto control=vkfix::run_driver_probe_process("push-control",vkfix::driver_probe_identity(raw,vkfix::nativeprobe::revision));
-                using S=vkfix::ProbeProcessStatus;
-                row("driverTrust.workerControl",control.status==S::Passed ? "PASS" :
-                    control.status==S::Unavailable ? "SKIP" : "FAIL",control.detail,"functional");
-            }
-        }
+        vkfix::report_driver_trust(probe.instance, physical, native_gipa, row);
         uint32_t count = 0;
         auto qfp = probe.get<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
         qfp(physical, &count, nullptr);
@@ -1573,6 +1635,10 @@ int run(const char *library, PostWindow *window = nullptr) {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES};
         VkPhysicalDevice16BitStorageFeatures enable_storage16{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
+        VkPhysicalDeviceMultiviewFeatures enable_multiview{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};
+        VkPhysicalDeviceVariablePointersFeatures enable_variable{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES};
         VkPhysicalDeviceFeatures enabled_features{};
         enabled_features.multiDrawIndirect = features.features.multiDrawIndirect;
         enabled_features.drawIndirectFirstInstance = features.features.drawIndirectFirstInstance;
@@ -1584,6 +1650,17 @@ int run(const char *library, PostWindow *window = nullptr) {
         enabled_features.multiViewport = features.features.multiViewport;
         enabled_features.shaderStorageBufferArrayDynamicIndexing = features.features.shaderStorageBufferArrayDynamicIndexing;
         dci.pEnabledFeatures = &enabled_features;
+        if (multiview_features.multiview) {
+            enable_multiview.multiview = VK_TRUE;
+            enable_multiview.pNext = const_cast<void *>(dci.pNext); dci.pNext = &enable_multiview;
+            if (api < VK_API_VERSION_1_1) enabled_extensions.push_back("VK_KHR_multiview");
+        }
+        if (variable_features.variablePointersStorageBuffer) {
+            enable_variable.variablePointersStorageBuffer = VK_TRUE;
+            enable_variable.variablePointers = variable_features.variablePointers;
+            enable_variable.pNext = const_cast<void *>(dci.pNext); dci.pNext = &enable_variable;
+            if (api < VK_API_VERSION_1_1) enabled_extensions.push_back("VK_KHR_variable_pointers");
+        }
         if (timeline.timelineSemaphore) {
             enable_timeline.timelineSemaphore = VK_TRUE;
             enable_timeline.pNext = const_cast<void *>(dci.pNext); dci.pNext = &enable_timeline;
@@ -1656,6 +1733,8 @@ int run(const char *library, PostWindow *window = nullptr) {
         run_case("bufferTransfer", [&] { buffer_smoke(probe, physical, family); });
         if (api >= VK_API_VERSION_1_1) {
             run_case("core11.queryChain", [&] { core11_query_chain(probe, physical); });
+            run_case("core11.formatTransferFeatures", [&] { format_transfer_features_smoke(probe, physical); });
+            run_case("core11.imageTypeCopy", [&] { image_type_copy_smoke(probe,physical,family); });
             run_case("core11.externalProperties",
                      [&] { external_properties_smoke(probe, physical); });
             // Vulkan11 aggregate structures were introduced by Vulkan 1.2.
@@ -1669,8 +1748,26 @@ int run(const char *library, PostWindow *window = nullptr) {
                 row("core11.propertiesAggregate","SKIP","aggregate structure requires Vulkan 1.2","functional");
                 row("core11.featureAggregate","SKIP","aggregate structure requires Vulkan 1.2","functional");
             }
-            run_case("core11.multiviewRenderPass",
-                     [&] { multiview_render_pass_smoke(probe, physical, family); });
+            if (families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                run_case("core11.volumeInputAttachment", [&] {
+                    vkfix::nativeprobe::volume_input_probe(probe,physical,family);
+                    row("core11.volumeInputAttachment","PASS","3D mip1/slice5 CLEAR then input-attachment draw across two subpasses and equivalent view handles matched all16 pixels","functional");
+                });
+                if (families[family].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                    run_case("core11.volumeAttachment", [&] {
+                        vkfix::nativeprobe::volume_attachment_probe(probe,physical,family,true,false);
+                        row("core11.volumeAttachment","PASS","3D mip1/baseSlice2 attachment LOAD/STORE, local layer3 clear, event dependency, descriptor template/copy and 384 sampler3D texels matched","functional");
+                    });
+                } else row("core11.volumeAttachment","SKIP","no compute queue","functional");
+                run_case("core11.inputAttachmentAspects", [&] { input_attachment_aspects_smoke(probe); });
+                run_case("core11.multiviewRenderPass",
+                         [&] { multiview_render_pass_smoke(probe, physical, family); });
+            } else {
+                row("core11.volumeAttachment","SKIP","no graphics queue","functional");
+                row("core11.volumeInputAttachment","SKIP","no graphics queue","functional");
+                row("core11.inputAttachmentAspects", "SKIP", "no graphics queue", "functional");
+                row("core11.multiviewRenderPass", "SKIP", "no graphics queue", "functional");
+            }
             run_case("core11.sparseMemoryRequirements2",
                      [&] { sparse_memory_requirements2_smoke(probe, physical); });
             if (api>=VK_API_VERSION_1_2 && getenv("VULKAN_FIX_POST_TEST_AGGREGATE_REPAIR"))
@@ -1706,6 +1803,8 @@ int run(const char *library, PostWindow *window = nullptr) {
                          [&] { spirv13_downgrade_smoke(probe, physical, family); });
                 run_case("core11.subgroupBasic",
                          [&] { subgroup_basic_smoke(probe,physical,family); });
+                run_case("core11.relaxedBlockLayout",
+                         [&] { relaxed_layout_smoke(probe,physical,family); });
                 if (enabled_features.shaderStorageBufferArrayDynamicIndexing &&
                     properties.limits.maxPerStageDescriptorStorageBuffers>=5 &&
                     properties.limits.maxDescriptorSetStorageBuffers>=5)
@@ -1734,6 +1833,7 @@ int run(const char *library, PostWindow *window = nullptr) {
                 row("core11.storageBufferArrays", "SKIP", "no compute queue", "functional");
                 row("core11.storageBufferArraysStatic", "SKIP", "no compute queue", "functional");
                 row("core11.subgroupBasic", "SKIP", "no compute queue", "functional");
+                row("core11.relaxedBlockLayout", "SKIP", "no compute queue", "functional");
             }
             if ((families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
                 run_case("core11.negativeViewport",
@@ -1759,6 +1859,12 @@ int run(const char *library, PostWindow *window = nullptr) {
                         run_case(name, [&] { negative_viewport_smoke(probe, physical, family,
                             dynamic, false, false, false, false, false, name, stage); });
                     }
+                }
+                for (int origin = 0; origin < 2; ++origin) {
+                    const char* name = origin ? "core11.tessellationDomainOriginLower" : "core11.tessellationDomainOriginUpper";
+                    if (!enabled_features.tessellationShader) row(name, "SKIP", "optional shader stage unavailable", "functional");
+                    else run_case(name, [&] { negative_viewport_smoke(probe, physical, family,
+                        false, false, false, true, false, false, name, 3, origin); });
                 }
                 run_case("core11.dynamicNegativeViewportIndirect",
                          [&] { negative_viewport_smoke(probe, physical, family, true, true,
@@ -1812,8 +1918,14 @@ int run(const char *library, PostWindow *window = nullptr) {
                     row("core11.dynamicConstantViewportIndex", "SKIP", "multiViewport or geometryShader unavailable", "functional");
                 }
             } else {
+                row("core11.tessellationDomainOriginLower", "SKIP", "no graphics queue", "functional");
+                row("core11.tessellationDomainOriginUpper", "SKIP", "no graphics queue", "functional");
                 row("core11.negativeViewport", "SKIP", "no graphics queue", "functional");
                 row("core11.dynamicNegativeViewport", "SKIP", "no graphics queue", "functional");
+                for (const char* name : {"core11.staticViewportPositionRead", "core11.dynamicViewportPositionRead",
+                        "core11.staticViewportGeometry", "core11.dynamicViewportGeometry",
+                        "core11.staticViewportTessellation", "core11.dynamicViewportTessellation"})
+                    row(name, "SKIP", "no graphics queue", "functional");
                 row("core11.dynamicNegativeViewportIndirect", "SKIP", "no graphics queue",
                     "functional");
                 row("core11.dynamicNegativeViewportIndexed", "SKIP", "no graphics queue",
@@ -1848,15 +1960,21 @@ int run(const char *library, PostWindow *window = nullptr) {
             run_case("deviceGroup.enumerate",
                      [&] { device_group_enumeration_smoke(probe, physical); });
         } else {
+            row("core11.imageTypeCopy", "SKIP", "Vulkan 1.1 unavailable", "functional");
+            row("core11.volumeAttachment", "SKIP", "Vulkan 1.1 unavailable", "functional");
+            row("core11.volumeInputAttachment", "SKIP", "Vulkan 1.1 unavailable", "functional");
+            row("core11.formatTransferFeatures", "SKIP", "Vulkan 1.1 unavailable", "functional");
             row("core11.queryChain", "SKIP", "Vulkan 1.1 query chain unavailable",
                 "functional");
             row("core11.storageBufferArrays", "SKIP", "Vulkan 1.1 unavailable", "functional");
             row("core11.storageBufferArraysStatic", "SKIP", "Vulkan 1.1 unavailable", "functional");
             row("core11.subgroupBasic", "SKIP", "Vulkan 1.1 unavailable", "functional");
+            row("core11.relaxedBlockLayout", "SKIP", "Vulkan 1.1 unavailable", "functional");
             row("core11.externalProperties", "SKIP", "Vulkan 1.1 external queries unavailable",
                 "functional");
             row("core11.propertiesAggregate", "SKIP", "Vulkan 1.1 properties query unavailable",
                 "functional");
+            row("core11.inputAttachmentAspects", "SKIP", "Vulkan 1.1 unavailable", "functional");
             row("core11.multiviewRenderPass", "SKIP", "Vulkan 1.1 feature query unavailable",
                 "functional");
             row("core11.featureAggregate", "SKIP", "Vulkan 1.1 feature query unavailable",
@@ -1885,6 +2003,8 @@ int run(const char *library, PostWindow *window = nullptr) {
                 "Vulkan 1.1 feature query unavailable", "functional");
             row("core11.spirv13Downgrade", "SKIP",
                 "Vulkan 1.1 feature query unavailable", "functional");
+            row("core11.tessellationDomainOriginLower", "SKIP", "Vulkan 1.1 unavailable", "functional");
+            row("core11.tessellationDomainOriginUpper", "SKIP", "Vulkan 1.1 unavailable", "functional");
             row("core11.negativeViewport", "SKIP", "Vulkan 1.1 feature query unavailable",
                 "functional");
             row("core11.dynamicNegativeViewport", "SKIP",
@@ -1929,14 +2049,14 @@ int run(const char *library, PostWindow *window = nullptr) {
         else row("hostQueryReset.reset", "SKIP", "feature unavailable", "functional");
         if (enable_sync.synchronization2) run_case("synchronization2.transfer", [&] { synchronization_smoke(probe, physical, family); });
         else row("synchronization2.transfer", "SKIP", "feature unavailable", "functional");
-        if (enable_dynamic.dynamicRendering && (families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+        const bool graphics = (families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+        if (enable_dynamic.dynamicRendering && graphics)
             run_case("dynamicRendering.clear", [&] { dynamic_rendering_smoke(probe, physical, family); });
-        else row("dynamicRendering.clear", dynamic.dynamicRendering ? "FAIL" : "SKIP",
-                 dynamic.dynamicRendering ? "graphics queue or extension dependencies unavailable" : "feature unavailable", "functional");
+        else row("dynamicRendering.clear", graphics && dynamic.dynamicRendering ? "FAIL" : "SKIP",
+                 graphics ? "feature or extension dependencies unavailable" : "no graphics queue", "functional");
         if (has("VK_KHR_push_descriptor") && (families[family].queueFlags & VK_QUEUE_COMPUTE_BIT))
             run_case("pushDescriptor.compute", [&] { push_descriptor_smoke(probe, physical, family); });
         else row("pushDescriptor.compute", "SKIP", "push descriptor or compute queue unavailable", "functional");
-        const bool graphics = (families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
         const bool dynamic_draw = enable_dynamic.dynamicRendering != VK_FALSE;
         if (graphics) run_case("graphics.draw", [&] { draw_smoke(probe, physical, family, dynamic_draw, 0); });
         else row("graphics.draw", "SKIP", "no graphics queue", "functional");
@@ -1977,21 +2097,40 @@ int run(const char *library, PostWindow *window = nullptr) {
 }
 } // namespace
 #ifdef VKFIX_POST_JNI
-#include <jni.h>
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_launchers_1plugin_renderer_DriverPostNative_run(JNIEnv *env, jobject, jstring library, jobject surface) {
+Java_com_launchers_1plugin_renderer_DriverPostNative_run(
+    JNIEnv *env, jobject, jstring library, jobject surface, jobject progress) {
     if (!library) return nullptr;
+    jmethodID on_row = nullptr;
+    if (progress) {
+        const auto type = env->GetObjectClass(progress);
+        if (!type) return nullptr;
+        on_row = env->GetMethodID(type, "onRow", "(Ljava/lang/String;)V");
+        env->DeleteLocalRef(type);
+        if (!on_row) return nullptr;
+    }
     const char *path = env->GetStringUTFChars(library, nullptr);
     if (!path) return nullptr;
     std::string report;
     report_sink = &report;
+    progress_env = env;
+    progress_receiver = progress;
+    progress_method = on_row;
     PostWindow *window = surface ? ANativeWindow_fromSurface(env,surface) : nullptr;
     try { run(path,window); }
-    catch (const std::exception &error) { row("probe", "FAIL", error.what(), "error"); }
+    catch (const std::exception &error) {
+        // A pending Java exception returns to the service's error handler.
+        // Avoid calling its progress receiver again while that exception exists.
+        progress_receiver = nullptr;
+        if (!env->ExceptionCheck()) row("probe", "FAIL", error.what(), "error");
+    }
     report_sink = nullptr;
+    progress_receiver = nullptr;
+    progress_method = nullptr;
+    progress_env = nullptr;
     if (window) ANativeWindow_release(window);
     env->ReleaseStringUTFChars(library, path);
-    return env->NewStringUTF(report.c_str());
+    return env->ExceptionCheck() ? nullptr : env->NewStringUTF(report.c_str());
 }
 #else
 int main(int argc, char **argv) {

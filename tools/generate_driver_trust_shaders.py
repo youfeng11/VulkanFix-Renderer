@@ -87,6 +87,19 @@ def generate(tool_dir):
         source = source.replace("OpDecorate %Out Block", "OpDecorate %Out BufferBlock")
         sources[name] = source.replace("StorageBuffer", "Uniform")
     sources["uniform_subject"], uniform_offsets, uniform_bytes = uniform_fixture()
+    for variant in ("static", "dynamic"):
+        filename = "storage_arrays_static.spvasm" if variant == "static" else "storage_arrays.spvasm"
+        source = (ROOT / "layer/src/main/cpp/diagnostics/shaders" / filename).read_text(encoding="utf-8")
+        # The single invocation changes only the first field of the last
+        # descriptor between the whole-array load and store. Save and restore
+        # that field directly, keeping descriptor aliases and all other work.
+        source = source.replace("%whole = OpLoad %Array %array\n", "")
+        source = source.replace("OpStore %lastField %zero\nOpStore %array %whole",
+                                "%savedLast = OpLoad %uint %lastField\nOpStore %lastField %zero\n"
+                                "OpStore %lastField %savedLast")
+        if "%savedLast = OpLoad" not in source or "%whole" in source:
+            raise ValueError(f"could not derive scalar control from {filename}")
+        sources[f"storage_array_{variant}_control"] = source
     sources["push_empty"] = '''OpCapability Shader
 OpMemoryModel Logical GLSL450
 OpEntryPoint GLCompute %main "main"
@@ -143,10 +156,32 @@ OpFunctionEnd
             assembly = Path(temporary) / (name + ".spvasm")
             binary = Path(temporary) / (name + ".spv")
             assembly.write_text(source, encoding="utf-8")
-            subprocess.run([str(tool_dir / "spirv-as"), "--target-env", "vulkan1.0", str(assembly), "-o", str(binary)], check=True)
-            subprocess.run([str(tool_dir / "spirv-val"), "--target-env", "vulkan1.0", str(binary)], check=True)
+            environment = "vulkan1.1" if name.startswith("storage_array_") else "vulkan1.0"
+            subprocess.run([str(tool_dir / "spirv-as"), "--target-env", environment, str(assembly), "-o", str(binary)], check=True)
+            subprocess.run([str(tool_dir / "spirv-val"), "--target-env", environment, str(binary)], check=True)
             binaries[name] = binary.read_bytes()
         graphics = {
+            "e5_integer_copy": ("comp", '''#version 450
+layout(local_size_x=8, local_size_y=8) in;
+layout(set=0,binding=0) uniform usampler2D sourceImage;
+layout(set=0,binding=1,r32ui) uniform writeonly uimage2D targetImage;
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(targetImage)))) return;
+    imageStore(targetImage, pixel, texelFetch(sourceImage, pixel, 0));
+}
+'''),
+            "depth_resolve_depth": ("frag", '''#version 450
+layout(set=0,binding=0) uniform sampler2DMS sourceImage;
+void main() { gl_FragDepth = texelFetch(sourceImage, ivec2(gl_FragCoord.xy), 0).r; }
+'''),
+            "depth_resolve_stencil": ("frag", '''#version 450
+layout(set=0,binding=0) uniform usampler2DMS sourceImage;
+layout(push_constant) uniform Compare { uint expected; };
+void main() {
+    if (texelFetch(sourceImage, ivec2(gl_FragCoord.xy), 0).r != expected) discard;
+}
+'''),
             "tiler_vert": ("vert", '''#version 450
 void main() {
     const vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));
@@ -157,6 +192,47 @@ void main() {
 layout(push_constant) uniform Color { vec4 color; } pc;
 layout(location=0) out vec4 result;
 void main() { result=pc.color; }
+'''),
+            "push_graphics_frag": ("frag", '''#version 450
+layout(set=1,binding=0) uniform sampler2D combinedImage;
+layout(set=1,binding=2,std140) uniform UniformData { vec4 value; } uniforms[2];
+layout(set=1,binding=4,std430) readonly buffer StorageData { vec4 value; } buffers[2];
+layout(set=1,binding=6) uniform texture2D separateImage;
+layout(set=1,binding=7) uniform sampler separateSampler;
+layout(set=1,binding=9,rgba8) readonly uniform image2D storageImage;
+layout(set=1,binding=11) uniform samplerBuffer texelData;
+layout(location=0) out vec4 result;
+void main() {
+    result=(uniforms[0].value+uniforms[1].value+buffers[0].value+buffers[1].value
+        +textureLod(combinedImage,vec2(.5),0)
+        +textureLod(sampler2D(separateImage,separateSampler),vec2(.5),0)
+        +imageLoad(storageImage,ivec2(0))+texelFetch(texelData,0))*.125;
+}
+'''),
+            "push_vertex_vert": ("vert", '''#version 450
+layout(set=1,binding=2,std140) uniform UniformData { vec4 value; } uniforms[2];
+layout(location=0) out vec4 vertexValue;
+void main() {
+    const vec2 p[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));
+    gl_Position=vec4(p[gl_VertexIndex%3],0,1);
+    vertexValue=(uniforms[0].value+uniforms[1].value)*.125;
+}
+'''),
+            "push_vertex_frag": ("frag", '''#version 450
+layout(set=1,binding=0) uniform sampler2D combinedImage;
+layout(set=1,binding=4,std430) readonly buffer StorageData { vec4 value; } buffers[2];
+layout(set=1,binding=6) uniform texture2D separateImage;
+layout(set=1,binding=7) uniform sampler separateSampler;
+layout(set=1,binding=9,rgba8) readonly uniform image2D storageImage;
+layout(set=1,binding=11) uniform samplerBuffer texelData;
+layout(location=0) in vec4 vertexValue;
+layout(location=0) out vec4 result;
+void main() {
+    result=vertexValue+(buffers[0].value+buffers[1].value
+        +textureLod(combinedImage,vec2(.5),0)
+        +textureLod(sampler2D(separateImage,separateSampler),vec2(.5),0)
+        +imageLoad(storageImage,ivec2(0))+texelFetch(texelData,0))*.125;
+}
 ''')}
         for name, (stage, source) in graphics.items():
             shader = Path(temporary) / (name + "." + stage)
@@ -174,9 +250,18 @@ void main() { result=pc.color; }
     # from a small draw to a larger stress sequence must invalidate old workers
     # even when its SPIR-V stays identical. Normalize checkout line endings.
     probe_sources = (
-        "core/driver_trust_probe.cpp", "core/driver_probe_process.cpp",
-        "core/driver_tiler_probe.inc", "core/native_probe_resources.h",
-        "core/driver_trust.h", "diagnostics/driver_trust_worker.cpp")
+        "diagnostics/driver_trust_probe.cpp", "core/driver_probe_process.cpp",
+        "core/driver_tiler_probe.inc", "core/driver_push_graphics_probe.inc", "core/native_probe_resources.h",
+        "core/driver_trust.h", "core/driver_probe_process.h", "core/native_msaa_resolve_probe.h",
+        "core/native_timeline_queue_probe.h", "core/native_sync2_event_probe.h", "core/native_image_slice_probe.h",
+        "core/image_slice_regions.h", "diagnostics/native_discard_state_probe.h",
+        "core/storage_buffer_array_probe.h", "diagnostics/storage_arrays_shader.h",
+        "diagnostics/storage_arrays_static_shader.h", "diagnostics/native_depth_resolve_probe.h",
+        "diagnostics/e5_probe_pattern.h", "diagnostics/native_e5_transfer_probe.h",
+        "diagnostics/native_probe_session.h", "diagnostics/native_queue2_probe.h",
+        "diagnostics/native_timestamp_probe.h",
+        "diagnostics/query_reset_probe.h",
+        "diagnostics/driver_trust_worker.cpp")
     digest_input = b"".join(binaries.values())
     for relative in probe_sources:
         source = ROOT / "layer/src/main/cpp" / relative

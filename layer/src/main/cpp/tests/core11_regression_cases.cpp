@@ -1,5 +1,8 @@
 #include "core/layer_manager.h"
 #include "core/legacy_query_array.h"
+#include "core/vk_pnext.h"
+#include "core/native_instance_state.h"
+#include "modules/vulkan_1_0/fill_mode_non_solid.h"
 #include "modules/vulkan_1_1/bind_memory2.h"
 #include "modules/vulkan_1_1/device_group.h"
 #include "modules/vulkan_1_1/get_memory_requirements2.h"
@@ -12,16 +15,34 @@ const auto physical = (VkPhysicalDevice)(uintptr_t)0xc11001;
 const auto device = (VkDevice)(uintptr_t)0xc12001;
 const auto command = (VkCommandBuffer)(uintptr_t)0xc13001;
 unsigned trims = 0, masks = 0, legacy_sparse_calls = 0;
+unsigned core_trims = 0, core_layout_calls = 0, khr_layout_calls = 0;
+bool native_maintenance = false, native_maintenance_ci_valid = true;
 unsigned queue2_calls = 0, queue1_calls = 0;
 unsigned buffer_binds = 0, image_binds = 0;
 unsigned layout_creates = 0, layout_destroys = 0;
 VkResult layout_status = VK_SUCCESS;
 bool native_layout_query = false;
 bool native_reqs2 = false;
+bool native_queue_mode = false, native_queue_ci_valid = true;
+VkDeviceQueueCreateFlags queried_queue_flags = 0;
+uint32_t queried_queue_family = 0, queried_queue_index = 0;
+bool native_bind2 = false, native_bind_inputs_valid = true;
+unsigned buffer_binds2 = 0, image_binds2 = 0;
 VkResult enumerate_status = VK_SUCCESS;
 uint32_t native_device_count = 3;
-VkResult VKAPI_CALL create(VkPhysicalDevice, const VkDeviceCreateInfo*,
+VkResult VKAPI_CALL create(VkPhysicalDevice, const VkDeviceCreateInfo* info,
                           const VkAllocationCallbacks*, VkDevice* out) {
+    if (native_maintenance) {
+        bool found = false;
+        for (uint32_t i = 0; i < info->enabledExtensionCount; ++i)
+            found |= !strcmp(info->ppEnabledExtensionNames[i], VK_KHR_MAINTENANCE3_EXTENSION_NAME);
+        native_maintenance_ci_valid &= found;
+    }
+    if (native_queue_mode) {
+        auto feature = vku::find_pnext<VkPhysicalDeviceProtectedMemoryFeatures>(info->pNext,VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES);
+        native_queue_ci_valid &= feature && feature->protectedMemory && info->queueCreateInfoCount == 1 &&
+            info->pQueueCreateInfos[0].flags == VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT;
+    }
     *out = device;
     return VK_SUCCESS;
 }
@@ -31,6 +52,7 @@ VkResult VKAPI_CALL allocate(VkDevice, const VkCommandBufferAllocateInfo*, VkCom
     return VK_SUCCESS;
 }
 void VKAPI_CALL trim(VkDevice, VkCommandPool, VkCommandPoolTrimFlags) { ++trims; }
+void VKAPI_CALL core_trim(VkDevice, VkCommandPool, VkCommandPoolTrimFlags) { ++core_trims; }
 void VKAPI_CALL mask(VkCommandBuffer, uint32_t) { ++masks; }
 VkResult VKAPI_CALL create_layout(VkDevice, const VkDescriptorSetLayoutCreateInfo*,
                                  const VkAllocationCallbacks*, VkDescriptorSetLayout* out) {
@@ -43,11 +65,19 @@ void VKAPI_CALL destroy_layout(VkDevice, VkDescriptorSetLayout, const VkAllocati
 }
 const auto legacy_queue = (VkQueue)(uintptr_t)0xc16001;
 VkQueue modern_queue = VK_NULL_HANDLE;
-void VKAPI_CALL get_queue2(VkDevice, const VkDeviceQueueInfo2*, VkQueue* out) {
+void VKAPI_CALL get_queue2(VkDevice, const VkDeviceQueueInfo2* info, VkQueue* out) {
     ++queue2_calls;
-    // Deliberately broken by default: the layer must repair a null or foreign
-    // flags==0 result.
+    queried_queue_flags = info->flags; queried_queue_family = info->queueFamilyIndex; queried_queue_index = info->queueIndex;
+    // Nonnull 1.1 stubs are deliberately exposed even on the legacy fixture.
     if (out) *out = modern_queue;
+}
+void VKAPI_CALL protected_properties(VkPhysicalDevice,VkPhysicalDeviceProperties* out) {
+    *out = {}; out->apiVersion = VK_API_VERSION_1_1;
+}
+void VKAPI_CALL protected_features(VkPhysicalDevice,VkPhysicalDeviceFeatures2* out) {
+    out->features = {};
+    if (auto feature = vku::find_pnext<VkPhysicalDeviceProtectedMemoryFeatures>(out->pNext,VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES))
+        feature->protectedMemory = VK_TRUE;
 }
 void VKAPI_CALL get_queue(VkDevice, uint32_t, uint32_t, VkQueue* out) {
     ++queue1_calls;
@@ -60,6 +90,21 @@ VkResult VKAPI_CALL bind_buffer(VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize
 VkResult VKAPI_CALL bind_image(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize) {
     ++image_binds;
     return VK_SUCCESS;
+}
+VkResult VKAPI_CALL bind_buffer2(VkDevice,uint32_t count,const VkBindBufferMemoryInfo* infos) {
+    ++buffer_binds2;
+    for (uint32_t i = 0; i < count; ++i) native_bind_inputs_valid &= !vku::has_pnext(infos[i].pNext,VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO);
+    return native_bind_inputs_valid ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT;
+}
+VkResult VKAPI_CALL bind_image2(VkDevice,uint32_t count,const VkBindImageMemoryInfo* infos) {
+    ++image_binds2;
+    for (uint32_t i = 0; i < count; ++i) native_bind_inputs_valid &= !vku::has_pnext(infos[i].pNext,VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_DEVICE_GROUP_INFO);
+    return native_bind_inputs_valid ? VK_SUCCESS : VK_ERROR_FEATURE_NOT_PRESENT;
+}
+VkResult VKAPI_CALL bind_extensions(VkPhysicalDevice,const char*,uint32_t* count,VkExtensionProperties* out) {
+    if (!out) { *count = 1; return VK_SUCCESS; }
+    if (!*count) return VK_INCOMPLETE;
+    out[0] = {}; std::strcpy(out[0].extensionName,VK_KHR_BIND_MEMORY_2_EXTENSION_NAME); out[0].specVersion = VK_KHR_BIND_MEMORY_2_SPEC_VERSION; *count = 1; return VK_SUCCESS;
 }
 void VKAPI_CALL buffer_requirements(VkDevice, VkBuffer, VkMemoryRequirements* out) {
     *out = {};
@@ -88,9 +133,24 @@ void VKAPI_CALL image_requirements2(VkDevice, const VkImageMemoryRequirementsInf
     out->memoryRequirements.memoryTypeBits = 1;
 }
 void VKAPI_CALL layout_query(VkDevice, const VkDescriptorSetLayoutCreateInfo*, VkDescriptorSetLayoutSupport* out) {
+    ++khr_layout_calls;
     out->supported = VK_FALSE;
     auto* variable = (VkDescriptorSetVariableDescriptorCountLayoutSupport*)out->pNext;
     variable->maxVariableDescriptorCount = 37;
+}
+void VKAPI_CALL core_layout_query(VkDevice, const VkDescriptorSetLayoutCreateInfo*, VkDescriptorSetLayoutSupport* out) {
+    ++core_layout_calls;
+    out->supported = VK_FALSE;
+    ((VkDescriptorSetVariableDescriptorCountLayoutSupport*)out->pNext)->maxVariableDescriptorCount = 73;
+}
+void VKAPI_CALL maintenance_properties(VkPhysicalDevice, VkPhysicalDeviceProperties* out) {
+    *out = {}; out->apiVersion = VK_API_VERSION_1_0;
+}
+VkResult VKAPI_CALL maintenance_extensions(VkPhysicalDevice, const char*, uint32_t* count, VkExtensionProperties* out) {
+    if (!out) { *count = 1; return VK_SUCCESS; }
+    if (!*count) return VK_INCOMPLETE;
+    *out = {}; strcpy(out->extensionName, VK_KHR_MAINTENANCE3_EXTENSION_NAME); out->specVersion = VK_KHR_MAINTENANCE3_SPEC_VERSION;
+    *count = 1; return VK_SUCCESS;
 }
 VkResult VKAPI_CALL enumerate(VkInstance, uint32_t* count, VkPhysicalDevice* out) {
     if (enumerate_status != VK_SUCCESS) return enumerate_status;
@@ -128,12 +188,19 @@ void* core11_mock_proc(const char* name) {
     if (!strcmp(name, "vkDestroyDevice")) return (void*)destroy;
     if (!strcmp(name, "vkAllocateCommandBuffers")) return (void*)allocate;
     if (!strcmp(name, "vkTrimCommandPoolKHR")) return (void*)trim;
+    if (!strcmp(name, "vkTrimCommandPool")) return (void*)core_trim;
     if (!strcmp(name, "vkCmdSetDeviceMaskKHR")) return (void*)mask;
     if (!strcmp(name, "vkGetDeviceQueue2")) return (void*)get_queue2;
-    if (!strcmp(name, "vkGetDeviceQueue2KHR")) return (void*)get_queue2;
+    if (native_queue_mode && !strcmp(name,"vkGetPhysicalDeviceProperties")) return (void*)protected_properties;
+    if (native_queue_mode && !strcmp(name,"vkGetPhysicalDeviceFeatures2")) return (void*)protected_features;
+    if (native_maintenance && !strcmp(name,"vkGetPhysicalDeviceProperties")) return (void*)maintenance_properties;
+    if (native_maintenance && !strcmp(name,"vkEnumerateDeviceExtensionProperties")) return (void*)maintenance_extensions;
     if (!strcmp(name, "vkGetDeviceQueue")) return (void*)get_queue;
     if (!strcmp(name, "vkBindBufferMemory")) return (void*)bind_buffer;
     if (!strcmp(name, "vkBindImageMemory")) return (void*)bind_image;
+    if (native_bind2 && !strcmp(name,"vkBindBufferMemory2KHR")) return (void*)bind_buffer2;
+    if (native_bind2 && !strcmp(name,"vkBindImageMemory2KHR")) return (void*)bind_image2;
+    if (native_bind2 && !strcmp(name,"vkEnumerateDeviceExtensionProperties")) return (void*)bind_extensions;
     if (!strcmp(name, "vkGetBufferMemoryRequirements")) return (void*)buffer_requirements;
     if (!strcmp(name, "vkGetImageMemoryRequirements")) return (void*)image_requirements;
     if (native_reqs2 && !strcmp(name, "vkGetBufferMemoryRequirements2KHR"))
@@ -145,10 +212,36 @@ void* core11_mock_proc(const char* name) {
     if (!strcmp(name, "vkCreateDescriptorSetLayout")) return (void*)create_layout;
     if (!strcmp(name, "vkDestroyDescriptorSetLayout")) return (void*)destroy_layout;
     if (!strcmp(name, "vkGetDescriptorSetLayoutSupportKHR") && native_layout_query) return (void*)layout_query;
+    if (!strcmp(name, "vkGetDescriptorSetLayoutSupport") && native_layout_query) return (void*)core_layout_query;
     return nullptr;
 }
 
 void run_core11_regressions(void (*check)(bool, const char*)) {
+    FillModeNonSolidModule fill;
+    const auto fill_physical = reinterpret_cast<VkPhysicalDevice>(uintptr_t(0xf111));
+    VkPhysicalDeviceFeatures fill_features{};
+    VkPhysicalDeviceFeatures2 fill_features2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    fill.on_get_features(fill_physical, &fill_features);
+    fill.on_post_get_features2(fill_physical, &fill_features2, nullptr);
+    check(!fill_features.fillModeNonSolid && !fill_features2.features.fillModeNonSolid,
+          "Core 1.1 default queries retain an unsupported optional fillModeNonSolid bit");
+    fill_features.fillModeNonSolid = VK_TRUE;
+    fill.on_get_features(fill_physical, &fill_features);
+    check(fill_features.fillModeNonSolid, "native optional wireframe support remains queryable");
+    setenv("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID_FEATURE", "1", 1);
+    fill.on_post_get_features2(fill_physical, &fill_features2, nullptr);
+    check(fill_features2.features.fillModeNonSolid, "explicit legacy wireframe feature override is preserved");
+    unsetenv("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID_FEATURE");
+    setenv("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID", "1", 1);
+    fill_features.fillModeNonSolid = VK_FALSE;
+    fill.on_get_features(fill_physical, &fill_features);
+    check(fill_features.fillModeNonSolid, "explicit legacy polygon substitution retains its feature advertisement");
+    setenv("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID_FEATURE", "0", 1);
+    fill_features2.features.fillModeNonSolid = VK_FALSE;
+    fill.on_post_get_features2(fill_physical, &fill_features2, nullptr);
+    check(!fill_features2.features.fillModeNonSolid, "feature bypass takes precedence over legacy polygon forcing");
+    unsetenv("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID");
+    unsetenv("VULKAN_FIX_EMULATE_FILL_MODE_NON_SOLID_FEATURE");
     active = true;
     auto& manager = LayerManager::get();
     auto test_groups = [&] {
@@ -245,25 +338,27 @@ void run_core11_regressions(void (*check)(bool, const char*)) {
     VkCommandBuffer allocated{};
     check(manager.dispatch_allocate_command_buffers(device, &allocation, &allocated) == VK_SUCCESS && allocated == command,
           "1.1 routing: establish command-buffer ownership for native alias forwarding");
-    trims = masks = 0;
+    trims = core_trims = masks = 0;
     manager.dispatch_trim_command_pool(device, {}, 0);
     manager.dispatch_cmd_set_device_mask(command, 1);
-    check(trims == 1, "1.1 trim: native KHR alias is called exactly once through module and manager");
-    check(masks == 1, "1.1 device mask: native KHR alias is called exactly once through module and manager");
+    check(!trims && !core_trims, "1.1 trim: legacy no-op ignores both unenabled native spellings");
+    check(masks == 0, "1.1 device mask: singleton fallback never calls an alias from an unenabled native route");
     VkDeviceQueueInfo2 queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2};
     queue_info.queueFamilyIndex = 0;
     queue_info.queueIndex = 0;
     VkQueue queue = VK_NULL_HANDLE;
     queue2_calls = queue1_calls = 0;
     manager.dispatch_get_device_queue2(device, &queue_info, &queue);
-    check(queue == legacy_queue && queue2_calls == 1 && queue1_calls == 1,
-          "1.1 device queue2: a null flags==0 result falls back to vkGetDeviceQueue");
+    check(queue == legacy_queue && queue2_calls == 0 && queue1_calls == 1,
+          "1.1 device queue2: flags==0 uses the legacy query without calling an unenabled core stub");
     modern_queue = (VkQueue)(uintptr_t)0xc16002;
     queue = VK_NULL_HANDLE;
     queue2_calls = queue1_calls = 0;
     manager.dispatch_get_device_queue2(device, &queue_info, &queue);
-    check(queue == legacy_queue && queue2_calls == 1 && queue1_calls == 1,
-          "1.1 device queue2: a foreign flags==0 handle is normalized to vkGetDeviceQueue");
+    check(queue == legacy_queue && queue2_calls == 0 && queue1_calls == 1,
+          "1.1 device queue2: flags==0 never accepts a foreign handle from an unenabled core stub");
+    check(!manager.get_dispatch_table(device).GetDeviceQueue2,
+          "1.1 device queue2: a nonnull core stub does not enable a native route on Vulkan1.0");
     modern_queue = VK_NULL_HANDLE;
     VkBindBufferMemoryInfo bind_buffer_info{VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO};
     bind_buffer_info.buffer = (VkBuffer)(uintptr_t)0xc17001;
@@ -293,12 +388,11 @@ void run_core11_regressions(void (*check)(bool, const char*)) {
     bind_image_group.pSplitInstanceBindRegions = &split;
     bind_image_info.pNext = &bind_image_group;
     image_binds = 0;
-    check(manager.dispatch_bind_image_memory2(device, 1, &bind_image_info) ==
-              VK_ERROR_FEATURE_NOT_PRESENT && image_binds == 0,
-          "1.1 bind memory2: split image bind is rejected before any partial bind");
+    check(manager.dispatch_bind_image_memory2(device, 1, &bind_image_info) == VK_SUCCESS && image_binds == 1,
+          "1.1 bind memory2: a sole-device whole-image split becomes an ordinary binding");
     bind_image_info.pNext = nullptr;
     check(manager.dispatch_bind_image_memory2(device, 1, &bind_image_info) == VK_SUCCESS &&
-              image_binds == 1,
+              image_binds == 2,
           "1.1 bind memory2: plain image bind uses the legacy entry point");
     VkMemoryDedicatedRequirements dedicated{
         VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
@@ -331,6 +425,7 @@ void run_core11_regressions(void (*check)(bool, const char*)) {
               !image_dedicated.prefersDedicatedAllocation,
           "1.1 memory requirements2: image fallback preserves the legacy payload and clears absent dedicated support");
     native_reqs2 = true;
+    manager.init_device_dispatch_table(device, VK_API_VERSION_1_0, {VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME});
     VkMemoryRequirements2 repaired_buffer{
         VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
     manager.dispatch_get_buffer_memory_requirements2(device, &buffer_requirements_info,
@@ -346,6 +441,7 @@ void run_core11_regressions(void (*check)(bool, const char*)) {
               repaired_image.memoryRequirements.alignment == 128,
           "1.1 memory requirements2: a wrong native image result is repaired from the legacy query");
     native_reqs2 = false;
+    manager.init_device_dispatch_table(device);
     VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64, VK_SHADER_STAGE_COMPUTE_BIT};
     VkDescriptorSetLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layout_info.bindingCount = 1;
@@ -369,10 +465,30 @@ void run_core11_regressions(void (*check)(bool, const char*)) {
           "1.1 layout support: native rejection is reported without leaking or destroying a failed handle");
     layout_status = VK_SUCCESS;
     native_layout_query = true;
+    core_layout_calls = khr_layout_calls = 0;
     manager.dispatch_get_descriptor_set_layout_support(device, &layout_info, &support);
-    check(!support.supported && variable.maxVariableDescriptorCount == 37 && layout_creates == 2,
-          "1.1 layout support: native KHR query and variable limit take precedence over allocation fallback");
+    check(support.supported && variable.maxVariableDescriptorCount == 0 && layout_creates == 3 && !core_layout_calls && !khr_layout_calls,
+          "1.1 layout support: a newly exposed pointer cannot enable an unrequested native extension");
+    manager.init_device_dispatch_table(device, VK_API_VERSION_1_0, {VK_KHR_MAINTENANCE3_EXTENSION_NAME});
+    manager.dispatch_get_descriptor_set_layout_support(device, &layout_info, &support);
+    check(!support.supported && variable.maxVariableDescriptorCount == 37 && layout_creates == 3 &&
+          !core_layout_calls && khr_layout_calls == 1,
+          "1.1 layout support: authorized maintenance3 uses only KHR despite a nonnull core stub");
+    manager.init_device_dispatch_table(device, VK_API_VERSION_1_0, {VK_KHR_MAINTENANCE1_EXTENSION_NAME});
+    manager.dispatch_trim_command_pool(device, {}, 0);
+    check(trims == 1 && !core_trims, "1.1 trim: authorized maintenance1 uses only the KHR alias");
+    manager.init_device_dispatch_table(device, VK_API_VERSION_1_1);
+    manager.dispatch_get_descriptor_set_layout_support(device, &layout_info, &support);
+    manager.dispatch_trim_command_pool(device, {}, 0);
+    check(!support.supported && variable.maxVariableDescriptorCount == 73 && core_layout_calls == 1 &&
+          khr_layout_calls == 1 && core_trims == 1 && trims == 1,
+          "1.1 maintenance: native core routes take precedence without probing KHR fallbacks");
+    bool intercepted = true;
+    for (auto name : {"vkTrimCommandPool", "vkTrimCommandPoolKHR", "vkGetDescriptorSetLayoutSupport", "vkGetDescriptorSetLayoutSupportKHR"})
+        intercepted &= manager.should_intercept_device_proc(device, name);
+    check(intercepted, "1.1 maintenance: both public spellings retain the authorized dispatch table");
     native_layout_query = false;
+    manager.init_device_dispatch_table(device);
     VkPhysicalDeviceMultiviewFeatures multiview{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &multiview};
     manager.dispatch_get_physical_device_features2(physical, &features);
@@ -388,5 +504,65 @@ void run_core11_regressions(void (*check)(bool, const char*)) {
               extensions.size() == 1 && !strcmp(extensions[0], VK_KHR_MULTIVIEW_EXTENSION_NAME),
           "1.1 multiview: native multiview enablement survives device-group emulation");
     manager.dispatch_destroy_device(device, nullptr);
+    native_bind2 = true;
+    const char* bind_extension = VK_KHR_BIND_MEMORY_2_EXTENSION_NAME;
+    create_info.pNext = nullptr; create_info.enabledExtensionCount = 1; create_info.ppEnabledExtensionNames = &bind_extension;
+    // Native extension inventories are immutable per physical identity. Use
+    // the next enumerated GPU rather than changing the old cached inventory.
+    const auto bind_physical = (VkPhysicalDevice)(uintptr_t(physical)+1);
+    check(manager.dispatch_create_device(bind_physical,&create_info,nullptr,&created) == VK_SUCCESS,
+        "1.1 binding routes: create native KHR bind-memory2 independently of device-group support");
+    remote_index = 0; buffer_binds2 = image_binds2 = 0;
+    check(manager.dispatch_bind_buffer_memory2(device,1,&bind_buffer_info) == VK_SUCCESS && buffer_binds2 == 1 && bind_buffer_info.pNext == &bind_buffer_group,
+        "1.1 binding routes: singleton buffer input is normalized before the native KHR alias");
+    bind_image_info.pNext = &bind_image_group;
+    check(manager.dispatch_bind_image_memory2(device,1,&bind_image_info) == VK_SUCCESS && image_binds2 == 1 && native_bind_inputs_valid && bind_image_info.pNext == &bind_image_group,
+        "1.1 binding routes: singleton split input is normalized before the native KHR image alias");
+    VkBindBufferMemoryInfo two_buffers[] = {bind_buffer_info,bind_buffer_info}; two_buffers[0].pNext = nullptr; remote_index = 1;
+    check(manager.dispatch_bind_buffer_memory2(device,2,two_buffers) == VK_ERROR_FEATURE_NOT_PRESENT && buffer_binds2 == 1,
+        "1.1 binding routes: an unsupported later mapping prevents the entire native batch");
+    manager.dispatch_destroy_device(device,nullptr); native_bind2 = false;
+    native_queue_mode = true;
+    VkPhysicalDeviceProtectedMemoryFeatures protection{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES};
+    protection.protectedMemory = VK_TRUE;
+    float priority = 1;
+    VkDeviceQueueCreateInfo protected_queue{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    protected_queue.flags = VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT; protected_queue.queueCount = 1; protected_queue.pQueuePriorities = &priority;
+    VkDeviceCreateInfo protected_device{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    protected_device.pNext = &protection; protected_device.queueCreateInfoCount = 1; protected_device.pQueueCreateInfos = &protected_queue;
+    check(manager.dispatch_create_device((VkPhysicalDevice)(uintptr_t(physical)+4),&protected_device,nullptr,&created) == VK_SUCCESS && native_queue_ci_valid,
+          "1.1 device queue2: protected native queue creation preserves the requested feature and creation flags");
+    queue2_calls = queue1_calls = 0; modern_queue = (VkQueue)(uintptr_t)0xc16003;
+    queue_info.flags = VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT; queue = VK_NULL_HANDLE;
+    manager.dispatch_get_device_queue2(device,&queue_info,&queue);
+    check(queue == modern_queue && queue2_calls == 1 && !queue1_calls && queried_queue_flags == queue_info.flags &&
+              queried_queue_family == queue_info.queueFamilyIndex && queried_queue_index == queue_info.queueIndex &&
+              manager.get_device_for_queue(queue) == device,
+          "1.1 device queue2: protected queries use the enabled native core function with intact arguments and owner tracking");
+    modern_queue = VK_NULL_HANDLE; queue = legacy_queue;
+    manager.dispatch_get_device_queue2(device,&queue_info,&queue);
+    check(!queue && queue2_calls == 2 && !queue1_calls,
+          "1.1 device queue2: a native null protected result cannot invent an ordinary queue");
+    manager.dispatch_destroy_device(device,nullptr); native_queue_mode = false;
+    native_maintenance = native_layout_query = true;
+    const auto maintenance_instance = (VkInstance)(uintptr_t)0xc17007;
+    const auto maintenance_physical = (VkPhysicalDevice)(uintptr_t)0xc11007;
+    vkfix::remember_native_instance(maintenance_instance, VK_API_VERSION_1_0, VK_API_VERSION_1_0,
+                                   {VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME});
+    vkfix::remember_physical_devices(maintenance_instance, 1, &maintenance_physical);
+    const char* maintenance_name = VK_KHR_MAINTENANCE3_EXTENSION_NAME;
+    VkDeviceCreateInfo maintenance_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    maintenance_info.enabledExtensionCount = 1; maintenance_info.ppEnabledExtensionNames = &maintenance_name;
+    native_maintenance_ci_valid = true; core_layout_calls = khr_layout_calls = 0;
+    auto maintenance_status = manager.dispatch_create_device(maintenance_physical, &maintenance_info, nullptr, &created);
+    if (maintenance_status == VK_SUCCESS)
+        manager.dispatch_get_descriptor_set_layout_support(created, &layout_info, &support);
+    check(maintenance_status == VK_SUCCESS && native_maintenance_ci_valid &&
+          variable.maxVariableDescriptorCount == 37 && khr_layout_calls == 1 && !core_layout_calls &&
+          maintenance_info.ppEnabledExtensionNames == &maintenance_name && maintenance_info.enabledExtensionCount == 1,
+          "1.1 maintenance: actual creation preserves independent native maintenance3 without maintenance1 or core authorization");
+    if (maintenance_status == VK_SUCCESS) manager.dispatch_destroy_device(created, nullptr);
+    vkfix::forget_native_instance(maintenance_instance);
+    native_maintenance = native_layout_query = false;
     active = false;
 }

@@ -20,9 +20,9 @@
  * version.
  *
  * The pass pipeline is:
- *   1. drop debug instructions (optional, VULKAN_FIX_SPIRV_STRIP_DEBUG=1);
- *   2. drop OpCapability / OpExtension declarations from the strip set;
- *   3. lower the module version word;
+ *   1. lower unsupported buffer layouts and storage classes, retaining offsets;
+ *   2. drop optional debug instructions and configured declarations;
+ *   3. lower the module version word and restore required native extensions;
  *   4. validate with SPIRV-Tools (Vulkan environment of the target version).
  * If validation fails the original module is restored untouched, so a downgrade
  * can never turn a working shader into a broken one.

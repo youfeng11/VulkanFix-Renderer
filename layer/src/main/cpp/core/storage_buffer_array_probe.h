@@ -3,10 +3,15 @@
 #include "native_probe_resources.h"
 #include <cstdio>
 namespace vkfix::nativeprobe {
+struct StorageArrayReadback {
+    std::string error;
+    bool aggregate_store_lost = false;
+};
 template<class Context>
-std::string storage_buffer_array(Context& p, VkPhysicalDevice physical, uint32_t family,
+StorageArrayReadback storage_buffer_array(Context& p, VkPhysicalDevice physical, uint32_t family,
                                  const uint32_t* words, size_t word_count, bool specialized, bool dispatch_base=false,
-                                 const uint32_t* vertex_words=nullptr,size_t vertex_count=0) {
+                                 const uint32_t* vertex_words=nullptr,size_t vertex_count=0,
+                                 void (*ready)()=nullptr) {
     const bool graphics=vertex_words!=nullptr;
     const auto shader_stage=graphics?VK_SHADER_STAGE_FRAGMENT_BIT:VK_SHADER_STAGE_COMPUTE_BIT;
     vkfix::nativeprobe::Resources<Context> gpu(p, physical, family);
@@ -122,6 +127,7 @@ std::string storage_buffer_array(Context& p, VkPhysicalDevice physical, uint32_t
     auto destroy_pipeline=p.template dev<PFN_vkDestroyPipeline>("vkDestroyPipeline");
     gpu.objects.push_back([=,&p] { destroy_pipeline(p.device,pipeline,nullptr); });
     const auto cmd=gpu.begin();
+    if (ready) ready();
     const auto point=graphics?VK_PIPELINE_BIND_POINT_GRAPHICS:VK_PIPELINE_BIND_POINT_COMPUTE;
     if (graphics) {
         VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -138,14 +144,17 @@ std::string storage_buffer_array(Context& p, VkPhysicalDevice physical, uint32_t
     gpu.host_barrier(cmd,graphics?VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT:VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_ACCESS_SHADER_WRITE_BIT);
     gpu.submit(cmd); gpu.invalidate(a); gpu.invalidate(b); gpu.invalidate(c); gpu.invalidate(u);
     const uint32_t expected_a[4]{7,11,60,17}, expected_b[4]{7,dispatch_base?23u:22u,13,17};
-    if (memcmp(u.mapped,u_values,16) || memcmp(a.mapped,expected_a,16) || memcmp(b.mapped,expected_b,16) ||
-        memcmp(c.mapped,c_values,16)) {
+    const bool other_buffers_match = !memcmp(u.mapped,u_values,16) && !memcmp(a.mapped,expected_a,16) &&
+                                     !memcmp(b.mapped,expected_b,16);
+    if (!other_buffers_match || memcmp(c.mapped,c_values,16)) {
         const auto av=static_cast<const uint32_t*>(a.mapped), bv=static_cast<const uint32_t*>(b.mapped);
         const auto cv=static_cast<const uint32_t*>(c.mapped), uv=static_cast<const uint32_t*>(u.mapped);
         char detail[300];
         std::snprintf(detail,sizeof detail,"readback mismatch A=(%u,%u,%u,%u), B=(%u,%u,%u,%u), C=(%u,%u,%u,%u), U=(%u,%u,%u,%u)",
             av[0],av[1],av[2],av[3],bv[0],bv[1],bv[2],bv[3],cv[0],cv[1],cv[2],cv[3],uv[0],uv[1],uv[2],uv[3]);
-        return detail;
+        const bool store_lost = specialized && other_buffers_match && cv[0] == 0 &&
+                                !memcmp(cv + 1, c_values + 1, 3 * sizeof(uint32_t));
+        return {detail, store_lost};
     }
     return {};
 }

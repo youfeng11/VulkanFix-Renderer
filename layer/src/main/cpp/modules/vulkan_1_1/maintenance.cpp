@@ -2,6 +2,7 @@
 #include "layer_manager.h"
 #include "driver_loader.h"
 #include "vk_pnext.h"
+#include "native_instance_state.h"
 
 REGISTER_LAYER_MODULE(MaintenanceModule);
 
@@ -34,6 +35,14 @@ void MaintenanceModule::on_enumerate_device_extensions(
     }
 }
 
+void MaintenanceModule::on_pre_create_device(VkPhysicalDevice physical, VkDeviceCreateInfo* info,
+    VkPhysicalDeviceFeatures* features, std::vector<const char*>& extensions, void*& data) {
+    data = nullptr;
+    if (!is_phys_device_native(physical)) vku::strip_extension(extensions, VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+    // maintenance1 capability says nothing about independent maintenance2/3.
+    on_pre_create_device_custom(physical, info, features, extensions, data);
+}
+
 void MaintenanceModule::on_pre_create_device_custom(
     VkPhysicalDevice physicalDevice,
     VkDeviceCreateInfo* pCreateInfo,
@@ -41,9 +50,30 @@ void MaintenanceModule::on_pre_create_device_custom(
     std::vector<const char*>& enabledExtensions,
     void*& pUserData
 ) {
+    bool requested = false;
+    for (auto extension : enabledExtensions)
+        requested |= !strcmp(extension, VK_KHR_MAINTENANCE2_EXTENSION_NAME) || !strcmp(extension, VK_KHR_MAINTENANCE3_EXTENSION_NAME);
+    if (!requested) return;
+    auto instance = vkfix::native_instance_for_physical(physicalDevice);
+    if (!instance) instance = get_last_instance();
+    auto enumerate = (PFN_vkEnumerateDeviceExtensionProperties)get_real_proc(instance, VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties");
+    std::vector<VkExtensionProperties> native;
+    if (enumerate) {
+        VkResult result = VK_INCOMPLETE;
+        for (unsigned retry = 0; retry < 8 && result == VK_INCOMPLETE; ++retry) {
+            uint32_t count = 0;
+            result = enumerate(physicalDevice, nullptr, &count, nullptr);
+            if (result != VK_SUCCESS) return;
+            native.resize(count);
+            result = count ? enumerate(physicalDevice, nullptr, &count, native.data()) : VK_SUCCESS;
+            if (result == VK_SUCCESS) native.resize(count);
+        }
+        // Preserve requests so the central native enumeration reports errors.
+        if (result != VK_SUCCESS) return;
+    }
     for (auto it = enabledExtensions.begin(); it != enabledExtensions.end();) {
-        if (strcmp(*it, VK_KHR_MAINTENANCE2_EXTENSION_NAME) == 0 ||
-            strcmp(*it, VK_KHR_MAINTENANCE3_EXTENSION_NAME) == 0) {
+        if ((!strcmp(*it, VK_KHR_MAINTENANCE2_EXTENSION_NAME) ||
+             !strcmp(*it, VK_KHR_MAINTENANCE3_EXTENSION_NAME)) && !vku::has_extension(native, *it)) {
             it = enabledExtensions.erase(it);
         } else {
             ++it;
@@ -60,20 +90,7 @@ bool MaintenanceModule::on_get_descriptor_set_layout_support(
     const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
     VkDescriptorSetLayoutSupport* pSupport
 ) {
-    if (is_device_native(device)) return false;
-
-    PFN_vkGetDescriptorSetLayoutSupport real_fn =
-        (PFN_vkGetDescriptorSetLayoutSupport) get_real_proc(get_last_instance(), device, "vkGetDescriptorSetLayoutSupport");
-    if (!real_fn) {
-        real_fn = (PFN_vkGetDescriptorSetLayoutSupport) get_real_proc(get_last_instance(), device, "vkGetDescriptorSetLayoutSupportKHR");
-    }
-    if (real_fn) {
-        real_fn(device, pCreateInfo, pSupport);
-        return true;
-    }
-
-    // The central fallback tests actual native layout creation. Do not invent
-    // support (or a variable-descriptor limit) when maintenance3 is absent.
+    // The manager owns authorized Core/KHR selection and the creation fallback.
     return false;
 }
 
@@ -82,16 +99,6 @@ bool MaintenanceModule::on_trim_command_pool(
     VkCommandPool commandPool,
     VkCommandPoolTrimFlags flags
 ) {
-    if (is_device_native(device)) return false;
-
-    PFN_vkTrimCommandPool real_fn =
-        (PFN_vkTrimCommandPool) get_real_proc(get_last_instance(), device, "vkTrimCommandPool");
-    if (!real_fn) {
-        real_fn = (PFN_vkTrimCommandPool) get_real_proc(get_last_instance(), device, "vkTrimCommandPoolKHR");
-    }
-    if (real_fn) {
-        real_fn(device, commandPool, flags);
-    }
-    // Trimming is permitted to be a no-op; it must not reset any buffers.
-    return true;
+    // The manager performs the enabled native operation or a permitted no-op.
+    return false;
 }

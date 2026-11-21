@@ -119,6 +119,9 @@ android {
 
     packaging {
         jniLibs {
+            // Manually built diagnostic fixtures may share AGP's native output
+            // directory. They are test providers, never application payloads.
+            excludes += "**/libdriver_*.so"
             useLegacyPackaging = true
         }
     }

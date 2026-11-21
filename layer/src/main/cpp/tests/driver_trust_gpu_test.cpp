@@ -1,4 +1,6 @@
 #include "core/driver_trust.h"
+#include "core/driver_probe_process.h"
+#include "core/driver_trust_shaders.h"
 #include <cstdio>
 #include <dlfcn.h>
 #include <cstring>
@@ -16,21 +18,47 @@ int main(int argc,char **argv) {
     auto enumerate=reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(instance,"vkEnumeratePhysicalDevices"));
     uint32_t count=1; VkPhysicalDevice physical{};
     if (!enumerate || enumerate(instance,&count,&physical)!=VK_SUCCESS || count!=1) return 1;
-    const auto first=vkfix::native_driver_trust(instance,physical,gipa);
-    const auto second=vkfix::native_driver_trust(instance,physical,gipa);
-    std::printf("sampler_aliases=%s repair=%u repeat=%s detail=%s\n",vkfix::driver_probe_verdict_name(first.sampler_aliases.verdict),
-        unsigned(vkfix::use_measured_repair(first.sampler_aliases,nullptr)),vkfix::driver_probe_verdict_name(second.sampler_aliases.verdict),first.sampler_aliases.detail.c_str());
-    std::printf("large_uniform=%s repair=%u repeat=%s detail=%s\n",vkfix::driver_probe_verdict_name(first.large_uniform.verdict),
-        unsigned(vkfix::use_measured_repair(first.large_uniform,nullptr)),vkfix::driver_probe_verdict_name(second.large_uniform.verdict),first.large_uniform.detail.c_str());
-    std::printf("push_descriptor=%s repair=%u repeat=%s detail=%s\n",vkfix::driver_probe_verdict_name(first.push_descriptor.verdict),
-        unsigned(vkfix::use_measured_repair(first.push_descriptor,nullptr)),vkfix::driver_probe_verdict_name(second.push_descriptor.verdict),first.push_descriptor.detail.c_str());
-    std::printf("tiler_budget=%s guard=%u repeat=%s detail=%s\n",vkfix::driver_probe_verdict_name(first.tiler_budget.verdict),
-        unsigned(vkfix::use_bounded_tiler_guard(first.tiler_budget,nullptr)),
-        vkfix::driver_probe_verdict_name(second.tiler_budget.verdict),first.tiler_budget.detail.c_str());
+    if (argc>2 && (!std::strcmp(argv[2],"--push-only") || !std::strcmp(argv[2],"--identity"))) {
+        VkPhysicalDeviceProperties properties{};
+        auto query=reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(gipa(instance,"vkGetPhysicalDeviceProperties"));
+        if (!query) return 1;
+        query(physical,&properties);
+        if (!std::strcmp(argv[2],"--identity")) {
+            std::puts(vkfix::driver_probe_identity(properties,vkfix::nativeprobe::revision).c_str());
+            return 0;
+        }
+        const auto result=vkfix::isolated_push_descriptor_probe(properties,vkfix::nativeprobe::revision);
+        const auto verdict=vkfix::driver_probe_verdict_name(result.verdict);
+        std::printf("push_descriptor=%s detail=%s\n",verdict,result.detail.c_str());
+        return argc>3 && std::strcmp(argv[3],verdict) ? 3 : 0;
+    }
+    using vkfix::DriverProbe;
+    const vkfix::NativeDriverProbes probes(instance, physical, gipa);
+    if (argc > 2 && !std::strcmp(argv[2], "--queue2-only")) {
+        const auto result = probes.measure(DriverProbe::Queue2);
+        const auto verdict = vkfix::driver_probe_verdict_name(result.verdict);
+        std::printf("queue2=%s detail=%s\n", verdict, result.detail.c_str());
+        return argc > 3 && std::strcmp(argv[3], verdict) ? 3 : 0;
+    }
+    auto report = [&](const char *name, DriverProbe probe, const char *policy_name = nullptr,
+                      bool (*policy)(const vkfix::DriverProbeAssessment &, const char *) = nullptr) {
+        const auto first = probes.measure(probe);
+        const auto second = probes.measure(probe);
+        std::printf("%s=%s", name, vkfix::driver_probe_verdict_name(first.verdict));
+        if (policy) std::printf(" %s=%u", policy_name, unsigned(policy(first, nullptr)));
+        std::printf(" repeat=%s detail=%s\n",
+                    vkfix::driver_probe_verdict_name(second.verdict), first.detail.c_str());
+        return first.verdict;
+    };
+    const auto sampler = report("sampler_aliases", DriverProbe::SamplerAliases, "repair", vkfix::use_measured_repair);
+    const auto uniform = report("large_uniform", DriverProbe::LargeUniform, "repair", vkfix::use_measured_repair);
+    const auto push = report("push_descriptor", DriverProbe::PushDescriptor, "repair", vkfix::use_measured_repair);
+    const auto tiler = report("tiler_budget", DriverProbe::TilerBudget, "guard", vkfix::use_bounded_tiler_guard);
+    report("msaa_array_resolve", DriverProbe::MsaaArrayResolve);
     // The native probe may deliberately retain in-flight objects on timeout.
     // This executable is disposable; leave its instance alive until exit.
-    if (argc>2 && std::strcmp(argv[2],vkfix::driver_probe_verdict_name(first.push_descriptor.verdict))) return 3;
-    if (argc>3 && std::strcmp(argv[3],vkfix::driver_probe_verdict_name(first.tiler_budget.verdict))) return 4;
-    return first.sampler_aliases.verdict==vkfix::DriverProbeVerdict::Inconclusive ||
-           first.large_uniform.verdict==vkfix::DriverProbeVerdict::Inconclusive ? 2 : 0;
+    if (argc>2 && std::strcmp(argv[2],vkfix::driver_probe_verdict_name(push))) return 3;
+    if (argc>3 && std::strcmp(argv[3],vkfix::driver_probe_verdict_name(tiler))) return 4;
+    return sampler==vkfix::DriverProbeVerdict::Inconclusive ||
+           uniform==vkfix::DriverProbeVerdict::Inconclusive ? 2 : 0;
 }

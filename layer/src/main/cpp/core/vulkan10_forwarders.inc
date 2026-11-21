@@ -76,11 +76,16 @@ VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer, u
         return [=](VkCommandBuffer target, uint32_t) {
             if (!fn) return VK_ERROR_INITIALIZATION_FAILED;
             TBDRBarrierOptimizer::get().on_cmd_action(target);
-            fn(target, firstScissor, scissorCount, owned.data()); return VK_SUCCESS;
+            fn(target, firstScissor, scissorCount, owned.data());
+            vkfix::DiscardStateRepair::get().scissor(device, target, firstScissor, scissorCount, owned.data());
+            return VK_SUCCESS;
         };
     })) return;
     TBDRBarrierOptimizer::get().on_cmd_action(commandBuffer);
-    if (fn) fn(commandBuffer, firstScissor, scissorCount, pScissors);
+    if (fn) {
+        fn(commandBuffer, firstScissor, scissorCount, pScissors);
+        vkfix::DiscardStateRepair::get().scissor(device, commandBuffer, firstScissor, scissorCount, pScissors);
+    }
 }
 
 VK_LAYER_EXPORT void VKAPI_CALL vkCmdSetStencilCompareMask(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask, uint32_t compareMask) {

@@ -75,9 +75,9 @@ void run(Context& p, VkPhysicalDevice physical, uint32_t family, bool grouped, b
     }
     if (!tools.Assemble(text,&words) || !tools.Validate(words))
         throw std::runtime_error("invalid storage fixture");
-    const auto error=vkfix::nativeprobe::storage_buffer_array(p,physical,family,words.data(),words.size(),specialized,dispatch_base,
+    const auto result=vkfix::nativeprobe::storage_buffer_array(p,physical,family,words.data(),words.size(),specialized,dispatch_base,
         graphics?vertex.data():nullptr,vertex.size());
-    if (!error.empty()) throw std::runtime_error(error);
+    if (!result.error.empty()) throw std::runtime_error(result.error);
     printf("PASS: grouped=%u extension-SPIR-V-1.0=%u specialized-array=%u memory-access=%u indexing-disabled=%u dispatch-base=%u graphics=%u UBO unchanged, SSBO copies/array/atomics matched\n",
         grouped,extension,specialized&&(!static_access||deferred),memory_access,static_access,dispatch_base,graphics);
 }

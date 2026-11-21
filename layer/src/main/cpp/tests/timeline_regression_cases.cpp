@@ -28,11 +28,23 @@ static VKAPI_ATTR VkResult VKAPI_CALL submit2(VkQueue, uint32_t, const VkSubmitI
     return VK_SUCCESS;
 }
 class NativeSynchronization2 : public Synchronization2Module {
+public:
+    void measured_route(VkPhysicalDevice physical, VkDevice device, bool submit, bool reset) {
+        const uintptr_t routes = (submit ? LegacySubmit : 0) | (reset ? LegacyReset : 0);
+        on_post_create_device(physical, device, VK_SUCCESS, reinterpret_cast<void *>(routes));
+    }
+private:
     bool is_device_native(VkDevice) override {
         return true;
     }
 };
 bool creation_chain_clean = false;
+bool active_timeline = false;
+static VKAPI_ATTR VkResult VKAPI_CALL extensions(VkPhysicalDevice, const char*, uint32_t* count, VkExtensionProperties* out) {
+    if (!out) { *count = 1; return VK_SUCCESS; }
+    if (!*count) return VK_INCOMPLETE;
+    *out = {}; strcpy(out->extensionName,VK_KHR_MAINTENANCE1_EXTENSION_NAME); out->specVersion = 1; *count = 1; return VK_SUCCESS;
+}
 bool last_export_missing = false;
 VkSemaphore created_semaphore = (VkSemaphore)0x7788;
 uintptr_t next_device = 0x5000;
@@ -146,6 +158,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL create_semaphore(VkDevice, const VkSemapho
 }
 } // namespace
 void *timeline_mock_proc(const char *name) {
+    if (active_timeline && !strcmp(name,"vkEnumerateDeviceExtensionProperties")) return (void*)extensions;
     if (!strcmp(name, "vkCreateDevice"))
         return (void *)create_device;
     if (!strcmp(name, "vkGetDeviceQueue"))
@@ -170,6 +183,7 @@ void *timeline_mock_proc(const char *name) {
     return nullptr;
 }
 void run_timeline_regressions(void (*check)(bool, const char *)) {
+    active_timeline = true;
     auto &manager = LayerManager::get();
     auto owned = std::make_unique<TimelineSemaphoreModule>();
     auto &module = *owned;
@@ -177,6 +191,10 @@ void run_timeline_regressions(void (*check)(bool, const char *)) {
     setenv("VULKAN_FIX_DISABLE_PIPELINE_CACHE", "1", 1);
     VkDevice a{}, b{}, c{};
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    // Timeline native-route checks require no unrelated attachment replay.
+    // Keep the legacy device API but explicitly enable its native M1 backend.
+    const char* native_m1 = VK_KHR_MAINTENANCE1_EXTENSION_NAME;
+    dci.enabledExtensionCount = 1; dci.ppEnabledExtensionNames = &native_m1;
     auto physical = (VkPhysicalDevice)(uintptr_t)0x123;
     check(manager.dispatch_create_device(physical, &dci, nullptr, &a) == VK_SUCCESS &&
               manager.dispatch_create_device(physical, &dci, nullptr, &b) == VK_SUCCESS &&
@@ -332,7 +350,9 @@ void run_timeline_regressions(void (*check)(bool, const char *)) {
     check(value(a, other) == 8,
           "resetting the application fence cannot hide a completed timeline signal");
 
-    manager.register_module(std::make_unique<NativeSynchronization2>());
+    auto sync2_module = std::make_unique<NativeSynchronization2>();
+    auto &sync2 = *sync2_module;
+    manager.register_module(std::move(sync2_module));
     manager.update_device_bypass_flags(a);
     check(manager.should_intercept_device_proc(a, "vkQueueSubmit2") &&
               manager.should_intercept_device_proc(a, "vkQueueSubmit2KHR"),
@@ -355,6 +375,54 @@ void run_timeline_regressions(void (*check)(bool, const char *)) {
     check(manager.dispatch_queue_submit2(a1, 1, &info2, VK_NULL_HANDLE) == VK_SUCCESS &&
               native_submit2_calls == submit2_before + 1,
           "native-only synchronization2 submissions retain the direct driver path");
+
+    // Install the state a positive submit2 diagnosis passes to post-create.
+    setenv("VULKAN_FIX_EMULATE_SYNCHRONIZATION2", "0", 1);
+    const auto measured_physical = reinterpret_cast<VkPhysicalDevice>(0x9a03);
+    sync2.measured_route(measured_physical, b, true, false);
+    unsetenv("VULKAN_FIX_EMULATE_SYNCHRONIZATION2");
+    manager.update_device_bypass_flags(b);
+    check(manager.should_intercept_device_proc(b, "vkQueueSubmit2") &&
+              manager.should_intercept_device_proc(b, "vkQueueSubmit2KHR") &&
+              !manager.should_intercept_device_proc(b, "vkCmdResetEvent2KHR"),
+          "submit2 defect intercepts both submit entry points and leaves event dispatch native");
+    before = native_submits;
+    submit2_before = native_submit2_calls;
+    signal2.value = 42; // Ignored for binary semaphores.
+    check(manager.dispatch_queue_submit2(b0, 1, &info2, VK_NULL_HANDLE) == VK_SUCCESS &&
+              native_submits == before + 1 && native_submit2_calls == submit2_before &&
+              snapshots.back().signals == std::vector<VkSemaphore>{signal2.semaphore} &&
+              snapshots.back().signal_values.empty(),
+          "measured submit2 route forwards whole-scope binary signaling through legacy submit");
+    VkSubmitInfo2 pair[]{info2, info2};
+    auto early_signal = signal2;
+    early_signal.semaphore = (VkSemaphore)0x9001;
+    early_signal.stageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    pair[1].pSignalSemaphoreInfos = &early_signal;
+    before = native_submits;
+    check(manager.dispatch_queue_submit2(b0, 2, pair, VK_NULL_HANDLE) == VK_SUCCESS &&
+              native_submits == before && native_submit2_calls == submit2_before + 1,
+          "one split-scope signal keeps the entire submit2 batch native");
+    VkCommandBufferSubmitInfo mask{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    mask.deviceMask = 2;
+    early_signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    pair[1].commandBufferInfoCount = 1;
+    pair[1].pCommandBufferInfos = &mask;
+    check(manager.dispatch_queue_submit2(b0, 2, pair, VK_NULL_HANDLE) == VK_SUCCESS &&
+              native_submits == before && native_submit2_calls == submit2_before + 2,
+          "a non-singleton command buffer mask retains the native submit2 route");
+    sync2.on_destroy_device(b);
+
+    sync2.measured_route(measured_physical, b, false, true);
+    manager.update_device_bypass_flags(b);
+    check(manager.should_intercept_device_proc(b, "vkCmdResetEvent2") &&
+              manager.should_intercept_device_proc(b, "vkCmdResetEvent2KHR") &&
+              !manager.should_intercept_device_proc(b, "vkCmdSetEvent2") &&
+              !manager.should_intercept_device_proc(b, "vkCmdWaitEvents2KHR"),
+          "measured event reset intercepts both reset aliases and preserves native set and wait");
+    check(!sync2.prefers_legacy_submit(b), "reset and submit repair decisions are independent");
+    sync2.on_destroy_device(b);
+    check(!sync2.prefers_legacy_reset(b), "destroying the device clears the measured reset route");
     VkSemaphore csem = (VkSemaphore)0x300;
     add(c, csem, 0);
     create_fence_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -420,6 +488,38 @@ void run_timeline_regressions(void (*check)(bool, const char *)) {
               VK_ERROR_INITIALIZATION_FAILED,
           "cyclic input chains are rejected without mutation");
     type_info.pNext = nullptr;
+    VkPipelineCreationFeedback feedback{};
+    VkPipelineCreationFeedbackCreateInfo feedback_info{VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO};
+    feedback_info.pPipelineCreationFeedback = &feedback;
+    VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    rendering.pNext = &feedback_info;
+    rendering.viewMask = 8;
+    check(copy.copy(&rendering, vkfix::InputChainKind::GraphicsPipeline, false,
+              VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO) == VK_SUCCESS &&
+              copy.head() && copy.head() != &feedback_info &&
+              static_cast<VkPipelineCreationFeedbackCreateInfo*>(copy.head())->pPipelineCreationFeedback == &feedback &&
+              !static_cast<VkPipelineCreationFeedbackCreateInfo*>(copy.head())->pNext &&
+              rendering.pNext == &feedback_info && !feedback_info.pNext,
+          "graphics normalization privately removes rendering state and preserves feedback outputs and caller links");
+    VkCommandBufferInheritanceConditionalRenderingInfoEXT conditional{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_CONDITIONAL_RENDERING_INFO_EXT};
+    conditional.conditionalRenderingEnable = VK_TRUE;
+    VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+    VkCommandBufferInheritanceRenderingInfo inherited{VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO};
+    inherited.pNext = &conditional; inherited.viewMask = 8;
+    inherited.colorAttachmentCount = 1; inherited.pColorAttachmentFormats = &format;
+    const auto inheritance_result = copy.copy(&inherited, vkfix::InputChainKind::CommandInheritance);
+    const auto* owned_inherited = static_cast<const VkCommandBufferInheritanceRenderingInfo*>(copy.head());
+    check(inheritance_result == VK_SUCCESS && owned_inherited && owned_inherited != &inherited &&
+              owned_inherited->viewMask == 8 && owned_inherited->pColorAttachmentFormats == &format &&
+              owned_inherited->pColorAttachmentFormats[0] == VK_FORMAT_R8G8B8A8_UNORM &&
+              owned_inherited->pNext && owned_inherited->pNext != &conditional &&
+              static_cast<const VkCommandBufferInheritanceConditionalRenderingInfoEXT*>(owned_inherited->pNext)->conditionalRenderingEnable &&
+              inherited.pNext == &conditional && !conditional.pNext,
+          "immediate secondary normalization owns typed nodes and preserves formats and caller links");
+    check(copy.copy(&inherited, vkfix::InputChainKind::CommandInheritance, true) == VK_ERROR_EXTENSION_NOT_PRESENT &&
+              !copy.head() && inherited.pNext == &conditional && format == VK_FORMAT_R8G8B8A8_UNORM,
+          "immediate-only inheritance payloads reject asynchronous borrowing");
     module.on_device_wait_idle(a);
     const auto destroyed_before = destroyed_fences;
     manager.dispatch_destroy_device(a, nullptr);
@@ -431,4 +531,5 @@ void run_timeline_regressions(void (*check)(bool, const char *)) {
     module.on_device_wait_idle(c);
     manager.dispatch_destroy_device(c, nullptr);
     destroy_fence(a, app_fence, nullptr);
+    active_timeline = false;
 }

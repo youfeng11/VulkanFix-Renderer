@@ -67,11 +67,23 @@ def generate(root):
                 replay_args = replay_args.replace("pScissors", "owned.data()")
             lines.extend(["        return [=](VkCommandBuffer target, uint32_t) {",
                           "            if (!fn) return VK_ERROR_INITIALIZATION_FAILED;",
-                          "            TBDRBarrierOptimizer::get().on_cmd_action(target);",
-                          f"            fn({replay_args}); return VK_SUCCESS;", "        };", "    })) return;",
+                          "            TBDRBarrierOptimizer::get().on_cmd_action(target);"])
+            if name == "vkCmdSetScissor":
+                lines.extend([f"            fn({replay_args});",
+                              "            vkfix::DiscardStateRepair::get().scissor(device, target, firstScissor, scissorCount, owned.data());",
+                              "            return VK_SUCCESS;"])
+            else:
+                lines.append(f"            fn({replay_args}); return VK_SUCCESS;")
+            lines.extend(["        };", "    })) return;",
                           f"    TBDRBarrierOptimizer::get().on_cmd_action({dispatch_name});"])
         if result == "void":
-            lines.append(f"    if (fn) fn({args});")
+            if name == "vkCmdSetScissor":
+                lines.extend(["    if (fn) {",
+                              f"        fn({args});",
+                              "        vkfix::DiscardStateRepair::get().scissor(device, commandBuffer, firstScissor, scissorCount, pScissors);",
+                              "    }"])
+            else:
+                lines.append(f"    if (fn) fn({args});")
         elif result == "VkResult":
             lines.append(f"    return fn ? fn({args}) : VK_ERROR_INITIALIZATION_FAILED;")
         else:

@@ -14,5 +14,6 @@ enum NativeSpirvExtension : uint32_t {
     NativeVulkanMemoryModel = 1u << 6,
     NativeRelaxedBlockLayout = 1u << 7,
     NativeInputAttachmentAspects = 1u << 8,
+    NativeMaintenance1 = 1u << 9,
 };
 }
